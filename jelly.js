@@ -10,6 +10,7 @@
 import Matter from 'https://esm.sh/matter-js';
 import { JELLY_CONFIG, PHYSICS } from '/sobosuba/constants.js';
 import { createSoftBodyJelly } from '/sobosuba/softbody.js';
+import { playSoundCollide, playSoundMerge } from '/sobosuba/sound.js';
 
 const Composite = Matter.Composite;
 const Body = Matter.Body;
@@ -21,6 +22,10 @@ const Body = Matter.Body;
 // 同じメモリ番地の配列を使い回すことでガベージコレクションの発生を抑えます。
 const compositesToRemove = [];
 const compositesToAdd = [];
+
+// ★追加: 接触即合体を防ぐためのディレイキューと待機時間
+const pendingMerges = [];
+const MERGE_DELAY_MS = 60; // 接触から合体実行までの猶予時間（約3〜4フレーム）
 
 /**
  * 衝突イベントを処理し、同じ数字のソフトボディ同士を合体キューに入れる
@@ -35,6 +40,23 @@ export function handleCollisions(event) {
         const bodyA = pairs[i].bodyA;
         const bodyB = pairs[i].bodyB;
         
+        // --- 衝突音の判定と再生 ---
+        // コアまたはパーティクル同士の衝突の場合、相対速度を計算して音を鳴らす
+        if ((bodyA.label === 'jelly_core' || bodyA.label === 'jelly_particle') &&
+            (bodyB.label === 'jelly_core' || bodyB.label === 'jelly_particle')) {
+            
+            const relVelX = bodyA.velocity.x - bodyB.velocity.x;
+            const relVelY = bodyA.velocity.y - bodyB.velocity.y;
+            const relSpeed = Math.sqrt(relVelX * relVelX + relVelY * relVelY);
+            
+            // 一定以上の強さでぶつかった場合のみ接触音を鳴らす
+            if (relSpeed > 1.5) {
+                const intensity = Math.min(1.0, relSpeed / 10);
+                playSoundCollide(intensity);
+            }
+        }
+
+        // --- 合体判定 ---
         // 双方ともにゼリーの構成要素（コアまたはパーティクル）であるか確認
         if (bodyA.jellyId && bodyB.jellyId) {
             // 異なるゼリー同士であり、かつ数字が同じである場合
@@ -46,20 +68,22 @@ export function handleCollisions(event) {
                 if (!compA.isMerging && !compB.isMerging) {
                     
                     // GRAVITY規格: 同一フレーム内での多重発火の即時遮断（排他ロック）
-                    // コンポジット全体に合体中フラグを立てる
                     compA.isMerging = true;
                     compB.isMerging = true;
                     
-                    // 削除キューへ追加
-                    compositesToRemove.push(compA, compB);
-                    
-                    // 2つの接触した部分（剛体）のちょうど中間地点に新しいゼリーを生成する
                     const midX = (bodyA.position.x + bodyB.position.x) / 2;
                     const midY = (bodyA.position.y + bodyB.position.y) / 2;
                     const newValue = bodyA.jellyValue * 2;
                     
-                    // 生成キューへ追加
-                    compositesToAdd.push({ x: midX, y: midY, value: newValue });
+                    // ★修正: 即時合体させず、ディレイキューに保留する
+                    pendingMerges.push({
+                        compA: compA,
+                        compB: compB,
+                        x: midX,
+                        y: midY,
+                        value: newValue,
+                        executeTime: Date.now() + MERGE_DELAY_MS
+                    });
                     
                     // スコアを加算
                     earnedScore += newValue;
@@ -76,7 +100,19 @@ export function handleCollisions(event) {
  * @param {Matter.World} world - 現在の物理世界
  */
 export function handleMerges(world) {
-    // 削除処理
+    const now = Date.now();
+
+    // 1. ディレイキューをチェックし、猶予時間が経過したものを実行キューへ移す
+    for (let i = pendingMerges.length - 1; i >= 0; i--) {
+        const pm = pendingMerges[i];
+        if (now >= pm.executeTime) {
+            compositesToRemove.push(pm.compA, pm.compB);
+            compositesToAdd.push({ x: pm.x, y: pm.y, value: pm.value });
+            pendingMerges.splice(i, 1);
+        }
+    }
+
+    // 2. 削除処理
     if (compositesToRemove.length > 0) {
         for (let i = 0; i < compositesToRemove.length; i++) {
             // コンポジット（ソフトボディ全体）を物理世界から安全に除去
@@ -86,7 +122,7 @@ export function handleMerges(world) {
         compositesToRemove.length = 0; 
     }
     
-    // 追加（合体後の成長）処理
+    // 3. 追加（合体後の成長）処理
     if (compositesToAdd.length > 0) {
         for (let i = 0; i < compositesToAdd.length; i++) {
             const data = compositesToAdd[i];
@@ -97,6 +133,9 @@ export function handleMerges(world) {
             // ※スリングショットの初速は合体時には不要なため null を渡す
             const newJellyComposite = createSoftBodyJelly(data.x, data.y, val, null);
             Composite.add(world, newJellyComposite);
+
+            // ★サウンド連携: 合体音を再生する
+            playSoundMerge();
 
             // ==========================================
             // 連鎖合体（Radial Force）の発生

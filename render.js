@@ -7,7 +7,7 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, JELLY_CONFIG, DROP_Y } from '/sobosuba/constants.js';
+import { GAME_WIDTH, GAME_HEIGHT, JELLY_CONFIG, DROP_Y, EFFECTS } from '/sobosuba/constants.js';
 
 /**
  * 毎フレーム呼ばれるメインの描画処理
@@ -57,6 +57,17 @@ export function renderGame(ctx, world, gameState, bumperState) {
             ctx.arc(gameState.dropX, DROP_Y, config.radius, 0, 2 * Math.PI);
             ctx.fillStyle = config.color;
             ctx.fill();
+            
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#000000';
+            ctx.stroke();
+
+            ctx.fillStyle = config.text;
+            ctx.font = `900 ${Math.max(14, config.radius * 0.6)}px "Courier New", Courier, monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(gameState.nextValue, gameState.dropX, DROP_Y);
+
             ctx.globalAlpha = 1.0;
             
         } else {
@@ -76,6 +87,17 @@ export function renderGame(ctx, world, gameState, bumperState) {
             ctx.arc(gameState.dropX, DROP_Y, config.radius, 0, 2 * Math.PI);
             ctx.fillStyle = config.color;
             ctx.fill();
+
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#000000';
+            ctx.stroke();
+
+            ctx.fillStyle = config.text;
+            ctx.font = `900 ${Math.max(14, config.radius * 0.6)}px "Courier New", Courier, monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(gameState.nextValue, gameState.dropX, DROP_Y);
+
             ctx.globalAlpha = 1.0;
         }
     }
@@ -85,8 +107,8 @@ export function renderGame(ctx, world, gameState, bumperState) {
         if (!bumper) return;
         
         // 押し込まれている(ON)場合は赤く発光、通常は暗いグレー
-        ctx.fillStyle = isPressed ? '#ff4757' : '#2f3542';
-        ctx.shadowColor = isPressed ? '#ff4757' : 'transparent';
+        ctx.fillStyle = isPressed ? '#ff1e46' : '#2f3542';
+        ctx.shadowColor = isPressed ? '#ff1e46' : 'transparent';
         ctx.shadowBlur = isPressed ? 15 : 0;
         
         ctx.beginPath();
@@ -108,6 +130,7 @@ export function renderGame(ctx, world, gameState, bumperState) {
 
     // 4. ソフトボディ（スライム）の描画
     const composites = Matter.Composite.allComposites(world);
+    const durationMs = EFFECTS.MERGE_EXPAND_FRAMES * (1000 / 60); // 膨張アニメーションの想定持続時間
     
     for (let i = 0; i < composites.length; i++) {
         const comp = composites[i];
@@ -128,6 +151,23 @@ export function renderGame(ctx, world, gameState, bumperState) {
 
             const config = JELLY_CONFIG[core.jellyValue] || JELLY_CONFIG[8192];
 
+            ctx.save();
+            
+            // --- 膨張アニメーションスケールの計算と適用 ---
+            let scale = 1.0;
+            if (core.createdAt) {
+                const elapsedMs = Date.now() - core.createdAt;
+                if (elapsedMs < durationMs) {
+                    const progress = elapsedMs / durationMs;
+                    // 0〜1の進行度からサイン波で 1.0 -> MERGE_EXPAND_SCALE -> 1.0 に変化
+                    scale = 1.0 + Math.sin(progress * Math.PI) * (EFFECTS.MERGE_EXPAND_SCALE - 1.0);
+                }
+            }
+
+            ctx.translate(core.position.x, core.position.y);
+            ctx.scale(scale, scale);
+            ctx.translate(-core.position.x, -core.position.y);
+
             // --- Blob（スライム）形状の描画 ---
             ctx.beginPath();
             
@@ -147,23 +187,27 @@ export function renderGame(ctx, world, gameState, bumperState) {
             ctx.fillStyle = config.color;
             ctx.fill();
             
-            // 輪郭線（オプション: 視認性を上げるために少し暗い色で縁取る）
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+            // 輪郭線（本家準拠：黒く太い境界線でフラットなデザインにする）
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#000000';
             ctx.stroke();
 
-            // --- 立体感を出すハイライト（コアの左上） ---
-            ctx.beginPath();
-            ctx.arc(core.position.x - config.radius * 0.3, core.position.y - config.radius * 0.3, config.radius * 0.2, 0, 2 * Math.PI);
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-            ctx.fill();
+            // ※スイカゲーム風の白い立体ハイライトは本家デザイン準拠のため削除しました
 
-            // --- 数字の描画（コアの位置に水平に描画） ---
+            ctx.restore(); // スライム形状のスケールをリセット
+
+            // --- 数字の描画 ---
             ctx.save();
             ctx.translate(core.position.x, core.position.y);
-            // コアが回転していてもテキストは水平を保つため、回転を適用しない
+            
+            // 本家準拠：ゼリーの傾きに合わせて数字も一緒に回転（追従）させる
+            ctx.rotate(core.angle);
+            // 数字にも膨張スケールを適用する
+            ctx.scale(scale, scale);
+            
             ctx.fillStyle = config.text;
-            ctx.font = `bold ${Math.max(14, config.radius * 0.55)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif`;
+            // 本家準拠：角張ったデジタル・ピクセル風フォントに変更
+            ctx.font = `900 ${Math.max(14, config.radius * 0.6)}px "Courier New", Courier, monospace`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText(core.jellyValue, 0, 0);

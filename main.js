@@ -7,13 +7,14 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, UI, JELLY_CONFIG, DROP_Y, PHYSICS } from '/sobosuba/constants.js';
+import { GAME_WIDTH, GAME_HEIGHT, UI, JELLY_CONFIG, DROP_Y, PHYSICS, SCORE } from '/sobosuba/constants.js';
 import { initPhysics, updateBumpers, leftBumper, rightBumper } from '/sobosuba/physics.js';
 import { createSoftBodyJelly } from '/sobosuba/softbody.js';
 import { handleCollisions, handleMerges } from '/sobosuba/jelly.js';
 import { initUI, updateScoreUI, updateNextPreviewUI, showGameOverUI, hideGameOverUI, setWarningEffect } from '/sobosuba/dom_ui.js';
 import { initInput, updateScale } from '/sobosuba/input.js';
 import { renderGame } from '/sobosuba/render.js';
+import { initSound, playSoundShoot } from '/sobosuba/sound.js';
 
 // ==========================================
 // グローバル変数・ゲームステート
@@ -30,17 +31,21 @@ const gameState = {
     canDrop: true,
     dropX: GAME_WIDTH / 2,
     nextValue: 1,
-    nextQueue: [], // ★追加: 3〜4個の待機列を保持する配列
+    nextQueue: [], // 3〜4個の待機列を保持する配列
     frameCount: 0,
     
-    // ★追加: スリングショット用状態
+    // スリングショット用状態
     isDragging: false,
     dragStartX: 0,
     dragStartY: 0,
     dragCurrentX: 0,
     dragCurrentY: 0,
     dragVectorX: 0,
-    dragVectorY: 0
+    dragVectorY: 0,
+
+    // 連鎖(コンボ)ボーナス用状態
+    lastMergeTime: 0,
+    comboCount: 0
 };
 
 // ==========================================
@@ -58,6 +63,8 @@ function startGame() {
     gameState.canDrop = true;
     gameState.frameCount = 0;
     gameState.nextQueue = [];
+    gameState.lastMergeTime = 0;
+    gameState.comboCount = 0;
     
     // UIのリセット
     updateScoreUI(gameState.score);
@@ -72,10 +79,22 @@ function startGame() {
     // Matter.js イベントのバインド
     // ==========================================
     Matter.Events.on(engine, 'collisionStart', (event) => {
-        // 同一数字のソフトボディ同士が衝突したか判定し、スコアを加算
+        // 同一数字のソフトボディ同士が衝突したか判定し、基本スコアを獲得
         const earned = handleCollisions(event);
         if (earned > 0) {
-            gameState.score += earned;
+            const now = Date.now();
+            // 1秒(1000ms)以内の連続合体を連鎖(コンボ)として判定
+            if (now - gameState.lastMergeTime < 1000) {
+                gameState.comboCount++;
+            } else {
+                gameState.comboCount = 0; // 時間が空いたらリセット
+            }
+            gameState.lastMergeTime = now;
+
+            // 連鎖数に応じて倍率を適用（初期コンボは0乗で等倍、以降1.5倍、2.25倍...と増加）
+            const multiplier = Math.pow(SCORE.COMBO_MULTIPLIER, gameState.comboCount);
+            gameState.score += Math.floor(earned * multiplier);
+            
             updateScoreUI(gameState.score);
         }
     });
@@ -128,6 +147,9 @@ function advanceQueue() {
 function handleDragStart(startX, startY) {
     if (gameState.isGameOver || !gameState.canDrop) return;
     
+    // サウンド機能の初期化（ブラウザ制約により初回ユーザー操作時にアクティブ化）
+    initSound();
+
     const config = JELLY_CONFIG[gameState.nextValue];
     const r = config ? config.radius : 18;
     
@@ -161,6 +183,9 @@ function handleDragEnd() {
     if (dist < 10) {
         return;
     }
+
+    // 発射音の再生
+    playSoundShoot();
 
     // 引いた方向と「逆向き」に発射するベクトルの計算
     // Matter.jsのsetVelocity用に定数係数を調整
@@ -245,6 +270,11 @@ function handleResize() {
 }
 
 window.onload = () => {
+    // 【起動バグの修正】
+    // 1. 先にUIを初期化し、動的に Canvas 等のDOM要素を生成・マウントさせる
+    initUI(startGame);
+    
+    // 2. 生成された Canvas 要素を取得する
     canvas = document.getElementById('gameCanvas');
     ctx = canvas.getContext('2d');
     
@@ -252,7 +282,6 @@ window.onload = () => {
     handleResize();
     
     // 各モジュールの初期化とコールバック登録
-    initUI(startGame);
     initInput(canvas, handleDragStart, handleDragUpdate, handleDragEnd);
     
     // ゲーム開始

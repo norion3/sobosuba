@@ -56,6 +56,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null) {
     core.jellyId = currentJellyId;
     core.isMerging = false; // 合体中の多重発火防止フラグ
     core.parentComposite = jellyComposite; // 自身が属するコンポジットへの参照
+    core.createdAt = Date.now(); // ★追加: 描画アニメーション(膨張演出)用の生成時間メタデータ
 
     Composite.add(jellyComposite, core);
 
