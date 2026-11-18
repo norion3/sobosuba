@@ -33,11 +33,13 @@ export function initUI(onRetryCallback) {
     // WebKitの異常ナビゲーション検知による画面クラッシュ（黒画面）を物理的に防ぎます。
     // =========================================================
     if (elRetryBtn) {
+        // PC向けクリックイベント
         elRetryBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             onRetryCallback();
         });
         
+        // スマホ向けタッチイベント（バブリング遮断のみ行い、動作遅延を防ぐ）
         elRetryBtn.addEventListener('touchstart', (e) => {
             e.stopPropagation();
         }, { passive: true });
@@ -99,7 +101,7 @@ export function setWarningEffect(isActive) {
     if (!elWarningOverlay) return;
     
     if (isActive) {
-        elWarningOverlay.style.opacity = '0.2';
+        elWarningOverlay.style.opacity = '0.25';
     } else {
         elWarningOverlay.style.opacity = '0';
     }

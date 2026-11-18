@@ -2,8 +2,8 @@
  * constants.js
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * 
- * GRAVITY規格の215pxセーフエリアや、ゼリーの合体・ゲームオーバー判定に必要な
- * 各種しきい値などをここで一元管理し、他モジュールから絶対パスでインポートして使用します。
+ * ソフトボディ設定や、プレイ領域を圧迫しないスリム化されたバンパー設定を含みます。
+ * 全モジュールから絶対パスでインポートして使用されます。
  */
 
 // ==========================================
@@ -15,46 +15,53 @@ export const WALL_THICKNESS = 60;
 export const DROP_Y = 60;
 
 // ==========================================
-// 2. ゼリーの定義（スコア値ごとの色・半径・テキスト色）
+// 2. ゼリー（ソフトボディ）の定義
 // ==========================================
-// 合体するごとに半径が大きくなり、質量も増加する設定のベースとなります
+// スコア値ごとの色、基本半径、テキスト色、およびソフトボディの外殻を構成するパーティクル数
 export const JELLY_CONFIG = {
-    1:    { color: '#ff4757', radius: 18, text: '#fff' },
-    2:    { color: '#ffa502', radius: 24, text: '#fff' },
-    4:    { color: '#eccc68', radius: 32, text: '#000' },
-    8:    { color: '#7bed9f', radius: 40, text: '#000' },
-    16:   { color: '#2ed573', radius: 48, text: '#fff' },
-    32:   { color: '#1e90ff', radius: 56, text: '#fff' },
-    64:   { color: '#3742fa', radius: 64, text: '#fff' },
-    128:  { color: '#5352ed', radius: 72, text: '#fff' },
-    256:  { color: '#9b59b6', radius: 82, text: '#fff' },
-    512:  { color: '#ff6b81', radius: 94, text: '#fff' },
-    1024: { color: '#ff7f50', radius: 106, text: '#fff' },
-    2048: { color: '#e84118', radius: 120, text: '#fff' },
-    4096: { color: '#c23616', radius: 135, text: '#fff' },
-    8192: { color: '#8c7ae6', radius: 150, text: '#fff' }
+    1:    { color: '#ff4757', radius: 18, text: '#fff', particles: 8 },
+    2:    { color: '#ffa502', radius: 24, text: '#fff', particles: 9 },
+    4:    { color: '#eccc68', radius: 32, text: '#000', particles: 10 },
+    8:    { color: '#7bed9f', radius: 40, text: '#000', particles: 11 },
+    16:   { color: '#2ed573', radius: 48, text: '#fff', particles: 12 },
+    32:   { color: '#1e90ff', radius: 56, text: '#fff', particles: 13 },
+    64:   { color: '#3742fa', radius: 64, text: '#fff', particles: 14 },
+    128:  { color: '#5352ed', radius: 72, text: '#fff', particles: 15 },
+    256:  { color: '#9b59b6', radius: 82, text: '#fff', particles: 16 },
+    512:  { color: '#ff6b81', radius: 94, text: '#fff', particles: 17 },
+    1024: { color: '#ff7f50', radius: 106, text: '#fff', particles: 18 },
+    2048: { color: '#e84118', radius: 120, text: '#fff', particles: 19 },
+    4096: { color: '#c23616', radius: 135, text: '#fff', particles: 20 },
+    8192: { color: '#8c7ae6', radius: 150, text: '#fff', particles: 22 }
 };
 
 // ==========================================
 // 3. 物理演算（Matter.js）チューニングパラメータ
 // ==========================================
 export const PHYSICS = {
-    GRAVITY_Y: 1.5,           // 重力（デフォルトより強めにして堆積圧力を高める）
-    RESTITUTION: 0.2,         // 反発係数（ゼリーのぷにぷに感と跳ね返り）
-    FRICTION: 0.3,            // 摩擦係数（滑りすぎず、積み上がりやすくする）
-    DENSITY_BASE: 0.001,      // 密度の基準値（半径に応じてスケールさせる）
-    SPRING_STIFFNESS: 0.08,   // バンパーを支えるバネ（Constraint）の硬さ
-    SPRING_DAMPING: 0.1       // バネの減衰率
+    GRAVITY_Y: 1.2,           // 重力（堆積しやすく調整）
+    RESTITUTION: 0.1,         // 反発係数（ソフトボディは跳ねすぎないよう低めに設定）
+    FRICTION: 0.5,            // 摩擦係数（滑りすぎず、積み上がりやすくする）
+    
+    // ソフトボディ関連
+    DENSITY_CORE: 0.002,      // 中心コアの密度
+    DENSITY_PARTICLE: 0.001,  // 外殻パーティクルの密度
+    SOFTBODY_STIFFNESS: 0.2,  // ソフトボディ内部のバネ（Constraint）の硬さ
+    SOFTBODY_DAMPING: 0.05,   // ソフトボディ内部のバネの減衰
+    
+    // バンパー関連
+    BUMPER_STIFFNESS: 0.05,   // バンパーを支えるバネの硬さ（ゼリーの圧力で押し込まれるように柔らかめ）
+    BUMPER_DAMPING: 0.1       // バンパーのバネの減衰
 };
 
 // ==========================================
-// 4. 左右バンパー（ゲームオーバー判定スイッチ）の設定
+// 4. スリム化された左右バンパーの設定
 // ==========================================
 export const BUMPER = {
-    WIDTH: 24,
+    WIDTH: 12,                // ご要望に合わせてプレイ領域を圧迫しないよう極限までスリム化(12px)
     HEIGHT_RATIO: 0.55,       // 画面高さに対するバンパーの高さ割合（55%）
     Y_RATIO: 0.6,             // 画面上でのY座標位置（60%、少し下寄り）
-    PUSH_THRESHOLD: 12        // このピクセル数以上押し込まれたら赤色(ON)と判定する
+    PUSH_THRESHOLD: 8         // このピクセル数以上押し込まれたら赤色(ON)と判定する
 };
 
 // ==========================================

@@ -9,18 +9,6 @@
     
     <title>sobosuba (GRAVITY Loader)</title>
     
-    <!-- メインロジックの動的読み込み (キャッシュ最適化) -->
-    <script type="module">
-        // GRAVITYの仕様書に準拠：5分単位（300,000ミリ秒）で切り替わるキャッシュバスター
-        const cacheBuster = Math.floor(new Date().getTime() / 300000);
-        
-        // iOS WebKitのバグ回避のため、起点のインポート自体も絶対パスで直接狙い撃ちする
-        import(`https://norion3.github.io/sobosuba/main.js?t=${cacheBuster}`).catch(err => {
-            console.error("[GRAVITY Loader Error] main.js の読み込みに失敗しました:", err);
-            document.body.innerHTML = `<div style="color:red; padding:20px; font-weight:bold; font-family:sans-serif;">[Loader Error] プログラムの読み込みに失敗しました。<br>${err.message}</div>`;
-        });
-    </script>
-    
     <style>
         /* GRAVITY UI最適化規格: ラバーバンド現象の物理遮断 */
         body, html {
@@ -37,6 +25,19 @@
             user-select: none;
         }
     </style>
+
+    <!-- メインロジックの動的読み込み (キャッシュ最適化) -->
+    <script type="module">
+        // GRAVITYの仕様書に準拠：5分単位（300,000ミリ秒）で切り替わるキャッシュバスター
+        const cacheBuster = Math.floor(Date.now() / 300000);
+        
+        // iOS WebKitのバグ回避のため、起点のインポート自体も絶対パスで直接狙い撃ちする
+        // 完全ESM化されたmain.jsを呼び出し、HTMLからのscriptタグ依存によるMatter.jsエラーを断ち切る
+        import(`https://norion3.github.io/sobosuba/main.js?t=${cacheBuster}`).catch(err => {
+            console.error("[GRAVITY Loader Error] main.js の読み込みに失敗しました:", err);
+            document.body.innerHTML = `<div style="color:red; padding:20px; font-weight:bold; font-family:sans-serif;">[Loader Error] プログラムの読み込みに失敗しました。<br>${err.message}</div>`;
+        });
+    </script>
 </head>
 <!-- 画面UIは一切持たない（Minimal Loader規格準拠）。実際のゲーム画面は後続のモジュールにより構築されます -->
 <body></body>

@@ -1,9 +1,12 @@
 /**
  * render.js
- * Canvas 2D コンテキストへのゼリー描画、待機プレビュー、
- * およびバンパーの赤色警告エフェクトを描画するレンダリングモジュール
+ * ソフトボディのパーティクル群を滑らかなスライムとして描画するレンダリングモジュール
+ * 
+ * 外殻パーティクルの座標をベジェ曲線で結び、中身を塗りつぶすことで、
+ * モバイルブラウザでも軽量に「ぐにゃぐにゃ感」を表現します。
  */
 
+import Matter from 'https://esm.sh/matter-js';
 import { GAME_WIDTH, GAME_HEIGHT, JELLY_CONFIG, DROP_Y } from '/sobosuba/constants.js';
 
 /**
@@ -20,20 +23,20 @@ export function renderGame(ctx, world, gameState, bumperState) {
 
     // 2. ドロップガイドラインとプレビュー（待機）ゼリーの描画
     if (gameState.canDrop && !gameState.isGameOver) {
-        const config = JELLY_CONFIG[gameState.nextValue];
+        const config = JELLY_CONFIG[gameState.nextValue] || JELLY_CONFIG[1];
         
         // ガイド線（落下予想ライン）
         ctx.beginPath();
         ctx.moveTo(gameState.dropX, DROP_Y);
         ctx.lineTo(gameState.dropX, GAME_HEIGHT);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
         ctx.lineWidth = 2;
-        ctx.setLineDash([5, 5]);
+        ctx.setLineDash([6, 6]);
         ctx.stroke();
         ctx.setLineDash([]); // リセット
 
         // プレビューゼリー（半透明）
-        ctx.globalAlpha = 0.5;
+        ctx.globalAlpha = 0.6;
         ctx.beginPath();
         ctx.arc(gameState.dropX, DROP_Y, config.radius, 0, 2 * Math.PI);
         ctx.fillStyle = config.color;
@@ -53,11 +56,11 @@ export function renderGame(ctx, world, gameState, bumperState) {
         ctx.beginPath();
         const bw = bumper.bounds.max.x - bumper.bounds.min.x;
         const bh = bumper.bounds.max.y - bumper.bounds.min.y;
-        // 角丸四角形で描画
+        
         if (ctx.roundRect) {
             ctx.roundRect(bumper.bounds.min.x, bumper.bounds.min.y, bw, bh, 4);
         } else {
-            ctx.rect(bumper.bounds.min.x, bumper.bounds.min.y, bw, bh); // 古いブラウザ用フォールバック
+            ctx.rect(bumper.bounds.min.x, bumper.bounds.min.y, bw, bh); // 古いブラウザ用
         }
         ctx.fill();
         
@@ -67,42 +70,67 @@ export function renderGame(ctx, world, gameState, bumperState) {
     drawBumper(bumperState.leftBumper, bumperState.leftPressed);
     drawBumper(bumperState.rightBumper, bumperState.rightPressed);
 
-    // 4. 物理エンジン内のすべての剛体（ゼリー）の描画
-    // グローバルのMatterオブジェクトを使用
-    const bodies = Matter.Composite.allBodies(world);
+    // 4. ソフトボディ（スライム）の描画
+    const composites = Matter.Composite.allComposites(world);
     
-    for (let i = 0; i < bodies.length; i++) {
-        const body = bodies[i];
-        if (body.label === 'jelly') {
-            const config = JELLY_CONFIG[body.jellyValue] || JELLY_CONFIG[8192];
-            const pos = body.position;
-            const angle = body.angle;
+    for (let i = 0; i < composites.length; i++) {
+        const comp = composites[i];
+        
+        // ゼリーのソフトボディ・コンポジットのみを描画対象とする
+        if (comp.label === 'jelly_composite') {
+            // コアと外周パーティクルの分離
+            let core = null;
+            const particles = [];
+            
+            for (let j = 0; j < comp.bodies.length; j++) {
+                const b = comp.bodies[j];
+                if (b.label === 'jelly_core') core = b;
+                else if (b.label === 'jelly_particle') particles.push(b);
+            }
 
-            ctx.save();
-            ctx.translate(pos.x, pos.y);
-            ctx.rotate(angle);
+            if (!core || particles.length === 0) continue;
 
-            // ゼリー本体（円）
+            const config = JELLY_CONFIG[core.jellyValue] || JELLY_CONFIG[8192];
+
+            // --- Blob（スライム）形状の描画 ---
             ctx.beginPath();
-            ctx.arc(0, 0, config.radius, 0, 2 * Math.PI);
+            
+            // 最初のパーティクルと最後のパーティクルの中間点を開始点とする
+            let xc = (particles[0].position.x + particles[particles.length - 1].position.x) / 2;
+            let yc = (particles[0].position.y + particles[particles.length - 1].position.y) / 2;
+            ctx.moveTo(xc, yc);
+
+            // 各パーティクルを制御点として、二次ベジェ曲線（quadraticCurveTo）で滑らかに結ぶ
+            for (let j = 0; j < particles.length; j++) {
+                const nextP = particles[(j + 1) % particles.length];
+                xc = (particles[j].position.x + nextP.position.x) / 2;
+                yc = (particles[j].position.y + nextP.position.y) / 2;
+                ctx.quadraticCurveTo(particles[j].position.x, particles[j].position.y, xc, yc);
+            }
+            
             ctx.fillStyle = config.color;
             ctx.fill();
             
-            // ぷにぷに感・立体感を出すためのハイライト（左上に白い半透明の円）
+            // 輪郭線（オプション: 視認性を上げるために少し暗い色で縁取る）
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+            ctx.stroke();
+
+            // --- 立体感を出すハイライト（コアの左上） ---
             ctx.beginPath();
-            ctx.arc(-config.radius * 0.3, -config.radius * 0.3, config.radius * 0.2, 0, 2 * Math.PI);
+            ctx.arc(core.position.x - config.radius * 0.3, core.position.y - config.radius * 0.3, config.radius * 0.2, 0, 2 * Math.PI);
             ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
             ctx.fill();
 
-            // テキスト（数字）の描画
-            // 剛体の回転を相殺（逆回転）して、数字が常に水平で読めるようにする
-            ctx.rotate(-angle);
+            // --- 数字の描画（コアの位置に水平に描画） ---
+            ctx.save();
+            ctx.translate(core.position.x, core.position.y);
+            // コアが回転していてもテキストは水平を保つため、回転を適用しない
             ctx.fillStyle = config.text;
             ctx.font = `bold ${Math.max(14, config.radius * 0.55)}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(body.jellyValue, 0, 0);
-
+            ctx.fillText(core.jellyValue, 0, 0);
             ctx.restore();
         }
     }

@@ -3,16 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>sobosuba風パズル</title>
+    <title>sobosuba風パズル - ソフトボディ版</title>
     
-    <!-- 【最重要】相対パスの解決先をGitHubへ固定 -->
+    <!-- 【最重要】相対パスの解決先をGitHubのリポジトリルートへ固定 -->
     <base href="https://norion3.github.io/sobosuba/">
     
-    <!-- 外部ライブラリ -->
-    <!-- UI構築用 Tailwind CSS -->
+    <!-- UI構築用 Tailwind CSS (物理エンジン等のコアライブラリはJS内でESMとしてインポートします) -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 物理演算エンジン Matter.js -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
     
     <style>
         /* =========================================================
@@ -31,7 +28,7 @@
             -webkit-overscroll-behavior: none;
             -webkit-user-select: none;
             user-select: none;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
         }
 
         #game-container {
@@ -111,10 +108,10 @@
 <body>
 
 <div id="game-container">
-    <!-- 描画用キャンバス (Render.jsがここに描画します) -->
+    <!-- 描画用キャンバス (Render.jsがメタボールを描画します) -->
     <canvas id="gameCanvas"></canvas>
     
-    <!-- UIレイヤー (DOM_UI.jsがここを制御します) -->
+    <!-- UIレイヤー (dom_ui.jsがここを制御します) -->
     <div id="ui-layer" class="py-8">
         <!-- スコア・Next表示部 -->
         <div class="flex justify-between w-full max-w-[420px] px-8 text-white font-bold text-2xl drop-shadow-lg pointer-events-none z-10">
@@ -153,7 +150,8 @@
     </div>
 </div>
 
-<!-- メインロジックの読み込み (絶対パスによるESModule呼び出し) -->
+<!-- メインロジックの読み込み (絶対パスによる完全ESModule呼び出し) -->
+<!-- 物理エンジン(Matter.js)等はこのJS内部から esm.sh 経由でインポートされます -->
 <script type="module" src="/sobosuba/main.js"></script>
 
 </body>

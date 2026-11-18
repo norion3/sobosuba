@@ -1,14 +1,16 @@
 /**
  * main.js
- * sobosuba風パズルのマスター統合モジュール
+ * sobosuba風パズル（ソフトボディ版）のマスター統合モジュール
  * 
  * GRAVITY規格に準拠するため、全てのモジュールを絶対パスでインポートし、
- * ゲームループ（requestAnimationFrame）と全体の状態遷移を管理します。
+ * Matter.jsの物理シミュレーションと描画ループを統合・管理します。
  */
 
+import Matter from 'https://esm.sh/matter-js';
 import { GAME_WIDTH, GAME_HEIGHT, UI, JELLY_CONFIG, DROP_Y } from '/sobosuba/constants.js';
 import { initPhysics, updateBumpers, leftBumper, rightBumper } from '/sobosuba/physics.js';
-import { createJelly, handleCollisions, handleMerges } from '/sobosuba/jelly.js';
+import { createSoftBodyJelly } from '/sobosuba/softbody.js';
+import { handleCollisions, handleMerges } from '/sobosuba/jelly.js';
 import { initUI, updateScoreUI, updateNextPreviewUI, showGameOverUI, hideGameOverUI, setWarningEffect } from '/sobosuba/dom_ui.js';
 import { initInput, updateScale } from '/sobosuba/input.js';
 import { renderGame } from '/sobosuba/render.js';
@@ -35,7 +37,7 @@ const gameState = {
 // ゲーム初期化・リセット処理
 // ==========================================
 function startGame() {
-    // 物理エンジンの初期化（バンパー、壁の生成）
+    // 物理エンジンの初期化（壁・左右スリムバンパーの生成）
     const physics = initPhysics();
     engine = physics.engine;
     world = physics.world;
@@ -53,9 +55,10 @@ function startGame() {
     pickNextValue();
 
     // ==========================================
-    // Matter.js 衝突イベントのバインド
+    // Matter.js イベントのバインド
     // ==========================================
     Matter.Events.on(engine, 'collisionStart', (event) => {
+        // 同一数字のソフトボディ同士が衝突したか判定し、スコアを加算
         const earned = handleCollisions(event);
         if (earned > 0) {
             gameState.score += earned;
@@ -64,10 +67,11 @@ function startGame() {
     });
 
     Matter.Events.on(engine, 'afterUpdate', () => {
+        // 物理演算後に、合体キューに入ったソフトボディの破棄と再構築を安全に行う
         handleMerges(world);
     });
 
-    // 物理シミュレーションランナーの起動
+    // 物理シミュレーションの起動
     if (runner) {
         Matter.Runner.stop(runner);
     }
@@ -80,7 +84,7 @@ function startGame() {
 // ==========================================
 function pickNextValue() {
     const rand = Math.random();
-    // 進行度（スコア）に応じて大きい数字が出やすくなる
+    // スコアに応じて大きい数字が出やすくなる確率調整
     if (gameState.score > 2000 && rand > 0.95) gameState.nextValue = 16;
     else if (gameState.score > 1000 && rand > 0.85) gameState.nextValue = 8;
     else if (gameState.score > 300 && rand > 0.7) gameState.nextValue = 4;
@@ -95,21 +99,22 @@ function handlePointerMove(relativeX) {
     
     const config = JELLY_CONFIG[gameState.nextValue];
     const r = config ? config.radius : 18;
-    // 左右のバンパー（幅24px）や壁にめり込まないよう座標をクランプする
+    
+    // 左右の壁・バンパーにめり込まないように投下X座標を制限(クランプ)
     gameState.dropX = Math.max(r + 24, Math.min(GAME_WIDTH - r - 24, relativeX));
 }
 
 function handlePointerDrop() {
     if (gameState.isGameOver || !gameState.canDrop) return;
     
-    // 新しいゼリーを物理空間に投下
-    const newBody = createJelly(gameState.dropX, DROP_Y, gameState.nextValue, true);
-    Matter.Composite.add(world, newBody);
+    // 新しいソフトボディ（ぐにゃぐにゃ剛体）を生成して投下
+    const newComposite = createSoftBodyJelly(gameState.dropX, DROP_Y, gameState.nextValue, true);
+    Matter.Composite.add(world, newComposite);
     
     gameState.canDrop = false;
     pickNextValue();
     
-    // クールダウン経過後に再び落下可能にする
+    // 次の投下までのクールダウン
     setTimeout(() => {
         if (!gameState.isGameOver) gameState.canDrop = true;
     }, UI.DROP_COOLDOWN_MS);
@@ -124,27 +129,25 @@ function gameLoop() {
     if (!engine) return;
     gameState.frameCount++;
 
-    // バンパーの状態更新とゲームオーバー判定
+    // 左右バンパーの押し込み変位量を判定
     const bumperResult = updateBumpers();
     
-    // 両側のバンパーが同時に閾値以上押し込まれた場合、ゲームオーバー発火
+    // 【ゲームオーバー判定】両側のバンパーが同時に押し込まれた場合
     if (bumperResult.leftPressed && bumperResult.rightPressed && !gameState.isGameOver) {
         gameState.isGameOver = true;
         gameState.canDrop = false;
         
-        // Matter.jsのシミュレーションを停止して完全静止させる
+        // 物理シミュレーションを完全停止
         if (runner) Matter.Runner.stop(runner);
         
-        setWarningEffect(false); // 赤点滅をクリア
+        setWarningEffect(false);
         showGameOverUI(gameState.score);
-        
-        // （拡張機能: gravity_sdk.js の reportScoreToGravity() を呼ぶ場合はここに追加）
     } else {
-        // 片側だけ押し込まれた場合は、UI（DOM）側に警告赤点滅エフェクトを指示
+        // 片側だけ押し込まれた場合は、UIレイヤーに警告エフェクト(赤点滅)を指示
         setWarningEffect(bumperResult.leftPressed || bumperResult.rightPressed);
     }
 
-    // レンダリング用のバンパー状態パッケージ
+    // 描画モジュールへ渡すバンパー状態
     const renderBumperState = {
         leftBumper,
         rightBumper,
@@ -152,18 +155,18 @@ function gameLoop() {
         rightPressed: bumperResult.rightPressed
     };
 
-    // Canvasへの描画
+    // Canvasへのレンダリング（メタボール描画）
     renderGame(ctx, world, gameState, renderBumperState);
 }
 
 // ==========================================
-// リサイズと起動シーケンス
+// ウィンドウリサイズと起動シーケンス
 // ==========================================
 function handleResize() {
     const w = window.innerWidth;
     const h = window.innerHeight;
     
-    // 画面アスペクト比を維持しながら最大化
+    // 画面のアスペクト比を維持しつつ最大化
     const scaleX = w / GAME_WIDTH;
     const scaleY = h / GAME_HEIGHT;
     const scale = Math.min(scaleX, scaleY);
@@ -173,7 +176,7 @@ function handleResize() {
     canvas.style.width = `${GAME_WIDTH * scale}px`;
     canvas.style.height = `${GAME_HEIGHT * scale}px`;
     
-    // 入力モジュールの相対座標計算用スケールを更新
+    // マウス/タッチ座標変換用のスケールを更新
     updateScale();
 }
 
@@ -184,11 +187,11 @@ window.onload = () => {
     window.addEventListener('resize', handleResize);
     handleResize();
     
-    // 各モジュールの初期化とコールバックのバインド
-    initUI(startGame); // リトライボタン押下時にstartGameを呼ぶ
+    // 各モジュールの初期化とコールバック登録
+    initUI(startGame);
     initInput(canvas, handlePointerMove, handlePointerDrop);
     
-    // ゲーム開始とメインループの起動
+    // ゲーム開始
     startGame();
     requestAnimationFrame(gameLoop);
 };

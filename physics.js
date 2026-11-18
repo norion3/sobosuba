@@ -1,9 +1,13 @@
 /**
  * physics.js
  * Matter.jsを用いた物理世界の初期化、壁の生成、および
- * ゲームオーバー条件となる「左右のバンパースイッチ」を構築・制御するモジュール
+ * ゲームオーバー条件となる「左右のスリムバンパースイッチ」を構築・制御するモジュール
+ * 
+ * GRAVITY起動エラーを根絶するため、HTMLの<script>タグ依存を排除し、
+ * CDN（esm.sh）経由でMatter.jsを直接ESModuleとしてインポートします。
  */
 
+import Matter from 'https://esm.sh/matter-js';
 import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS } from '/sobosuba/constants.js';
 
 // Matter.jsのモジュールエイリアス
@@ -25,7 +29,7 @@ let restXRight;
 let bumperY;
 
 /**
- * 物理エンジンの初期化と壁・バンパーの生成
+ * 物理エンジンの初期化と壁・スリムバンパーの生成
  */
 export function initPhysics() {
     // 既存のエンジンがあればクリア
@@ -43,32 +47,37 @@ export function initPhysics() {
     const wallOptions = { 
         isStatic: true, 
         render: { visible: false }, 
-        friction: 0.1, 
+        friction: PHYSICS.FRICTION, 
         restitution: 0.1 
     };
 
     Composite.add(world, [
-        // 床
-        Bodies.rectangle(GAME_WIDTH / 2, GAME_HEIGHT + WALL_THICKNESS / 2, GAME_WIDTH, WALL_THICKNESS, wallOptions)
+        // 床 (厚めに設定してすり抜け防止)
+        Bodies.rectangle(GAME_WIDTH / 2, GAME_HEIGHT + WALL_THICKNESS / 2, GAME_WIDTH * 2, WALL_THICKNESS, wallOptions),
+        // 左右の完全な見えない壁（バンパーの裏側で、ゼリーの漏れを最終的に防ぐ）
+        Bodies.rectangle(-WALL_THICKNESS / 2, GAME_HEIGHT / 2, WALL_THICKNESS, GAME_HEIGHT * 2, wallOptions),
+        Bodies.rectangle(GAME_WIDTH + WALL_THICKNESS / 2, GAME_HEIGHT / 2, WALL_THICKNESS, GAME_HEIGHT * 2, wallOptions)
     ]);
 
-    // --- 左右スイッチ（バンパー）機構の構築 ---
+    // --- 左右スリムスイッチ（バンパー）機構の構築 ---
     bumperY = GAME_HEIGHT * BUMPER.Y_RATIO;
     const bumperHeight = GAME_HEIGHT * BUMPER.HEIGHT_RATIO;
+    
+    // バンパーの初期X座標（壁にめり込んでいる状態を休止状態とする）
     restXLeft = BUMPER.WIDTH / 2;
     restXRight = GAME_WIDTH - (BUMPER.WIDTH / 2);
 
     const bumperOptions = { 
-        isStatic: false, 
+        isStatic: false, // バネで動くようにスライドアクションを許可
         friction: 0.05, 
         restitution: 0.1,
         density: 0.05, // 重くして簡単には動かないようにする（ゼリーの圧力が必要）
         label: 'bumper'
     };
 
-    // 左バンパー
+    // プレイ領域を圧迫しないスリムな左バンパー
     leftBumper = Bodies.rectangle(restXLeft, bumperY, BUMPER.WIDTH, bumperHeight, bumperOptions);
-    // 右バンパー
+    // プレイ領域を圧迫しないスリムな右バンパー
     rightBumper = Bodies.rectangle(restXRight, bumperY, BUMPER.WIDTH, bumperHeight, bumperOptions);
 
     // バンパーを壁に繋ぐスプリング（バネ）制約
@@ -76,16 +85,16 @@ export function initPhysics() {
         pointA: { x: -20, y: bumperY },
         bodyB: leftBumper,
         pointB: { x: -BUMPER.WIDTH / 2, y: 0 },
-        stiffness: PHYSICS.SPRING_STIFFNESS,
-        damping: PHYSICS.SPRING_DAMPING
+        stiffness: PHYSICS.BUMPER_STIFFNESS,
+        damping: PHYSICS.BUMPER_DAMPING
     });
 
     const rightSpring = Constraint.create({
         pointA: { x: GAME_WIDTH + 20, y: bumperY },
         bodyB: rightBumper,
         pointB: { x: BUMPER.WIDTH / 2, y: 0 },
-        stiffness: PHYSICS.SPRING_STIFFNESS,
-        damping: PHYSICS.SPRING_DAMPING
+        stiffness: PHYSICS.BUMPER_STIFFNESS,
+        damping: PHYSICS.BUMPER_DAMPING
     });
 
     Composite.add(world, [leftBumper, rightBumper, leftSpring, rightSpring]);
@@ -94,7 +103,7 @@ export function initPhysics() {
 }
 
 /**
- * 毎フレーム呼ばれ、バンパーの姿勢を制御し、押し込まれ具合を判定して返す
+ * 毎フレーム呼ばれ、バンパーの姿勢を強制固定し、押し込まれ具合を判定して返す
  * @returns {Object} 左右バンパーが閾値以上押し込まれているか(isPressed)の判定結果
  */
 export function updateBumpers() {
