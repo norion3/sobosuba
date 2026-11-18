@@ -23,10 +23,10 @@ let jellyIdCounter = 0;
  * @param {number} x - 投下・生成するX座標
  * @param {number} y - 投下・生成するY座標
  * @param {number} value - ゼリーの数値 (1, 2, 4, 8...)
- * @param {boolean} isDropping - プレイヤーが上から落とした直後かどうか（初速を与えるため）
+ * @param {Object} initialVelocity - スリングショット発射時の初速ベクトル {x, y} (無い場合はnull)
  * @returns {Matter.Composite} 生成されたソフトボディの複合体
  */
-export function createSoftBodyJelly(x, y, value, isDropping = false) {
+export function createSoftBodyJelly(x, y, value, initialVelocity = null) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[8192];
     const radius = config.radius;
     const particleCount = config.particles || 12; // 外殻を構成するパーティクルの数
@@ -118,10 +118,10 @@ export function createSoftBodyJelly(x, y, value, isDropping = false) {
     }
 
     // ==========================================
-    // 4. 落下時の初速付与
+    // 4. 発射時の初速（スリングショット）付与
     // ==========================================
-    if (isDropping) {
-        const initialVelocity = { x: 0, y: 3 };
+    // 引っ張り量に応じた初速ベクトルが渡された場合、コアと全パーティクルに適用する
+    if (initialVelocity) {
         Body.setVelocity(core, initialVelocity);
         for (let i = 0; i < particles.length; i++) {
             Body.setVelocity(particles[i], initialVelocity);

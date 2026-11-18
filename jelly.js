@@ -8,10 +8,11 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { JELLY_CONFIG } from '/sobosuba/constants.js';
+import { JELLY_CONFIG, PHYSICS } from '/sobosuba/constants.js';
 import { createSoftBodyJelly } from '/sobosuba/softbody.js';
 
 const Composite = Matter.Composite;
+const Body = Matter.Body;
 
 // ==========================================
 // ゼロアロケーション（GCスパイク根絶）用バッファ
@@ -93,8 +94,38 @@ export function handleMerges(world) {
             const val = JELLY_CONFIG[data.value] ? data.value : data.value; 
             
             // 新しい一段階大きなソフトボディを生成して世界に追加
-            const newJellyComposite = createSoftBodyJelly(data.x, data.y, val, false);
+            // ※スリングショットの初速は合体時には不要なため null を渡す
+            const newJellyComposite = createSoftBodyJelly(data.x, data.y, val, null);
             Composite.add(world, newJellyComposite);
+
+            // ==========================================
+            // 連鎖合体（Radial Force）の発生
+            // ==========================================
+            const radius = JELLY_CONFIG[val] ? JELLY_CONFIG[val].radius : 150;
+            const effectRadius = radius * 2.5; // 影響範囲（自身のサイズの2.5倍程度）
+            
+            const allBodies = Composite.allBodies(world);
+            for (let j = 0; j < allBodies.length; j++) {
+                const body = allBodies[j];
+                
+                // ソフトボディの構成要素にのみ力を加える
+                if (body.label === 'jelly_core' || body.label === 'jelly_particle') {
+                    const dx = body.position.x - data.x;
+                    const dy = body.position.y - data.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    
+                    // 影響範囲内にいる他のゼリーに対して外向きの力を適用
+                    if (dist > 0 && dist < effectRadius) {
+                        // 近いほど強く、遠いほど弱い力になるよう減衰させる
+                        const forceMagnitude = PHYSICS.MERGE_RADIAL_FORCE * (1 - (dist / effectRadius));
+                        
+                        Body.applyForce(body, body.position, {
+                            x: (dx / dist) * forceMagnitude,
+                            y: (dy / dist) * forceMagnitude
+                        });
+                    }
+                }
+            }
         }
         compositesToAdd.length = 0;
     }

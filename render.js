@@ -13,7 +13,7 @@ import { GAME_WIDTH, GAME_HEIGHT, JELLY_CONFIG, DROP_Y } from '/sobosuba/constan
  * 毎フレーム呼ばれるメインの描画処理
  * @param {CanvasRenderingContext2D} ctx - 描画先のCanvasコンテキスト
  * @param {Object} world - Matter.jsの物理世界
- * @param {Object} gameState - 現在のゲーム状態 (isGameOver, canDrop, dropX, nextValue, frameCount)
+ * @param {Object} gameState - 現在のゲーム状態 (isGameOver, canDrop, dropX, nextValue, frameCount, isDragging, dragStartX, dragCurrentX, dragStartY, dragCurrentY)
  * @param {Object} bumperState - バンパーの状態と実体 (leftBumper, rightBumper, leftPressed, rightPressed)
  */
 export function renderGame(ctx, world, gameState, bumperState) {
@@ -21,27 +21,63 @@ export function renderGame(ctx, world, gameState, bumperState) {
     ctx.fillStyle = '#111111';
     ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
 
-    // 2. ドロップガイドラインとプレビュー（待機）ゼリーの描画
+    // 2. ドロップガイドライン / 照準矢印 とプレビュー（待機）ゼリーの描画
     if (gameState.canDrop && !gameState.isGameOver) {
         const config = JELLY_CONFIG[gameState.nextValue] || JELLY_CONFIG[1];
         
-        // ガイド線（落下予想ライン）
-        ctx.beginPath();
-        ctx.moveTo(gameState.dropX, DROP_Y);
-        ctx.lineTo(gameState.dropX, GAME_HEIGHT);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-        ctx.lineWidth = 2;
-        ctx.setLineDash([6, 6]);
-        ctx.stroke();
-        ctx.setLineDash([]); // リセット
+        if (gameState.isDragging) {
+            // --- スリングショット：引っ張り中の照準矢印の描画 ---
+            // 引っ張った方向と逆向きのベクトルを計算
+            const dx = gameState.dragStartX - gameState.dragCurrentX;
+            const dy = gameState.dragStartY - gameState.dragCurrentY;
+            
+            ctx.beginPath();
+            ctx.moveTo(gameState.dropX, DROP_Y);
+            ctx.lineTo(gameState.dropX + dx, DROP_Y + dy);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.lineWidth = 4;
+            ctx.setLineDash([10, 10]);
+            ctx.stroke();
+            ctx.setLineDash([]); // リセット
+            
+            // 矢印の先端（ヘッド）を描画
+            const angle = Math.atan2(dy, dx);
+            const headlen = 16;
+            ctx.beginPath();
+            ctx.moveTo(gameState.dropX + dx, DROP_Y + dy);
+            ctx.lineTo(gameState.dropX + dx - headlen * Math.cos(angle - Math.PI / 6), DROP_Y + dy - headlen * Math.sin(angle - Math.PI / 6));
+            ctx.lineTo(gameState.dropX + dx - headlen * Math.cos(angle + Math.PI / 6), DROP_Y + dy - headlen * Math.sin(angle + Math.PI / 6));
+            ctx.lineTo(gameState.dropX + dx, DROP_Y + dy);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.fill();
 
-        // プレビューゼリー（半透明）
-        ctx.globalAlpha = 0.6;
-        ctx.beginPath();
-        ctx.arc(gameState.dropX, DROP_Y, config.radius, 0, 2 * Math.PI);
-        ctx.fillStyle = config.color;
-        ctx.fill();
-        ctx.globalAlpha = 1.0;
+            // プレビューゼリー（引っ張り中は少し濃く表示）
+            ctx.globalAlpha = 0.8;
+            ctx.beginPath();
+            ctx.arc(gameState.dropX, DROP_Y, config.radius, 0, 2 * Math.PI);
+            ctx.fillStyle = config.color;
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+            
+        } else {
+            // --- 通常時：真下へのドロップガイドライン ---
+            ctx.beginPath();
+            ctx.moveTo(gameState.dropX, DROP_Y);
+            ctx.lineTo(gameState.dropX, GAME_HEIGHT);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 6]);
+            ctx.stroke();
+            ctx.setLineDash([]); // リセット
+
+            // プレビューゼリー（半透明）
+            ctx.globalAlpha = 0.6;
+            ctx.beginPath();
+            ctx.arc(gameState.dropX, DROP_Y, config.radius, 0, 2 * Math.PI);
+            ctx.fillStyle = config.color;
+            ctx.fill();
+            ctx.globalAlpha = 1.0;
+        }
     }
 
     // 3. バンパー（スイッチ剛体）の描画

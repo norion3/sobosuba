@@ -7,7 +7,7 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, UI, JELLY_CONFIG, DROP_Y } from '/sobosuba/constants.js';
+import { GAME_WIDTH, GAME_HEIGHT, UI, JELLY_CONFIG, DROP_Y, PHYSICS } from '/sobosuba/constants.js';
 import { initPhysics, updateBumpers, leftBumper, rightBumper } from '/sobosuba/physics.js';
 import { createSoftBodyJelly } from '/sobosuba/softbody.js';
 import { handleCollisions, handleMerges } from '/sobosuba/jelly.js';
@@ -30,7 +30,17 @@ const gameState = {
     canDrop: true,
     dropX: GAME_WIDTH / 2,
     nextValue: 1,
-    frameCount: 0
+    nextQueue: [], // ★追加: 3〜4個の待機列を保持する配列
+    frameCount: 0,
+    
+    // ★追加: スリングショット用状態
+    isDragging: false,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragCurrentX: 0,
+    dragCurrentY: 0,
+    dragVectorX: 0,
+    dragVectorY: 0
 };
 
 // ==========================================
@@ -47,12 +57,16 @@ function startGame() {
     gameState.isGameOver = false;
     gameState.canDrop = true;
     gameState.frameCount = 0;
+    gameState.nextQueue = [];
     
     // UIのリセット
     updateScoreUI(gameState.score);
     hideGameOverUI();
     setWarningEffect(false);
-    pickNextValue();
+    
+    // 待機列（キュー）の初期化
+    fillQueue();
+    updateNextPreviewUI(gameState.nextQueue);
 
     // ==========================================
     // Matter.js イベントのバインド
@@ -80,39 +94,88 @@ function startGame() {
 }
 
 // ==========================================
-// ゼリー落下と次弾補充ロジック
+// ゼリー待機列（キュー）管理ロジック
 // ==========================================
-function pickNextValue() {
+function generateNextValue() {
     const rand = Math.random();
     // スコアに応じて大きい数字が出やすくなる確率調整
-    if (gameState.score > 2000 && rand > 0.95) gameState.nextValue = 16;
-    else if (gameState.score > 1000 && rand > 0.85) gameState.nextValue = 8;
-    else if (gameState.score > 300 && rand > 0.7) gameState.nextValue = 4;
-    else if (rand > 0.4) gameState.nextValue = 2;
-    else gameState.nextValue = 1;
-    
-    updateNextPreviewUI(gameState.nextValue);
+    if (gameState.score > 2000 && rand > 0.95) return 16;
+    if (gameState.score > 1000 && rand > 0.85) return 8;
+    if (gameState.score > 300 && rand > 0.7) return 4;
+    if (rand > 0.4) return 2;
+    return 1;
 }
 
-function handlePointerMove(relativeX) {
+function fillQueue() {
+    // 規定数(UI.QUEUE_SIZE)に達するまで待機列に補充
+    while (gameState.nextQueue.length < UI.QUEUE_SIZE) {
+        gameState.nextQueue.push(generateNextValue());
+    }
+    // 先頭の値を現在の発射対象としてセット
+    gameState.nextValue = gameState.nextQueue[0];
+}
+
+function advanceQueue() {
+    // 先頭を消費し、後ろに新しい数字を補充
+    gameState.nextQueue.shift();
+    fillQueue();
+    updateNextPreviewUI(gameState.nextQueue);
+}
+
+// ==========================================
+// スリングショット（引っ張り発射）入力ハンドリング
+// ==========================================
+function handleDragStart(startX, startY) {
     if (gameState.isGameOver || !gameState.canDrop) return;
     
     const config = JELLY_CONFIG[gameState.nextValue];
     const r = config ? config.radius : 18;
     
     // 左右の壁・バンパーにめり込まないように投下X座標を制限(クランプ)
-    gameState.dropX = Math.max(r + 24, Math.min(GAME_WIDTH - r - 24, relativeX));
+    gameState.dropX = Math.max(r + 24, Math.min(GAME_WIDTH - r - 24, startX));
+    
+    gameState.isDragging = true;
+    gameState.dragStartX = gameState.dropX;
+    gameState.dragStartY = DROP_Y;
+    gameState.dragCurrentX = gameState.dragStartX;
+    gameState.dragCurrentY = gameState.dragStartY;
+    gameState.dragVectorX = 0;
+    gameState.dragVectorY = 0;
 }
 
-function handlePointerDrop() {
-    if (gameState.isGameOver || !gameState.canDrop) return;
+function handleDragUpdate(currentX, currentY, dx, dy) {
+    if (!gameState.isDragging) return;
+    
+    gameState.dragCurrentX = gameState.dropX + dx;
+    gameState.dragCurrentY = DROP_Y + dy;
+    gameState.dragVectorX = dx;
+    gameState.dragVectorY = dy;
+}
+
+function handleDragEnd() {
+    if (!gameState.isDragging) return;
+    gameState.isDragging = false;
+    
+    // 引っ張り量が少なすぎる場合はキャンセル扱い（ゼリーを消費しない）
+    const dist = Math.sqrt(gameState.dragVectorX ** 2 + gameState.dragVectorY ** 2);
+    if (dist < 10) {
+        return;
+    }
+
+    // 引いた方向と「逆向き」に発射するベクトルの計算
+    // Matter.jsのsetVelocity用に定数係数を調整
+    const velocityScale = PHYSICS.SLINGSHOT_FORCE_MULTIPLIER * 1000;
+    const initialVelocity = {
+        x: -gameState.dragVectorX * velocityScale,
+        y: -gameState.dragVectorY * velocityScale
+    };
     
     // 新しいソフトボディ（ぐにゃぐにゃ剛体）を生成して投下
-    const newComposite = createSoftBodyJelly(gameState.dropX, DROP_Y, gameState.nextValue, true);
+    const newComposite = createSoftBodyJelly(gameState.dropX, DROP_Y, gameState.nextValue, initialVelocity);
     Matter.Composite.add(world, newComposite);
     
     gameState.canDrop = false;
-    pickNextValue();
+    advanceQueue();
     
     // 次の投下までのクールダウン
     setTimeout(() => {
@@ -136,6 +199,7 @@ function gameLoop() {
     if (bumperResult.leftPressed && bumperResult.rightPressed && !gameState.isGameOver) {
         gameState.isGameOver = true;
         gameState.canDrop = false;
+        gameState.isDragging = false;
         
         // 物理シミュレーションを完全停止
         if (runner) Matter.Runner.stop(runner);
@@ -155,7 +219,7 @@ function gameLoop() {
         rightPressed: bumperResult.rightPressed
     };
 
-    // Canvasへのレンダリング（メタボール描画）
+    // Canvasへのレンダリング（メタボール描画および照準矢印）
     renderGame(ctx, world, gameState, renderBumperState);
 }
 
@@ -189,7 +253,7 @@ window.onload = () => {
     
     // 各モジュールの初期化とコールバック登録
     initUI(startGame);
-    initInput(canvas, handlePointerMove, handlePointerDrop);
+    initInput(canvas, handleDragStart, handleDragUpdate, handleDragEnd);
     
     // ゲーム開始
     startGame();

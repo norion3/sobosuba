@@ -51,7 +51,14 @@ export const PHYSICS = {
     
     // バンパー関連
     BUMPER_STIFFNESS: 0.05,   // バンパーを支えるバネの硬さ（ゼリーの圧力で押し込まれるように柔らかめ）
-    BUMPER_DAMPING: 0.1       // バンパーのバネの減衰
+    BUMPER_DAMPING: 0.1,      // バンパーのバネの減衰
+
+    // ★追加: スリングショット（引っ張り発射）関連
+    SLINGSHOT_FORCE_MULTIPLIER: 0.00015, // 引っ張り距離に対する力（Force）の係数
+    SLINGSHOT_MAX_DRAG: 150,             // 引っ張れる最大距離（ピクセル）
+    
+    // ★追加: 連鎖合体（Radial Force）関連
+    MERGE_RADIAL_FORCE: 0.015            // 合体生成時に周囲のゼリーを弾き飛ばす力の強さ
 };
 
 // ==========================================
@@ -69,5 +76,8 @@ export const BUMPER = {
 // ==========================================
 export const UI = {
     SAFE_BOTTOM_PX: 215,      // GRAVITYネイティブ招待ボタンとの干渉を防ぐための下部余白
-    DROP_COOLDOWN_MS: 800     // 次のゼリーを落とせるようになるまでのクールダウン時間
+    DROP_COOLDOWN_MS: 800,    // 次のゼリーを撃てるようになるまでのクールダウン時間
+    
+    // ★追加: 待機列（キュー）関連
+    QUEUE_SIZE: 4             // 常に表示・保持する次のゼリーの数（3〜4個）
 };
