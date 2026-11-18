@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>sobosuba風パズル</title>
+    
+    <!-- 【最重要】相対パスの解決先をGitHubへ固定 -->
+    <base href="https://norion3.github.io/sobosuba/">
+    
+    <!-- 外部ライブラリ -->
+    <!-- UI構築用 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 物理演算エンジン Matter.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    
+    <style>
+        /* =========================================================
+           GRAVITY UI最適化規格: ラバーバンド現象の物理遮断
+           ========================================================= */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #050505;
+            overflow: hidden;
+            /* 画面外余白ドラッグによるOS背景露出を完全に遮断 */
+            touch-action: none;
+            overscroll-behavior: none;
+            -webkit-overscroll-behavior: none;
+            -webkit-user-select: none;
+            user-select: none;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        #game-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        canvas {
+            background-color: #111111;
+            /* キャンバス自体もタッチアクションを無効化 */
+            touch-action: none;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* UIの隙間からキャンバスを触れるように設定 */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* =========================================================
+           GRAVITY規格: backdrop-filter全廃（GPUフリーズ回避）
+           ========================================================= */
+        .game-over-screen {
+            pointer-events: auto;
+            /* blur()は使用せず、純粋なrgba暗転のみで構成する */
+            background-color: rgba(0, 0, 0, 0.85);
+        }
+
+        /* オプティカル・アライメント: 等幅数字（スコア表示時のガタつき防止） */
+        .tnum {
+            font-feature-settings: 'tnum';
+        }
+
+        /* =========================================================
+           GRAVITY規格: 親へのバブリングを防ぐ専用ボタンスタイル
+           （異常ナビゲーション検知を回避するため <button> タグは禁止）
+           ========================================================= */
+        .gravity-safe-btn {
+            pointer-events: auto;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            color: white;
+            font-weight: bold;
+            font-size: 1.25rem;
+            padding: 1rem 2.5rem;
+            border-radius: 9999px;
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.6);
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        .gravity-safe-btn:active {
+            transform: scale(0.95);
+        }
+
+        /* =========================================================
+           GRAVITY規格: 右下215pxセーフエリア確保
+           （親アプリのルーム招待ボタンとの物理干渉防止）
+           ========================================================= */
+        .safe-area-bottom {
+            position: absolute;
+            bottom: calc(env(safe-area-inset-bottom, 0px) + 215px);
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <!-- 描画用キャンバス (Render.jsがここに描画します) -->
+    <canvas id="gameCanvas"></canvas>
+    
+    <!-- UIレイヤー (DOM_UI.jsがここを制御します) -->
+    <div id="ui-layer" class="py-8">
+        <!-- スコア・Next表示部 -->
+        <div class="flex justify-between w-full max-w-[420px] px-8 text-white font-bold text-2xl drop-shadow-lg pointer-events-none z-10">
+            <div class="flex flex-col">
+                <span class="text-xs text-gray-400 uppercase tracking-widest">Score</span>
+                <span id="scoreDisplay" class="tnum text-4xl text-blue-400">0</span>
+            </div>
+            <div class="flex flex-col items-end">
+                <span class="text-xs text-gray-400 uppercase tracking-widest mb-1">Next</span>
+                <div id="nextPreview" class="w-14 h-14 rounded-full border-2 border-white flex items-center justify-center text-black text-xl bg-white tnum shadow-[0_0_10px_rgba(255,255,255,0.5)] transition-colors duration-200">
+                    1
+                </div>
+            </div>
+        </div>
+
+        <!-- 警告表示用（片方のバンパーが押された時などに赤く明滅） -->
+        <div id="warningOverlay" class="absolute inset-0 bg-red-500 opacity-0 pointer-events-none transition-opacity duration-100 mix-blend-screen z-0"></div>
+
+        <!-- Game Over UI (GRAVITY準拠) -->
+        <div id="gameOverUI" class="hidden game-over-screen absolute inset-0 flex flex-col items-center justify-center z-50">
+            <h1 class="text-5xl font-black text-red-500 mb-2 drop-shadow-[0_0_15px_rgba(239,68,68,1)] tracking-widest">GAME OVER</h1>
+            <p class="text-red-300 text-sm mb-8">両側のバンパーが押し込まれました</p>
+            
+            <div class="text-center mb-12">
+                <p class="text-gray-400 text-lg uppercase tracking-wider">Final Score</p>
+                <p id="finalScore" class="text-white text-7xl font-bold tnum mt-2 text-blue-400 drop-shadow-md">0</p>
+            </div>
+            
+            <!-- GRAVITY規格: 215pxセーフエリアに配置する <div> タグボタン -->
+            <div class="safe-area-bottom">
+                <div id="retryBtn" class="gravity-safe-btn">
+                    もう一度プレイ
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- メインロジックの読み込み (絶対パスによるESModule呼び出し) -->
+<script type="module" src="/sobosuba/main.js"></script>
+
+</body>
+</html>

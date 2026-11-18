@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    
+    <!-- 【最重要】相対パスの解決先をGitHubへ固定 (連鎖読み込み迷子対策) -->
+    <base href="https://norion3.github.io/sobosuba/">
+    
+    <title>sobosuba (GRAVITY Loader)</title>
+    
+    <!-- メインロジックの動的読み込み (キャッシュ最適化) -->
+    <script type="module">
+        // GRAVITYの仕様書に準拠：5分単位（300,000ミリ秒）で切り替わるキャッシュバスター
+        const cacheBuster = Math.floor(new Date().getTime() / 300000);
+        
+        // iOS WebKitのバグ回避のため、起点のインポート自体も絶対パスで直接狙い撃ちする
+        import(`https://norion3.github.io/sobosuba/main.js?t=${cacheBuster}`).catch(err => {
+            console.error("[GRAVITY Loader Error] main.js の読み込みに失敗しました:", err);
+            document.body.innerHTML = `<div style="color:red; padding:20px; font-weight:bold; font-family:sans-serif;">[Loader Error] プログラムの読み込みに失敗しました。<br>${err.message}</div>`;
+        });
+    </script>
+    
+    <style>
+        /* GRAVITY UI最適化規格: ラバーバンド現象の物理遮断 */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #050505;
+            overflow: hidden;
+            touch-action: none;
+            overscroll-behavior: none;
+            -webkit-overscroll-behavior: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+    </style>
+</head>
+<!-- 画面UIは一切持たない（Minimal Loader規格準拠）。実際のゲーム画面は後続のモジュールにより構築されます -->
+<body></body>
+</html>
