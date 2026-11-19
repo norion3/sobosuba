@@ -1,14 +1,12 @@
 /**
  * constants.js
- * @version v7.0 (Fluid Shape, Shot Reach, Bar-Hop & Bumper Calibration - Phase 1)
+ * @version v7.1 (Bar-Hop Velocity Calibration for Matter.js 0.20 _baseDelta - Phase 1)
  * @changes
- *   - 端まで一直線に届くショットと横失速根絶のため、AIM_MAX_DRAG（120）・AIM_FORCE_MULTIPLIER（0.056）・X/Y独立速度上限（MAX_PARTICLE_VX: 6.8 / MAX_PARTICLE_VY: 7.2）・斜め下すり抜け保護の最小下向き条件緩和（LAUNCH_GRACE_MIN_DY: -2）を定義
- *   - 天井非激突かつ塊を確実に飛び越える上段ホップのため、HOP_TRIGGER_DY（-16）・HOP_MIN_UP_SPEED（1.12）・HOP_MAX_UP_SPEED（1.26）・HOP_X_MULTIPLIER（0.026）・HOP_MAX_SPEED（4.6）へ調整
- *   - 下の塊のV字折れ・勾玉奇形を根絶しつつ水風船の流動感を保つため、SKIN_STIFFNESS（0.28）・BEND_STIFFNESS（0.13）・SOFTBODY_PRESSURE（0.0024）・ANTI_OVERLAP_STIFFNESS（0.52）・ANTI_OVERLAP_MAX_PUSH（2.6）へ刷新
- *   - ゼリー総質量と釣り合う左右バンパー感度へ再正規化するため、BUMPER_DENSITY（0.0035）・BUMPER_STIFFNESS（0.0065）・BUMPER_DAMPING（0.08）へ調整
+ *   - Matter.js 0.20.0 の速度正規化（px/frame 単位・timeScale = 0.25）に合わせて上段ホップ定数を再正規化し、全サイズ天井非激突（上昇 47〜60px）・キレのある山なり滞空（0.55〜0.62秒）・1個飛び〜端から端までの十分な飛距離を両立（HOP_GRAVITY_SCALE: 1.35 / HOP_MIN_UP_SPEED: 5.80 / HOP_MAX_UP_SPEED: 6.55 / HOP_X_MULTIPLIER: 0.075 / HOP_MAX_SPEED: 11.5 / HOP_MIN_AIR_MS: 160）
+ *   - 上記ホップ速度および非トンネリング範囲（1サブステップ最大移動 2.625〜2.75px）に合わせて、X/Y独立最大速度上限を更新（MAX_PARTICLE_VX: 10.5 / MAX_PARTICLE_VY: 11.0）
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
- * v7.0改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
+ * v7.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
  */
 
 // ==========================================
@@ -121,7 +119,7 @@ export const PHYSICS = {
     SOFTBODY_MIN_DIST_RATIO: 0.48,// 重心からの最小距離比率（ペシャンコ防止）
 
     // 遅延適応的圧迫ダンピング（着地直後のボヨヨン揺れ保護 ＆ 下敷き静寂化）
-    SETTLE_SPEED_THRESHOLD: 0.22, // 全体静止とみなす重心速度閾値（px/substep）
+    SETTLE_SPEED_THRESHOLD: 0.22, // 全体静止とみなす重心速度閾値（px/frame）
     SETTLE_DELAY_MS: 350,         // 着地直後の液体ボヨヨン揺れを無傷で保護する遅延時間（ms）
     SETTLE_RAMP_MS: 550,          // 350ms→900msへ滑らかにダンピングを立ち上げるランプ時間（ms）
     SETTLE_MAX_DAMPING: 0.88,     // 完全圧迫静止時の重心相対速度減衰係数（1フレーム換算）
@@ -131,8 +129,8 @@ export const PHYSICS = {
     ANTI_OVERLAP_MAX_PUSH: 2.6,   // 1サブステップあたりの最大排斥距離（px）
     OVERLAP_SLOP: 0.6,            // 微小侵入（0.6px未満）を無視するデッドゾーン（px）
     MAX_PARTICLE_SPEED: 5.6,      // 互換維持用（合体衝撃波等の上限基準）
-    MAX_PARTICLE_VX: 6.8,         // 落下中の横速度削れを防ぐ非トンネリング範囲内の水平最大速度（px/substep）
-    MAX_PARTICLE_VY: 7.2,         // 落下中の横速度と独立して制御する垂直最大速度（px/substep）
+    MAX_PARTICLE_VX: 10.5,        // 落下中の横速度削れを防ぐ非トンネリング範囲内の水平最大速度（px/frame）
+    MAX_PARTICLE_VY: 11.0,        // 落下中の横速度と独立して制御する垂直最大速度（px/frame）
 
     // 互換維持用
     DENSITY_CORE: 0.002,
@@ -147,15 +145,15 @@ export const PHYSICS = {
     // 順方向ダイレクトエイム関連（SUBSTEPS=4 正規化済み・360度エイム解放）
     SLINGSHOT_FORCE_MULTIPLIER: 0.00015, // 互換用
     SLINGSHOT_MAX_DRAG: 150,             // 互換用
-    AIM_FORCE_MULTIPLIER: 0.056,         // 端まで一直線に届く通常ショット初速係数（80pxでvx=4.48）
+    AIM_FORCE_MULTIPLIER: 0.056,         // 端まで一直線に届く通常ショット初速係数
     AIM_MAX_DRAG: 120,                   // スマホ片手スワイプで最大威力を出しやすいドラッグ距離（px）
     AIM_CANCEL_RADIUS: 22,               // 指揺れ誤爆を防ぐキャンセル判定半径（px）
 
     // 合体時膨張インパルス ＆ 重心法線接近速度ベースの衝突音閾値
-    MERGE_RADIAL_IMPULSE: 1.45,          // フィールド内合体時の周囲外向き速度インパルス（px/substep）
+    MERGE_RADIAL_IMPULSE: 1.45,          // フィールド内合体時の周囲外向き速度インパルス（px/frame）
     MERGE_RADIAL_FORCE: 0.012,           // 互換用
-    COLLIDE_SOUND_MIN_SPEED: 0.65,       // 衝突音を鳴らす最小重心法線接近速度（px/substep）
-    COLLIDE_SOUND_MAX_SPEED: 3.0,        // 衝突音最大強度となる相対速度（px/substep）
+    COLLIDE_SOUND_MIN_SPEED: 0.65,       // 衝突音を鳴らす最小重心法線接近速度（px/frame）
+    COLLIDE_SOUND_MAX_SPEED: 3.0,        // 衝突音最大強度となる相対速度（px/frame）
     COLLIDE_SOUND_PAIR_COOLDOWN_MS: 450  // 同一ゼリーペア間の衝突音連打を防ぐクールダウン（ms）
 };
 
@@ -169,7 +167,7 @@ export const FLOAT_BAR = {
     LEFT_SPAWN_X: 48,             // 左側スポーナーの出現基準X座標（内壁＋バンパー基準）
     RIGHT_SPAWN_X: 372,           // 右側スポーナーの出現基準X座標（内壁＋バンパー基準）
     SPAWN_CLEARANCE_MARGIN: 6,    // スポーナー空き検知に必要な追加余白（px）
-    SPAWN_ENTRY_VELOCITY: 0.55,   // SUBSTEPS=4 正規化済み（左右端から滑らかに中央へ入る初速）
+    SPAWN_ENTRY_VELOCITY: 0.55,   // 左右端から滑らかに中央へ入る初速
     SPRING_STIFFNESS: 0.09,       // バーY高度へ保持する弾性フック強度
     PACK_FORCE: 0.00005,          // バー上で穏やかに中央寄りへ保つ微弱引力
     X_DAMPING: 0.986,             // 横方向の極低ダンピング（スルスル滑る本家挙動）
@@ -193,16 +191,16 @@ export const FLOAT_BAR = {
     TAP_SELECT_Y_MARGIN: 75,      // バー中心から上下この距離以内（Y <= FLOAT_BAR.Y + 75）のみ選択可
     TAP_SELECT_EXTRA_RADIUS: 28,  // 各ゼリー実幅・実高に加えるタップ許容マージン（px）
 
-    // 天井非激突 2.5D 上段飛び越えホップ ＆ セーフ・リキャッチ定数
+    // 天井非激突 2.5D 上段飛び越えホップ ＆ セーフ・リキャッチ定数（Matter.js 0.20 px/frame 正規化済）
     HOP_TRIGGER_DY: -16,          // 横狙いショットの誤爆を防ぎつつ上向きドラッグでホップへ切替
     HOP_FORCE_MULTIPLIER: 0.026,  // 互換維持用
-    HOP_MIN_UP_SPEED: 1.12,       // 天井非激突（上昇約53px）を保ち1個〜複数個を確実に飛び越える最小上向き初速
-    HOP_MAX_UP_SPEED: 1.26,       // 天井非激突（上昇約68px）を保ち大ジャンプする最大上向き初速
-    HOP_X_MULTIPLIER: 0.026,      // 塊を確実に乗り越え端から端まで届く強化横方向初速係数
+    HOP_MIN_UP_SPEED: 5.80,       // 天井非激突（上昇約47px）を保ち1個〜複数個を確実に飛び越える最小上向き初速（px/frame）
+    HOP_MAX_UP_SPEED: 6.55,       // 天井非激突（上昇約60px）を保ち大ジャンプする最大上向き初速（px/frame）
+    HOP_X_MULTIPLIER: 0.075,      // 1個飛び〜端から端まで思い通りに届く横方向初速係数
     HOP_INHERIT_VX: 0.2,          // 予測ドットとのズレを防ぐ控えめなバー横速度継承率
-    HOP_MAX_SPEED: 4.6,           // ホップ時の最大合成初速（px/substep）
-    HOP_GRAVITY_SCALE: 0.72,      // 軽快で美しい山なりアーチを描くホップ専用重力倍率
-    HOP_MIN_AIR_MS: 115,          // 発射直後に即再吸着しないための最小滞空時間（ms）
+    HOP_MAX_SPEED: 11.5,          // 斜め強ホップの合成速度を切り捨てない最大合成初速（px/frame）
+    HOP_GRAVITY_SCALE: 1.35,      // 滞空が間延びしないキレのある山なりアーチを描くホップ専用重力倍率
+    HOP_MIN_AIR_MS: 160,          // 上昇中に誤リキャッチされないための最小滞空時間（ms）
     HOP_RECATCH_Y_MIN: 92,        // 下降中にバーへ自動再吸着するY範囲下限
     HOP_RECATCH_Y_MAX: 138,       // 下降中にバーへ自動再吸着するY範囲上限
     HOP_MAX_AIR_MS: 2200,         // 万が一長時間空中に留まった際の安全タイムアウト（ms）

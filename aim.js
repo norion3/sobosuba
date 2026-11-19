@@ -1,10 +1,9 @@
 /**
  * aim.js
- * @version v7.0 (Hop Trajectory 1px Sync, Shot Reach & Trigger Calibration - Phase 7)
+ * @version v7.1 (Hop Trajectory Matter.js 0.20 timeScale Sync & Fallback Calibration - Phase 3)
  * @changes
- *   - ホップ軌道予測ドット（updateHopPreviewPoints）の運動方程式・重力倍率・X/Y独立最大速度クランプ・壁反発係数を softbody.js / physics.js の実物理と 1px 精度で完全同期
- *   - 塊を確実に乗り越える新ホップ初速定数（HOP_MIN_UP_SPEED: 1.12 / HOP_MAX_UP_SPEED: 1.26 / HOP_X_MULTIPLIER: 0.026 / HOP_MAX_SPEED: 4.6）、誤爆防止閾値（HOP_TRIGGER_DY: -16）、および端まで届く通常ショット定数（AIM_MAX_DRAG: 120 / AIM_FORCE_MULTIPLIER: 0.056 / LAUNCH_GRACE_MIN_DY: -2）を反映
- *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js / floatbar.js の絶対パスを ?v=7 へ統一（sound.js は ?v=6 を維持）
+ *   - updateHopPreviewPoints() を Matter.js 0.20.0 の timeScale = subDelta / (1000 / 60) 準拠の厳密な積分式（px += vx * timeScale / subAccVy = subAccY / timeScale / airDamp = 1 - frictionAir * timeScale）へ修正し、青い予測ドットと実機着地点を誤差 1px 未満で完全一致
+ *   - computeHopVelocity() および updateHopPreviewPoints() のフォールバック値と maxHopSpeed クランプを softbody.js (v7.1) と完全同期（HOP_X_MULTIPLIER: 0.075 / HOP_MIN_UP_SPEED: 5.80 / HOP_MAX_UP_SPEED: 6.55 / HOP_MAX_SPEED: 11.5 / HOP_GRAVITY_SCALE: 1.35 / HOP_MIN_AIR_MS: 160 / MAX_PARTICLE_VX: 10.5 / MAX_PARTICLE_VY: 11.0）
  * 
  * 上段フロートバーのゼリー選択、360度順方向ダイレクトエイム、
  * 天井非激突2.5D上段飛び越えホップ自動切替および放物線軌道プレビュー計算を担う操作モジュール
@@ -78,18 +77,15 @@ export function clampAimVector(dx, dy) {
  * 上向きドラッグベクトルから「天井非激突 2.5D上段飛び越えホップ（Bar-Hop）」用の初速ベクトルを線形マッピングで算出する
  * @param {number} vecX - クランプ済みX方向ドラッグ量
  * @param {number} vecY - クランプ済みY方向ドラッグ量
- * @returns {{ x: number, y: number }} ホップ初速ベクトル（px/substep 単位）
+ * @returns {{ x: number, y: number }} ホップ初速ベクトル（px/frame 単位）
  */
 export function computeHopVelocity(vecX, vecY) {
-    const xMult = (FLOAT_BAR.HOP_X_MULTIPLIER !== undefined) ? FLOAT_BAR.HOP_X_MULTIPLIER : 0.026;
-    const minUpSpeed = (FLOAT_BAR.HOP_MIN_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MIN_UP_SPEED : 1.12;
-    const maxUpSpeed = (FLOAT_BAR.HOP_MAX_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MAX_UP_SPEED : 1.26;
+    const xMult = (FLOAT_BAR.HOP_X_MULTIPLIER !== undefined) ? FLOAT_BAR.HOP_X_MULTIPLIER : 0.075;
+    const minUpSpeed = (FLOAT_BAR.HOP_MIN_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MIN_UP_SPEED : 5.80;
+    const maxUpSpeed = (FLOAT_BAR.HOP_MAX_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MAX_UP_SPEED : 6.55;
     const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
     const maxDrag = Math.max(Math.abs(hopTriggerDy) + 1, PHYSICS.AIM_MAX_DRAG || 120);
-    const maxHopSpeed = Math.min(
-        FLOAT_BAR.HOP_MAX_SPEED || 4.6,
-        PHYSICS.MAX_PARTICLE_VX || 6.8
-    );
+    const maxHopSpeed = FLOAT_BAR.HOP_MAX_SPEED || 11.5;
 
     const vx = vecX * xMult;
 
@@ -114,7 +110,7 @@ export function computeHopVelocity(vecX, vecY) {
 
 /**
  * 2.5D上段飛び越えホップ時の放物線予測ドット（一体外枠フレーム内壁・天井反射込み、着地先まで7点）を
- * softbody.js / physics.js の半カプセル実寸法・固定刻み物理定数・X/Y独立速度クランプと 1px 精度で同期して算出する
+ * softbody.js / physics.js の半カプセル実寸法・Matter.js 0.20 timeScale 固定刻み物理定数・X/Y独立速度クランプと 1px 精度で同期して算出する
  * @param {Matter.Engine|null} engine - Matter.js物理エンジン
  * @param {Object} gameState - ゲーム状態オブジェクト
  * @param {Matter.Composite} selected - 選択中のゼリーコンポジット
@@ -142,12 +138,9 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     }
 
     const inheritVx = (FLOAT_BAR.HOP_INHERIT_VX !== undefined) ? FLOAT_BAR.HOP_INHERIT_VX : 0.2;
-    const maxVx = PHYSICS.MAX_PARTICLE_VX || 6.8;
-    const maxVy = PHYSICS.MAX_PARTICLE_VY || 7.2;
-    const maxHopSpeed = Math.min(
-        FLOAT_BAR.HOP_MAX_SPEED || 4.6,
-        maxVx
-    );
+    const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 11.0;
+    const maxHopSpeed = FLOAT_BAR.HOP_MAX_SPEED || 11.5;
     let vx = avgVx * inheritVx + hopVel.x;
     let vy = hopVel.y;
     const initSpeedSq = vx * vx + vy * vy;
@@ -171,14 +164,17 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     const minY = topBarH + halfH;
 
     const substeps = Math.max(1, PHYSICS.SUBSTEPS || 4);
-    const subDelta = (1000 / 60) / substeps;
+    const baseDelta = 1000 / 60;
+    const subDelta = baseDelta / substeps;
+    const timeScale = subDelta / baseDelta;
     const gravityY = engine ? engine.gravity.y : PHYSICS.GRAVITY_Y;
     const gravityScale = engine ? engine.gravity.scale : 0.001;
-    const hopGravScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 0.72;
+    const hopGravScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.35;
     const subAccY = gravityY * gravityScale * hopGravScale * subDelta * subDelta;
-    const airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012);
+    const subAccVy = subAccY / timeScale;
+    const airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012) * timeScale;
     const wallRestitution = (PHYSICS.RESTITUTION !== undefined) ? PHYSICS.RESTITUTION : 0.16;
-    const minAirSteps = Math.ceil((FLOAT_BAR.HOP_MIN_AIR_MS || 115) / subDelta);
+    const minAirSteps = Math.ceil((FLOAT_BAR.HOP_MIN_AIR_MS || 160) / subDelta);
     const targetBarY = FLOAT_BAR.Y;
     const recatchYMax = FLOAT_BAR.HOP_RECATCH_Y_MAX || 138;
 
@@ -190,11 +186,11 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
 
     const maxSimSteps = 260;
     for (let step = 1; step <= maxSimSteps; step++) {
-        // softbody.js の clampParticleVelocities (X/Y独立クランプ) ＆ Matter.js 固定刻み積分に完全同期
+        // Matter.js 0.20 timeScale 固定刻み積分 ＆ softbody.js の clampParticleVelocities (X/Y独立クランプ) に完全同期
         vx = Math.max(-maxVx, Math.min(maxVx, vx * airDamp));
-        vy = Math.max(-maxVy, Math.min(maxVy, vy * airDamp + subAccY));
-        px += vx;
-        py += vy;
+        vy = Math.max(-maxVy, Math.min(maxVy, vy * airDamp + subAccVy));
+        px += vx * timeScale;
+        py += vy * timeScale;
 
         // 一体外枠フレーム内壁基準の左右壁（PHYSICS.RESTITUTION）・天井クッション（0.45）反射シミュレーション
         if (px < minX) {

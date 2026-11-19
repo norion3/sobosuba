@@ -1,12 +1,9 @@
 /**
  * softbody.js
- * @version v7.0 (Fluid Normal Fix, Independent Speed Clamp & Safe Bar-Hop Recatch - Phase 4)
+ * @version v7.1 (Bar-Hop Velocity Calibration for Matter.js 0.20 _baseDelta - Phase 2)
  * @changes
- *   - 凹み変形時の「外向き法線反転バグ」を根絶するため、applyVolumeAndShapeForces() の重心方向（radial）内積フォールバックを撤廃し、時計回り閉曲線の幾何学的外向き法線を一貫採用
- *   - 落下中の横速度削れ（端狙いショットの途中失速）を根絶するため、launchFloatingJelly() および clampParticleVelocities() を MAX_PARTICLE_VX（6.8）と MAX_PARTICLE_VY（7.2）のX/Y独立速度クランプへ変更
- *   - 上段ホップの乗り越え失敗と高積み上げ時の重なり暴発を防ぐため、ホップ進行方向の前方着地を優先するセーフ・リキャッチ（applySafeRecatchSeparation）および下段ゼリー干渉時の安全着地高度チェック（updateBarHopState）を実装
- *   - 奇形凍結を解消するため、遅延適応的圧迫ダンピング（applyAdaptiveSettleDamping）へ面積歪み条件（復元途中は減衰を保留）を追加
- *   - GRAVITYキャッシュ不整合対策として constants.js / physics.js / overlap_solver.js の絶対パスを ?v=7 へ統一
+ *   - launchBarHop() の maxHopSpeed クランプが MAX_PARTICLE_VX で不必要に頭打ちにならないよう FLOAT_BAR.HOP_MAX_SPEED（11.5）を直接適用
+ *   - Matter.js 0.20 px/frame 正規化済みの新定数へ、launchFloatingJelly()・launchBarHop()・updateBarHopState()・updateSoftBodies() のフォールバック値を同期（HOP_MIN_UP_SPEED: 5.80 / HOP_MAX_SPEED: 11.5 / HOP_GRAVITY_SCALE: 1.35 / HOP_MIN_AIR_MS: 160 / MAX_PARTICLE_VX: 10.5 / MAX_PARTICLE_VY: 11.0）
  * 
  * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
@@ -606,8 +603,8 @@ export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }
 
     const addX = addVelocity ? (addVelocity.x || 0) : 0;
     const addY = addVelocity ? (addVelocity.y || 0) : 0;
-    const maxVx = PHYSICS.MAX_PARTICLE_VX || 6.8;
-    const maxVy = PHYSICS.MAX_PARTICLE_VY || 7.2;
+    const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 11.0;
 
     let sumVx = 0;
     let sumVy = 0;
@@ -637,9 +634,9 @@ export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }
  * 上段フロートバーのゼリーを「天井非激突・2.5D飛び越えレーン方式」の上段ホップ（Bar-Hop）状態で発射する
  * BAR_HOPPING カテゴリへ切替し、飛行中は半カプセル（shapeBlend: 0.5）の水平姿勢を保って確実に飛び越える
  * @param {Matter.Composite} jellyComposite - ホップさせるゼリーのコンポジット
- * @param {Object} hopVelocity - ホップ初速ベクトル {x, y}（px/substep 単位）
+ * @param {Object} hopVelocity - ホップ初速ベクトル {x, y}（px/frame 単位）
  */
-export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -1.12 }) {
+export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -5.80 }) {
     if (!jellyComposite) return;
     const now = Date.now();
     jellyComposite.isFloating = false;
@@ -657,12 +654,9 @@ export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -1.12 }) {
     if (!particles || particles.length === 0) return;
 
     const hopX = hopVelocity ? (hopVelocity.x || 0) : 0;
-    const hopY = hopVelocity ? (hopVelocity.y || 0) : -1.12;
+    const hopY = hopVelocity ? (hopVelocity.y || 0) : -5.80;
     const inheritVx = (FLOAT_BAR.HOP_INHERIT_VX !== undefined) ? FLOAT_BAR.HOP_INHERIT_VX : 0.2;
-    const maxHopSpeed = Math.min(
-        FLOAT_BAR.HOP_MAX_SPEED || 4.6,
-        PHYSICS.MAX_PARTICLE_VX || 6.8
-    );
+    const maxHopSpeed = FLOAT_BAR.HOP_MAX_SPEED || 11.5;
     const maxHopSpeedSq = maxHopSpeed * maxHopSpeed;
 
     let sumVx = 0;
@@ -1191,8 +1185,8 @@ function updateBarHopState(comp, geom, composites, now, gravityY, gravityScale) 
     const particles = comp.particles;
     const n = particles.length;
     const { cx, cy, vx: avgVx, vy: avgVy } = geom;
-    const hopGravityScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 0.72;
-    const hopMinAirMs = FLOAT_BAR.HOP_MIN_AIR_MS || 115;
+    const hopGravityScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.35;
+    const hopMinAirMs = FLOAT_BAR.HOP_MIN_AIR_MS || 160;
     const hopRecatchYMin = FLOAT_BAR.HOP_RECATCH_Y_MIN || 92;
     const hopRecatchYMax = FLOAT_BAR.HOP_RECATCH_Y_MAX || 138;
     const hopMaxAirMs = FLOAT_BAR.HOP_MAX_AIR_MS || 2200;
@@ -1240,7 +1234,7 @@ function updateBarHopState(comp, geom, composites, now, gravityY, gravityScale) 
         return;
     }
 
-    // ホップ滞空中：専用重力倍率（0.72倍）＋ 半カプセル水平姿勢安定（空中で縦回転して天井に当たるのを防止）
+    // ホップ滞空中：専用重力倍率（HOP_GRAVITY_SCALE）＋ 半カプセル水平姿勢安定（空中で縦回転して天井に当たるのを防止）
     const cancelRatio = 1 - hopGravityScale;
     const capPts = comp.capsuleLocalPoints;
     const circPts = comp.circleLocalPoints;
@@ -1343,7 +1337,7 @@ function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepDampX, s
 /**
  * サブ関数5.5：遅延ランプアップ型「適応的圧迫ダンピング」（面積歪み復元保護付き）
  * 着地直後 350ms の液体ボヨヨン揺れおよび面積歪み復元途中は無傷で保護し、
- * 下段で形状が復元しきって全体が静止（< 0.22 px/substep）し続けた場合のみ
+ * 下段で形状が復元しきって全体が静止（< 0.22 px/frame）し続けた場合のみ
  * 350ms → 900ms へ滑らかに重心相対速度（内部微振動）を減衰させて下敷き小塊をピタッと静寂化する
  */
 function applyAdaptiveSettleDamping(comp, geom, subDeltaMs, substeps) {
@@ -1450,8 +1444,8 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
     const safeSubDeltaMs = (typeof subDeltaMs === 'number' && subDeltaMs > 0)
         ? subDeltaMs
         : ((1000 / 60) / substeps);
-    const maxVx = PHYSICS.MAX_PARTICLE_VX || 6.8;
-    const maxVy = PHYSICS.MAX_PARTICLE_VY || 7.2;
+    const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 11.0;
 
     // 1フレームあたりの減衰率をサブステップ回数に応じて等価変換
     const stepDampX = Math.pow(FLOAT_BAR.X_DAMPING || 0.986, 1 / substeps);
