@@ -1,10 +1,10 @@
 /**
  * physics.js
- * @version v4.0 (Final Overhaul Step 5)
+ * @version v5.0 (Final Overhaul & Refactoring Step 2)
  * @changes
- *   - PBD面積補正やソフトボディ間非侵入排斥ソルバーが底面の45度角カットスロープを貫通しないよう、スロープ境界を含めて安全に座標制限するヘルパー clampPointToContainer() を追加
- *   - SUBSTEPS=4 正規化済みのバンパーバネ剛性・減衰（constants.js?v=4）を適用し、上段飛び越えホップ時に天井へ軽く当たっても張り付かず滑らかに反射する天井クッション設定へ調整
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=4 へ統一
+ *   - constants.js の COLLISION_CATEGORY を導入し、壁・天井・床・45度スロープは全ゼリー（FIELD_JELLY / BAR_FLOATING / BAR_HOPPING）と衝突し、バンパーは下段の FIELD_JELLY のみに反応する厳密な衝突フィルタへ更新（上段ホップ誤爆ゼロ）
+ *   - 枠外赤LED縦バー連動および BUMPER.GAME_OVER_HOLD_MS（250ms）準拠のため、updateBumpers() から左右バンパーの押し込み率（leftPushRatio / rightPushRatio）を返却するよう拡張
+ *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=5 へ統一
  * 
  * Matter.jsを用いた物理世界の初期化、壁の生成、サブステップ駆動、および
  * ゲームオーバー条件となる「左右のスリムバンパースイッチ」を構築・制御するモジュール
@@ -14,7 +14,7 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS, CONTAINER } from '/sobosuba/constants.js?v=4';
+import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS, CONTAINER, COLLISION_CATEGORY } from '/sobosuba/constants.js?v=5';
 
 // Matter.jsのモジュールエイリアス
 const Engine = Matter.Engine;
@@ -23,10 +23,11 @@ const Composite = Matter.Composite;
 const Constraint = Matter.Constraint;
 const Body = Matter.Body;
 
-// 衝突カテゴリ定義（壁とバンパーは互いにすり抜け、双方ともゼリーとは衝突する）
-const CATEGORY_DEFAULT = 0x0001; // ゼリー等のデフォルト剛体
-const CATEGORY_WALL    = 0x0002; // 容器の壁・床・天井・スロープ
-const CATEGORY_BUMPER  = 0x0004; // 左右のバンパースイッチ
+// 壁・天井・床・スロープと衝突させるゼリーカテゴリの合成マスク
+const ALL_JELLY_MASK =
+    COLLISION_CATEGORY.FIELD_JELLY |
+    COLLISION_CATEGORY.BAR_FLOATING |
+    COLLISION_CATEGORY.BAR_HOPPING;
 
 // 物理世界の状態を保持
 export let engine;
@@ -42,7 +43,7 @@ let bothPressedDurationMs = 0;
 
 /**
  * 座標 (x, y) を容器の壁・天井・床および底面左右の45度角カットスロープの内側へ安全にクランプする
- * （softbody.js の PBD面積補正・非侵入排斥ソルバーによるスロープ貫通を防止）
+ * （softbody.js / overlap_solver.js の PBD面積補正・非侵入排斥ソルバーによるスロープ貫通を防止）
  * @param {number} x - 判定対象のX座標
  * @param {number} y - 判定対象のY座標
  * @param {number} margin - 壁・スロープ面から確保する内側マージン（ビーズ半径など）
@@ -112,10 +113,10 @@ export function initPhysics() {
         friction: PHYSICS.FRICTION,
         frictionStatic: PHYSICS.FRICTION_STATIC,
         restitution: PHYSICS.RESTITUTION,
-        // ゼリーとは衝突し、バンパーとは衝突しないフィルタ設定
+        // 全カテゴリのゼリー（下段・上段待機・上段ホップ中）と衝突し、バンパーとは衝突しないフィルタ設定
         collisionFilter: {
-            category: CATEGORY_WALL,
-            mask: CATEGORY_DEFAULT
+            category: COLLISION_CATEGORY.WALL,
+            mask: ALL_JELLY_MASK
         }
     };
 
@@ -177,10 +178,10 @@ export function initPhysics() {
         restitution: 0.15,
         density: 0.05, // 重くして簡単には動かないようにする（ゼリーの圧力が必要）
         label: 'bumper',
-        // ゼリーとは衝突し、左右の静的壁とは衝突せず壁側へ押し込めるフィルタ設定
+        // 下段の FIELD_JELLY のみと衝突し、壁や上段待機・ホップ中ゼリーとは干渉しないフィルタ設定
         collisionFilter: {
-            category: CATEGORY_BUMPER,
-            mask: CATEGORY_DEFAULT
+            category: COLLISION_CATEGORY.BUMPER,
+            mask: COLLISION_CATEGORY.FIELD_JELLY
         }
     };
 
@@ -212,15 +213,21 @@ export function initPhysics() {
 }
 
 /**
- * バンパーのY座標・角度・左右可動範囲を強制固定し、現在の押し込み状態を算出する内部関数
- * @returns {{ leftPressed: boolean, rightPressed: boolean }}
+ * バンパーのY座標・角度・左右可動範囲を強制固定し、現在の押し込み状態および押し込み率を算出する内部関数
+ * @returns {{ leftPressed: boolean, rightPressed: boolean, leftPushRatio: number, rightPushRatio: number }}
  */
 function constrainBumpers() {
     if (!leftBumper || !rightBumper) {
-        return { leftPressed: false, rightPressed: false };
+        return {
+            leftPressed: false,
+            rightPressed: false,
+            leftPushRatio: 0,
+            rightPushRatio: 0
+        };
     }
 
     const maxPush = BUMPER.MAX_PUSH || 14;
+    const threshold = Math.max(1, BUMPER.PUSH_THRESHOLD || 8);
 
     // 左バンパー：壁側（左）への最大押し込み量〜休止位置の範囲にX座標をクランプ
     const clampedLeftX = Math.max(restXLeft - maxPush, Math.min(restXLeft, leftBumper.position.x));
@@ -236,11 +243,20 @@ function constrainBumpers() {
     Body.setAngle(rightBumper, 0);
     Body.setVelocity(rightBumper, { x: rightVelX, y: 0 });
 
-    // 壁側へ押し込まれた変位量の算出と閾値判定
-    const leftPressed = (restXLeft - clampedLeftX) > BUMPER.PUSH_THRESHOLD;
-    const rightPressed = (clampedRightX - restXRight) > BUMPER.PUSH_THRESHOLD;
+    // 壁側へ押し込まれた変位量・押し込み率（枠外赤LED連動用）・閾値判定を算出
+    const leftPush = Math.max(0, restXLeft - clampedLeftX);
+    const rightPush = Math.max(0, clampedRightX - restXRight);
+    const leftPushRatio = Math.max(0, Math.min(1, leftPush / threshold));
+    const rightPushRatio = Math.max(0, Math.min(1, rightPush / threshold));
+    const leftPressed = leftPush > threshold;
+    const rightPressed = rightPush > threshold;
 
-    return { leftPressed, rightPressed };
+    return {
+        leftPressed,
+        rightPressed,
+        leftPushRatio,
+        rightPushRatio
+    };
 }
 
 /**
@@ -267,9 +283,9 @@ export function stepPhysics(deltaMs = 1000 / 60, onBeforeSubStep = null) {
 
 /**
  * 毎フレーム呼ばれ、バンパーの姿勢・可動範囲を固定し、
- * 押し込み状態および左右同時押し込みの継続判定結果を返す
+ * 押し込み状態・枠外赤LED連動用の押し込み率および左右同時押し込みの継続判定結果を返す
  * @param {number} deltaMs - 経過フレーム時間（ミリ秒）
- * @returns {{ leftPressed: boolean, rightPressed: boolean, bothPressedDurationMs: number, isGameOverTriggered: boolean }}
+ * @returns {{ leftPressed: boolean, rightPressed: boolean, leftPushRatio: number, rightPushRatio: number, bothPressedDurationMs: number, isGameOverTriggered: boolean }}
  */
 export function updateBumpers(deltaMs = 1000 / 60) {
     const state = constrainBumpers();
@@ -281,12 +297,14 @@ export function updateBumpers(deltaMs = 1000 / 60) {
         bothPressedDurationMs = 0;
     }
 
-    const holdMs = BUMPER.GAME_OVER_HOLD_MS || 200;
+    const holdMs = BUMPER.GAME_OVER_HOLD_MS || 250;
     const isGameOverTriggered = bothPressedDurationMs >= holdMs;
 
     return {
         leftPressed: state.leftPressed,
         rightPressed: state.rightPressed,
+        leftPushRatio: state.leftPushRatio,
+        rightPushRatio: state.rightPushRatio,
         bothPressedDurationMs,
         isGameOverTriggered
     };
