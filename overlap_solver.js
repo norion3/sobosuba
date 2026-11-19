@@ -1,12 +1,11 @@
 /**
  * overlap_solver.js
- * @version v5.0 (Final Overhaul & Refactoring Step 3 - New Module)
+ * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 5)
  * @changes
- *   - softbody.js と render.js で重複していた Ray-Casting ポリゴン包含判定を共通関数 isPointInsidePolygon() として独立化（Matter.Body 配列・{x, y} 座標バッファの両形式にゼロアロケーション対応）
- *   - 侵入ビーズの押し戻し反作用を相手エッジの2点だけに集中させず、その両外側にある隣接ビーズへも滑らかに分散させることで、下段ゼリーの局所的なえぐれ・引きつりを防止
- *   - 合体前の「吸い付きの間」を自然に演出するため、合体ディレイ中（isMerging）の合体対象ペア同士を排斥計算から除外
- *   - 2.5D飛び越えレーン方式の上段ホップに対応し、飛行中（isBarHopping）のゼリーが他の待機・下段ゼリーと排斥干渉しないよう除外処理を追加
- *   - GRAVITYキャッシュ不整合対策として constants.js / physics.js の絶対パスを ?v=5 へ統一
+ *   - 上段待機カプセル同士（isFloating 同士）が食い込んだ際に上下へえぐらず左右へ綺麗に押し分ける「横排斥バイアス」を追加し、上段の食い込み・えぐれを根絶
+ *   - 下敷き小塊の微振動ジッターを遮断するため、微小侵入スロップ（PHYSICS.OVERLAP_SLOP = 0.6px デッドゾーン）および侵入ビーズ側・相手エッジ側の双方に対する衝突法線接近速度吸収を実装
+ *   - 斜め下ショットの隣カプセルすり抜け保護（barGraceActive）と衝突マスクを100%同期させるため、barGraceActive と isFloating ペアの排斥除外を追加
+ *   - GRAVITYキャッシュ不整合対策として constants.js / physics.js の絶対パスを ?v=6 へ統一
  * 
  * ソフトボディ間の「非侵入（Anti-Overlap）排斥ソルバー」および共通幾何判定を提供するモジュール
  * 
@@ -15,8 +14,8 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { PHYSICS } from '/sobosuba/constants.js?v=5';
-import { clampPointToContainer } from '/sobosuba/physics.js?v=5';
+import { PHYSICS } from '/sobosuba/constants.js?v=6';
+import { clampPointToContainer } from '/sobosuba/physics.js?v=6';
 
 const Body = Matter.Body;
 
@@ -95,11 +94,11 @@ function isMergingPair(compA, compB) {
 }
 
 /**
- * 指定ビーズへ指定量の位置補正を安全（壁・45度スロープ内クランプ付き）に適用する
+ * 指定ビーズへ指定量の位置補正を安全（内壁・45度スロープ内クランプ付き）に適用する
  * @param {Matter.Body} body - 対象ビーズ
  * @param {number} dx - X方向移動量
  * @param {number} dy - Y方向移動量
- * @param {number} margin - 壁・スロープからの内側マージン（ビーズ半径）
+ * @param {number} margin - 内壁・スロープからの内側マージン（ビーズ半径）
  */
 function applyClampedPush(body, dx, dy, margin) {
     if (!body) return;
@@ -113,14 +112,34 @@ function applyClampedPush(body, dx, dy, margin) {
 }
 
 /**
+ * 相手エッジ側ビーズの衝突法線方向（侵入ビーズへ向かう接近成分）を吸収してジッターを遮断する
+ * @param {Matter.Body} body - 相手エッジ側ビーズ
+ * @param {number} ux - 侵入ビーズ側の脱出法線X
+ * @param {number} uy - 侵入ビーズ側の脱出法線Y
+ * @param {number} absorbRatio - 吸収比率（0.0〜1.0）
+ */
+function absorbEdgeApproachVelocity(body, ux, uy, absorbRatio) {
+    if (!body || absorbRatio <= 0.001) return;
+    // エッジ側ビーズが脱出法線方向（侵入ビーズ側）へ動いている成分が接近速度
+    const velDotB = body.velocity.x * ux + body.velocity.y * uy;
+    if (velDotB > 0) {
+        Body.setVelocity(body, {
+            x: body.velocity.x - ux * velDotB * absorbRatio,
+            y: body.velocity.y - uy * velDotB * absorbRatio
+        });
+    }
+}
+
+/**
  * 侵入したビーズ（ゼリーA側）を相手ゼリーBの最近傍エッジ外側へ押し戻し、
  * 相手側のエッジ2点およびその外側隣接2ビーズへ反作用を滑らかに分散させる
  * @param {Matter.Composite} compA - 侵入側ゼリー
  * @param {Matter.Composite} compB - 侵入された側ゼリー
  * @param {number} stiffness - 排斥強度
  * @param {number} maxPush - 1サブステップあたりの最大押し出し量（px）
+ * @param {number} slop - 下敷きジッターを遮断する微小侵入デッドゾーン（px）
  */
-function resolvePolygonIntrusion(compA, compB, stiffness, maxPush) {
+function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
     const ptsA = compA.particles;
     const ptsB = compB.particles;
     if (!ptsA || !ptsB) return;
@@ -132,7 +151,10 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush) {
     const rA = compA.particleRadius || 4;
     const rB = compB.particleRadius || 4;
     const aabbB = compB.aabb;
+    const centA = compA.centroid;
     const centB = compB.centroid;
+    const bothFloating = Boolean(compA.isFloating && compB.isFloating);
+    const effectiveSlop = bothFloating ? 0 : slop;
     const sepPad = (rA + rB) * 0.35;
 
     for (let i = 0; i < nA; i++) {
@@ -192,6 +214,12 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush) {
 
         // 内部から最近傍エッジ外側への脱出方向ベクトルを算出
         const dist = Math.sqrt(bestDistSq);
+
+        // 微小侵入スロップ（0.6px デッドゾーン）：下敷き圧迫時の微振動ループを物理遮断
+        if (dist < effectiveSlop) {
+            continue;
+        }
+
         let ux = 0;
         let uy = 0;
         if (dist > 1e-4) {
@@ -210,7 +238,23 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush) {
             }
         }
 
-        const push = Math.min(maxPush, (dist + sepPad) * stiffness);
+        // 上段待機カプセル同士の「横排斥バイアス」：上下へえぐらず左右へ綺麗に押し分ける
+        if (bothFloating) {
+            let horizDir = ux >= 0 ? 1 : -1;
+            if (centA && centB && Math.abs(centA.x - centB.x) > 0.01) {
+                horizDir = (centA.x > centB.x) ? 1 : -1;
+            }
+            const biasedX = ux * 0.35 + horizDir * 0.85;
+            const biasedY = uy * 0.25;
+            const bLen = Math.sqrt(biasedX * biasedX + biasedY * biasedY);
+            if (bLen > 1e-4) {
+                ux = biasedX / bLen;
+                uy = biasedY / bLen;
+            }
+        }
+
+        const effectivePenetration = Math.max(0, dist - effectiveSlop);
+        const push = Math.min(maxPush, (effectivePenetration + sepPad) * stiffness);
         if (push <= 0.001) continue;
 
         // 作用・反作用の配分：侵入ビーズ側へ62%、相手エッジ周辺（隣接ビーズ含む）へ38%
@@ -220,16 +264,17 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush) {
         // (A) 侵入ビーズ本体を外側へ押し戻す
         applyClampedPush(p, ux * pushA, uy * pushA, rA);
 
-        // 侵入方向へ潜り込み続ける速度成分を打ち消して再侵入を防ぐ
-        const velDot = p.velocity.x * ux + p.velocity.y * uy;
-        if (velDot < 0) {
+        // 双方衝突法線速度吸収（侵入ビーズ側：相手内部へ潜り込み続ける速度成分を吸収）
+        const velDotA = p.velocity.x * ux + p.velocity.y * uy;
+        if (velDotA < 0) {
             Body.setVelocity(p, {
-                x: p.velocity.x - ux * velDot * 0.6,
-                y: p.velocity.y - uy * velDot * 0.6
+                x: p.velocity.x - ux * velDotA * 0.72,
+                y: p.velocity.y - uy * velDotA * 0.72
             });
         }
 
         // (B) 相手エッジへの反作用を隣接ビーズへも滑らかに分散（局所的なえぐれ・引きつり防止）
+        // あわせて相手エッジ側ビーズの衝突法線接近速度も吸収しジッターを遮断
         const w1 = 1 - bestT;
         const w2 = bestT;
         const b1Body = ptsB[bestIdx1];
@@ -250,19 +295,25 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush) {
                 const s1 = pushB * sideScale * w1;
                 applyClampedPush(b1Body, -ux * m1, -uy * m1, rB);
                 applyClampedPush(bPrevBody, -ux * s1, -uy * s1, rB);
+                absorbEdgeApproachVelocity(b1Body, ux, uy, 0.55 * w1);
+                absorbEdgeApproachVelocity(bPrevBody, ux, uy, 0.25 * w1);
             }
             if (w2 > 0.001) {
                 const m2 = pushB * mainScale * w2;
                 const s2 = pushB * sideScale * w2;
                 applyClampedPush(b2Body, -ux * m2, -uy * m2, rB);
                 applyClampedPush(bNextBody, -ux * s2, -uy * s2, rB);
+                absorbEdgeApproachVelocity(b2Body, ux, uy, 0.55 * w2);
+                absorbEdgeApproachVelocity(bNextBody, ux, uy, 0.25 * w2);
             }
         } else {
             if (w1 > 0.001) {
                 applyClampedPush(b1Body, -ux * pushB * w1, -uy * pushB * w1, rB);
+                absorbEdgeApproachVelocity(b1Body, ux, uy, 0.55 * w1);
             }
             if (w2 > 0.001) {
                 applyClampedPush(b2Body, -ux * pushB * w2, -uy * pushB * w2, rB);
+                absorbEdgeApproachVelocity(b2Body, ux, uy, 0.55 * w2);
             }
         }
     }
@@ -270,7 +321,8 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush) {
 
 /**
  * 全ソフトボディペア間で AABB 高速絞り込み ＋ Point-in-Polygon 非侵入排斥を実行する
- * （isBarHopping 飛行中ゼリーおよび合体ディレイ中のペア同士は自動除外）
+ * （isBarHopping 飛行中ゼリー、斜め下すり抜け保護中 barGraceActive × isFloating ペア、
+ *   および合体ディレイ中のペア同士は自動除外）
  * @param {Array<Matter.Composite>} jellies - 有効なソフトボディコンポジット配列
  */
 export function solveAntiOverlap(jellies) {
@@ -280,6 +332,7 @@ export function solveAntiOverlap(jellies) {
 
     const stiffness = PHYSICS.ANTI_OVERLAP_STIFFNESS || 0.65;
     const maxPush = PHYSICS.ANTI_OVERLAP_MAX_PUSH || 4.0;
+    const slop = (PHYSICS.OVERLAP_SLOP !== undefined) ? PHYSICS.OVERLAP_SLOP : 0.6;
 
     for (let i = 0; i < count; i++) {
         const compA = jellies[i];
@@ -292,6 +345,12 @@ export function solveAntiOverlap(jellies) {
         for (let j = i + 1; j < count; j++) {
             const compB = jellies[j];
             if (!compB || compB.isBarHopping || !compB.aabb) continue;
+
+            // 斜め下ショットすり抜け保護中（barGraceActive）と上段待機（isFloating）のペアは衝突マスクと同期して除外
+            if ((compA.barGraceActive && compB.isFloating) ||
+                (compB.barGraceActive && compA.isFloating)) {
+                continue;
+            }
 
             // 合体前の「吸い付きの間」を演出するため、合体ディレイ中のペア同士は排斥を除外
             if (isMergingPair(compA, compB)) continue;
@@ -307,8 +366,8 @@ export function solveAntiOverlap(jellies) {
             }
 
             // 双方のビーズに対して相手のポリゴン内部への侵入をチェック＆分散排斥
-            resolvePolygonIntrusion(compA, compB, stiffness, maxPush);
-            resolvePolygonIntrusion(compB, compA, stiffness, maxPush);
+            resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop);
+            resolvePolygonIntrusion(compB, compA, stiffness, maxPush, slop);
         }
     }
 }

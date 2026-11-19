@@ -1,15 +1,15 @@
 /**
  * constants.js
- * @version v5.0 (Final Overhaul & Refactoring Step 1)
+ * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 1)
  * @changes
- *   - 本家実機画像実測に基づくサイズ成長カーブ（r=21〜170px、公比約1.15、面積回収約34%）および本家カラーパレット（1〜32768）へ刷新
- *   - 等周不等式の罠を回避し美しい角丸多角形密着を実現するため、超低摩擦（FRICTION: 0.025）・皮バネの遊び（SKIN_STIFFNESS: 0.22）・1つ飛ばし曲げ剛性強化（BEND_STIFFNESS: 0.09）・内圧強化（SOFTBODY_PRESSURE: 0.00125）・下段弱形状保持定数（SHAPE_MATCH_STIFFNESS）を定義
- *   - 上段フロートバーの「横長カプセル（ピル）形状」圧縮定数（CHANNEL_HALF_HEIGHT: 21 / CHANNEL_COMPRESSION_STIFFNESS / MORPH_DURATION_MS: 160 / RECATCH_MORPH_DURATION_MS: 140）を追加
- *   - 6つの「動作の間」タイムライン定数（合体前吸い付き55〜140ms・Grow-In 0.78倍→1.08倍オーバーシュート・面積比例保護70〜220ms・ホップ滞空重力0.62倍・スポーナー間隔260ms・バンパー確定250ms＆ゲームオーバー余韻550ms）を定義
- *   - 2.5D飛び越えレーン方式ホップおよびバンパー誤爆防止のための衝突ビットマスク定数 COLLISION_CATEGORY（WALL / BUMPER / FIELD_JELLY / BAR_FLOATING / BAR_HOPPING）を新規追加
+ *   - 一体外枠フレーム（FRAME_WIDTH: 8 / TOP_BAR_HEIGHT: 12）およびサイド判定ボタン黄金比（Y_RATIO: 0.30 / HEIGHT_RATIO: 0.165 / WIDTH: 18 / PUSH_THRESHOLD: 9 / MAX_PUSH: 15 / CHAMFER_RADIUS: 7 / BUMPER_STIFFNESS: 0.010 / BUMPER_DAMPING: 0.06 / BUMPER_DENSITY: 0.035）を定義
+ *   - 内幅404pxへ最適化したサイズカーブ（1: 21.5px 〜 16384: 146px / 32768: 164px）、細密ビーズ数（16〜30個・BEAD_RADIUS_RATIO: 0.18）、および質量スケーリング指数（DENSITY_SCALE_EXP: 0.65）へ刷新
+ *   - SHAPE_MATCH / PBD位置ワープを0へ撤廃し、目標面積比0.98・柔皮バネ（0.15）・適正曲げ（0.045）・強化非線形内圧（0.0016 / ゲイン6.5 / 閾値0.28 / 上限3.8）・体積粘性（BULK_DAMPING: 0.00055）・超低摩擦（0.015）・低空気抵抗（0.0012）・遅延適応ダンピング（350〜900ms）・微小侵入スロップ（0.6px）・重心衝突音閾値（0.65 / 450ms）を定義
+ *   - 矢印通りの弾道と天井非激突ホップのため、GRAVITY_Y: 0.94・AIM_FORCE_MULTIPLIER: 0.038・MAX_PARTICLE_SPEED: 5.6・斜め下すり抜け保護定数（220ms / dy>=24 / slope>=0.22）・FLOAT_BAR（Y: 108 / PADDING_X: 26 / LEFT_SPAWN_X: 48 / RIGHT_SPAWN_X: 372 / CHANNEL_HALF_HEIGHT: 22）・ホップ定数（HOP_TRIGGER_DY: -8 / HOP_GRAVITY_SCALE: 0.72 / HOP_MIN_UP_SPEED: 0.96 / HOP_MAX_UP_SPEED: 1.18 / HOP_X_MULTIPLIER: 0.016 / HOP_INHERIT_VX: 0.2）へ更新
+ *   - 本家準拠の合体真っ白フラッシュ＆連鎖の間（吸い付き40〜95ms / 保護＆真っ白フラッシュ140〜300ms / MERGE_WHITE_HOLD_RATIO: 0.42）を定義
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
- * v5.0改修対象モジュールから絶対パス（/sobosuba/constants.js?v=5）でインポートして使用されます。
+ * v6.0改修対象モジュールから絶対パス（/sobosuba/constants.js?v=6）でインポートして使用されます。
  */
 
 // ==========================================
@@ -67,89 +67,106 @@ export const COLOR_THEMES = {
 
 export const ACTIVE_THEME = COLOR_THEMES.default;
 
-// 本家実機画像実測に基づくサイズ成長カーブ（公比約1.15・2個合体で約34%空間回収）
-// 16384（直径300px）もバンパー有効幅（388px）内に余裕を持って収容しつつ本家同等の密度を実現
+// 内幅404px（外枠8px考慮）へ最適化したサイズ成長カーブ（空間回収率約34%維持）
+// 細密ビーズ数（16〜30個）により角丸多角形への液体的な追従性を高める
 export const JELLY_CONFIG = {
-    1:     { color: ACTIVE_THEME.colors[1],     radius: 21,   text: ACTIVE_THEME.text, particles: 14 },
-    2:     { color: ACTIVE_THEME.colors[2],     radius: 24,   text: ACTIVE_THEME.text, particles: 14 },
-    4:     { color: ACTIVE_THEME.colors[4],     radius: 27.5, text: ACTIVE_THEME.text, particles: 16 },
-    8:     { color: ACTIVE_THEME.colors[8],     radius: 31.5, text: ACTIVE_THEME.text, particles: 16 },
-    16:    { color: ACTIVE_THEME.colors[16],    radius: 36.5, text: ACTIVE_THEME.text, particles: 18 },
-    32:    { color: ACTIVE_THEME.colors[32],    radius: 42,   text: ACTIVE_THEME.text, particles: 18 },
-    64:    { color: ACTIVE_THEME.colors[64],    radius: 48.5, text: ACTIVE_THEME.text, particles: 20 },
-    128:   { color: ACTIVE_THEME.colors[128],   radius: 56,   text: ACTIVE_THEME.text, particles: 20 },
-    256:   { color: ACTIVE_THEME.colors[256],   radius: 64.5, text: ACTIVE_THEME.text, particles: 22 },
-    512:   { color: ACTIVE_THEME.colors[512],   radius: 74,   text: ACTIVE_THEME.text, particles: 22 },
-    1024:  { color: ACTIVE_THEME.colors[1024],  radius: 85,   text: ACTIVE_THEME.text, particles: 24 },
-    2048:  { color: ACTIVE_THEME.colors[2048],  radius: 98,   text: ACTIVE_THEME.text, particles: 24 },
-    4096:  { color: ACTIVE_THEME.colors[4096],  radius: 113,  text: ACTIVE_THEME.text, particles: 26 },
-    8192:  { color: ACTIVE_THEME.colors[8192],  radius: 130,  text: ACTIVE_THEME.text, particles: 26 },
-    16384: { color: ACTIVE_THEME.colors[16384], radius: 150,  text: ACTIVE_THEME.text, particles: 28 },
-    32768: { color: ACTIVE_THEME.colors[32768], radius: 170,  text: ACTIVE_THEME.text, particles: 28 }
+    1:     { color: ACTIVE_THEME.colors[1],     radius: 21.5, text: ACTIVE_THEME.text, particles: 16 },
+    2:     { color: ACTIVE_THEME.colors[2],     radius: 24.5, text: ACTIVE_THEME.text, particles: 16 },
+    4:     { color: ACTIVE_THEME.colors[4],     radius: 28,   text: ACTIVE_THEME.text, particles: 18 },
+    8:     { color: ACTIVE_THEME.colors[8],     radius: 32,   text: ACTIVE_THEME.text, particles: 18 },
+    16:    { color: ACTIVE_THEME.colors[16],    radius: 36.5, text: ACTIVE_THEME.text, particles: 20 },
+    32:    { color: ACTIVE_THEME.colors[32],    radius: 41.5, text: ACTIVE_THEME.text, particles: 20 },
+    64:    { color: ACTIVE_THEME.colors[64],    radius: 48,   text: ACTIVE_THEME.text, particles: 22 },
+    128:   { color: ACTIVE_THEME.colors[128],   radius: 55,   text: ACTIVE_THEME.text, particles: 22 },
+    256:   { color: ACTIVE_THEME.colors[256],   radius: 63.5, text: ACTIVE_THEME.text, particles: 24 },
+    512:   { color: ACTIVE_THEME.colors[512],   radius: 73,   text: ACTIVE_THEME.text, particles: 24 },
+    1024:  { color: ACTIVE_THEME.colors[1024],  radius: 84,   text: ACTIVE_THEME.text, particles: 26 },
+    2048:  { color: ACTIVE_THEME.colors[2048],  radius: 96,   text: ACTIVE_THEME.text, particles: 26 },
+    4096:  { color: ACTIVE_THEME.colors[4096],  radius: 110,  text: ACTIVE_THEME.text, particles: 28 },
+    8192:  { color: ACTIVE_THEME.colors[8192],  radius: 127,  text: ACTIVE_THEME.text, particles: 28 },
+    16384: { color: ACTIVE_THEME.colors[16384], radius: 146,  text: ACTIVE_THEME.text, particles: 30 },
+    32768: { color: ACTIVE_THEME.colors[32768], radius: 164,  text: ACTIVE_THEME.text, particles: 30 }
 };
 
 // ==========================================
-// 3. 物理演算（Matter.js SUBSTEPS=4 正規化 ＋ 角丸多角形密着ソフトボディ）パラメータ
+// 3. 物理演算（Matter.js SUBSTEPS=4 正規化 ＋ 完全液体ソフトボディ）パラメータ
 // ==========================================
 export const PHYSICS = {
-    GRAVITY_Y: 1.15,              // 重力
+    GRAVITY_Y: 0.94,              // 矢印通りの弾道と自然な重みを両立する重力
     SUBSTEPS: 4,                  // 1フレームあたりの物理サブステップ分割数
-    RESTITUTION: 0.25,            // 反発係数（ボヨ〜ンと心地よく弾む弾性）
-    FRICTION: 0.025,              // 超低摩擦（狭い隙間へニュルンと滑り込む本家の手触り）
+    RESTITUTION: 0.16,            // 下敷き小塊の微バウンドを抑えつつ柔らかく弾む反発係数
+    FRICTION: 0.015,              // 極低摩擦（狭い隙間へ液体のように滑り込む本家の手触り）
     FRICTION_STATIC: 0.015,       // 静止摩擦も極めて低く設定
-    FRICTION_AIR: 0.004,          // 低い空気抵抗（軽快な揺れを維持）
+    FRICTION_AIR: 0.0012,         // 極低空気抵抗（SUBSTEPS=4 での4重失速を防ぎ一直線弾道＆液体揺れを維持）
 
-    // 隙間ゼロ高密度・中空ビーズリング（等周不等式回避の黄金比）
-    DENSITY_PARTICLE: 0.0012,     // 外周ビーズ剛体の密度
-    BEAD_RADIUS_RATIO: 0.25,      // 全体半径に対する外周ビーズ半径の基準比率
+    // 隙間ゼロ高密度・細密中空ビーズリング（液体柔軟性＋質量スケーリング）
+    DENSITY_PARTICLE: 0.0012,     // 基準半径（21.5px）における外周ビーズ剛体の密度
+    DENSITY_SCALE_EXP: 0.65,      // 質量比を r^1.35 へ抑え下敷き圧壊を防ぐ密度スケーリング指数
+    BEAD_RADIUS_RATIO: 0.18,      // 全体半径に対する細密外周ビーズ半径の基準比率
     BEAD_MIN_OVERLAP_RATIO: 1.35, // 隣接ビーズ直径 >= 1.35 * 辺長 を保証する隙間ゼロ比率
-    SKIN_STIFFNESS: 0.22,         // わずかな伸縮（遊び）を許容し丸く固まらない皮の張り剛性
-    BEND_STIFFNESS: 0.09,         // シワ折れ・フック奇形を防ぐ1つ飛ばし曲げ拘束（強化）
+    SKIN_STIFFNESS: 0.15,         // 柔軟に伸びて角へ流れ込む皮の張り剛性
+    BEND_STIFFNESS: 0.045,        // 液体的な密着変形とフック奇形防止を両立する1つ飛ばし曲げ拘束
     SOFTBODY_DAMPING: 0.02,       // SUBSTEPS=4 正規化済みの低バネ減衰
 
-    // 力ベース内圧強化 ＆ 下段弱形状保持（Shape Matching）＆ 分散非侵入排斥
-    PBD_AREA_STIFFNESS: 0.28,     // 補助的なPBD面積補正強度
-    PBD_MAX_CORRECTION: 0.6,      // 他ゼリーやスロープ壁へめり込ませない極小位置補正上限（px/step）
-    SOFTBODY_PRESSURE: 0.00125,   // 自重ペッタンコ餅を防ぎふっくら多角形密着を生む内部圧力係数
-    SHAPE_MATCH_STIFFNESS: 0.00022, // 下段落下後のみ効く弱め形状保持（丸く固めず奇形崩壊だけ防止）
-    INVERSION_AREA_RATIO: 0.28,   // 符号付き面積がこの比率未満になったら形状自動修復
+    // PBD位置ワープ・真円形状保持の完全撤廃 ＋ 強化非線形バルク内圧 ＋ 体積粘性
+    TARGET_AREA_RATIO: 0.98,      // シワ折れを起こさず微小な遊びを確保する目標面積比
+    PBD_AREA_STIFFNESS: 0,        // 永久微振動の原因となるPBD位置ワープを完全撤廃
+    PBD_MAX_CORRECTION: 0,        // PBD位置ワープ上限0（純粋な力ベース内圧へ完全移行）
+    SOFTBODY_PRESSURE: 0.0016,    // 主軸となる力ベース内部圧力係数
+    PRESSURE_NONLINEAR_GAIN: 6.5, // 極限圧迫時のみ急増する非線形バルク反発係数（13倍荷重耐性）
+    PRESSURE_NONLINEAR_THRESHOLD: 0.28, // 非線形バルク反発が立ち上がる圧縮率閾値
+    PRESSURE_RATIO_MAX: 3.8,      // 陽的積分安定性を守る圧力比上限クランプ
+    BULK_DAMPING: 0.00055,        // 重心速度を阻害せず半径方向ビビリ振動のみ吸収する体積粘性
+    SHAPE_MATCH_STIFFNESS: 0,     // 液体感を阻害する真円への記憶（Shape Matching）を完全撤廃
+    INVERSION_AREA_RATIO: 0.18,   // 極限裏返り時のみ作動する穏健な自動修復閾値
     SOFTBODY_MIN_DIST_RATIO: 0.48,// 重心からの最小距離比率（ペシャンコ防止）
+
+    // 遅延適応的圧迫ダンピング（着地直後のボヨヨン揺れ保護 ＆ 下敷き静寂化）
+    SETTLE_SPEED_THRESHOLD: 0.22, // 全体静止とみなす重心速度閾値（px/substep）
+    SETTLE_DELAY_MS: 350,         // 着地直後の液体ボヨヨン揺れを無傷で保護する遅延時間（ms）
+    SETTLE_RAMP_MS: 550,          // 350ms→900msへ滑らかにダンピングを立ち上げるランプ時間（ms）
+    SETTLE_MAX_DAMPING: 0.88,     // 完全圧迫静止時の重心相対速度減衰係数（1フレーム換算）
+
+    // 分散非侵入排斥ソルバー（微小侵入スロップによる下敷きジッター遮断）
     ANTI_OVERLAP_STIFFNESS: 0.65, // 分散型 Point-in-Polygon 侵入ビーズ排斥強度
     ANTI_OVERLAP_MAX_PUSH: 4.0,   // 1サブステップあたりの最大排斥距離（px）
-    MAX_PARTICLE_SPEED: 4.5,      // SUBSTEPS=4 正規化済み最大速度（px/substep ≒ 18px/frame）
+    OVERLAP_SLOP: 0.6,            // 微小侵入（0.6px未満）を無視するデッドゾーン（px）
+    MAX_PARTICLE_SPEED: 5.6,      // 一直線弾道と非トンネリング（最小ビーズ径の62%）を両立する最大速度
 
     // 互換維持用
     DENSITY_CORE: 0.002,
     SOFTBODY_STIFFNESS: 0.04,
-    SOFTBODY_PERIMETER_STIFFNESS: 0.22,
+    SOFTBODY_PERIMETER_STIFFNESS: 0.15,
 
-    // バンパー関連（SUBSTEPS=4 正規化済み）
-    BUMPER_STIFFNESS: 0.015,      // SUBSTEPS=4 時にゼリー圧力で自然に押し込めるバネ剛性
-    BUMPER_DAMPING: 0.05,         // バンパーのバネ減衰
+    // バンパー関連（GRAVITY_Y: 0.94 ＆ 質量スケーリングに最適化）
+    BUMPER_STIFFNESS: 0.010,      // 適度な圧力で自然に押し込めるバネ剛性
+    BUMPER_DAMPING: 0.06,         // バンパーのバネ減衰
+    BUMPER_DENSITY: 0.035,        // 重すぎて動かなくなるのを防ぐ最適バンパー密度
 
     // 順方向ダイレクトエイム関連（SUBSTEPS=4 正規化済み・360度エイム解放）
     SLINGSHOT_FORCE_MULTIPLIER: 0.00015, // 互換用
     SLINGSHOT_MAX_DRAG: 150,             // 互換用
-    AIM_FORCE_MULTIPLIER: 0.028,         // 通常下段ショット初速係数（150pxドラッグで4.2px/substep）
+    AIM_FORCE_MULTIPLIER: 0.038,         // 矢印の方向へ力強く一直線に飛ぶ通常ショット初速係数
     AIM_MAX_DRAG: 150,                   // 最大ドラッグ距離（px）
     AIM_CANCEL_RADIUS: 22,               // 指揺れ誤爆を防ぐキャンセル判定半径（px）
 
-    // 合体時膨張インパルス ＆ 衝突音速度閾値（SUBSTEPS=4 正規化済み）
+    // 合体時膨張インパルス ＆ 重心法線接近速度ベースの衝突音閾値
     MERGE_RADIAL_IMPULSE: 1.45,          // フィールド内合体時の周囲外向き速度インパルス（px/substep）
     MERGE_RADIAL_FORCE: 0.012,           // 互換用
-    COLLIDE_SOUND_MIN_SPEED: 0.55,       // 衝突音を鳴らす最小相対速度（px/substep ≒ 2.2px/frame）
-    COLLIDE_SOUND_MAX_SPEED: 3.0         // 衝突音最大強度となる相対速度（px/substep）
+    COLLIDE_SOUND_MIN_SPEED: 0.65,       // 衝突音を鳴らす最小重心法線接近速度（px/substep）
+    COLLIDE_SOUND_MAX_SPEED: 3.0,        // 衝突音最大強度となる相対速度（px/substep）
+    COLLIDE_SOUND_PAIR_COOLDOWN_MS: 450  // 同一ゼリーペア間の衝突音連打を防ぐクールダウン（ms）
 };
 
 // ==========================================
-// 4. 上部フロートバー（横長カプセル待機・左右2本スポーナー・2.5D上段ホップ＆再吸着）の設定
+// 4. 上部フロートバー（横長カプセル待機・左右2本スポーナー・天井非激突2.5Dホップ）の設定
 // ==========================================
 export const FLOAT_BAR = {
-    Y: 112,                       // 上空アーチ空間（約110px）を確保したフロートバー中心Y座標
+    Y: 108,                       // バンパー引き上げ（30%）と両立し上空空間を確保したバー中心Y座標
     MAX_COUNT: 5,                 // バー上に保持する目安最大ゼリー数
-    PADDING_X: 24,                // 左右の壁からの余白
-    LEFT_SPAWN_X: 46,             // 左側スポーナーの出現基準X座標
-    RIGHT_SPAWN_X: 374,           // 右側スポーナーの出現基準X座標
+    PADDING_X: 26,                // 内壁8px＋バンパー18px面を回避し端落とし非干渉を保証する左右余白
+    LEFT_SPAWN_X: 48,             // 左側スポーナーの出現基準X座標（内壁＋バンパー基準）
+    RIGHT_SPAWN_X: 372,           // 右側スポーナーの出現基準X座標（内壁＋バンパー基準）
     SPAWN_CLEARANCE_MARGIN: 6,    // スポーナー空き検知に必要な追加余白（px）
     SPAWN_ENTRY_VELOCITY: 0.55,   // SUBSTEPS=4 正規化済み（左右端から滑らかに中央へ入る初速）
     SPRING_STIFFNESS: 0.09,       // バーY高度へ保持する弾性フック強度
@@ -159,8 +176,13 @@ export const FLOAT_BAR = {
     SPAWN_DELAY_MS: 260,          // スポーナー供給の「ゲージの間」（ms）
     SAFETY_SPAWN_DELAY_MS: 1500,  // 両端閉塞かつバー空時のセーフティスポーン待機時間（ms）
 
+    // 斜め下ショット時の隣カプセル角引っ掛かり防止（AABB離脱までの一時すり抜け保護）
+    LAUNCH_BAR_GRACE_MAX_MS: 220, // AABB離脱待ちすり抜け保護の安全上限時間（ms）
+    LAUNCH_GRACE_MIN_DY: 24,      // すり抜け保護を発動する最小下向きドラッグ量（px）
+    LAUNCH_GRACE_MIN_SLOPE: 0.22, // 真横当てバー上合体を保護する最小下向き勾配（dy >= 0.22 * |dx|）
+
     // 上段「横長カプセル（ピル）形状」圧縮 ＆ 発射／着地モーフィング定数
-    CHANNEL_HALF_HEIGHT: 21,      // 上段待機時のフラット帯半高（全高約42px、4〜64が横長に伸びる）
+    CHANNEL_HALF_HEIGHT: 22,      // 1(21.5px)が丸く収まり4〜64が横長に伸びるフラット帯半高
     CHANNEL_COMPRESSION_STIFFNESS: 0.16, // フラット帯上下端へ収める柔らかな圧縮フック強度
     CAPSULE_MAX_HALF_WIDTH: 110,  // 上段カプセルの最大半幅上限（px）
     MORPH_DURATION_MS: 160,       // 発射時の「変身の間」（横長カプセル→円形リング復元時間・ms）
@@ -170,12 +192,15 @@ export const FLOAT_BAR = {
     TAP_SELECT_Y_MARGIN: 75,      // バー中心から上下この距離以内（Y <= FLOAT_BAR.Y + 75）のみ選択可
     TAP_SELECT_EXTRA_RADIUS: 28,  // 各ゼリー実幅・実高に加えるタップ許容マージン（px）
 
-    // 2.5D 上段飛び越えホップ ＆ 自動再吸着（Bar-Hop & Re-Catch）定数
-    HOP_TRIGGER_DY: -12,          // 上向きドラッグ（dy < -12）で上段飛び越えホップモードへ自動切替
-    HOP_FORCE_MULTIPLIER: 0.026,  // ホップ発射時の初速係数（px/substep）
-    HOP_MIN_UP_SPEED: 1.9,        // 隣の塊を確実に飛び越える最小上向き初速（px/substep）
-    HOP_MAX_SPEED: 3.9,           // ホップ時の最大初速（px/substep）
-    HOP_GRAVITY_SCALE: 0.62,      // 頂点にふわっとした滞空の間を作るホップ専用重力倍率
+    // 天井非激突 2.5D 上段飛び越えホップ ＆ セーフ・リキャッチ定数
+    HOP_TRIGGER_DY: -8,           // わずかな斜め上ドラッグ（dy < -8）から軽快にホップモードへ切替
+    HOP_FORCE_MULTIPLIER: 0.026,  // 互換維持用
+    HOP_MIN_UP_SPEED: 0.96,       // 天井へ激突せず1個〜複数個を綺麗に飛び越える最小上向き初速
+    HOP_MAX_UP_SPEED: 1.18,       // 上昇高55px以内に収め天井非激突を保証する最大上向き初速
+    HOP_X_MULTIPLIER: 0.016,      // 1個飛び〜端から端まで狙い通り届く横方向初速係数
+    HOP_INHERIT_VX: 0.2,          // 予測ドットとのズレを防ぐ控えめなバー横速度継承率
+    HOP_MAX_SPEED: 3.9,           // ホップ時の最大合成初速（px/substep）
+    HOP_GRAVITY_SCALE: 0.72,      // 軽快で美しい山なりアーチを描くホップ専用重力倍率
     HOP_MIN_AIR_MS: 115,          // 発射直後に即再吸着しないための最小滞空時間（ms）
     HOP_RECATCH_Y_MIN: 92,        // 下降中にバーへ自動再吸着するY範囲下限
     HOP_RECATCH_Y_MAX: 138,       // 下降中にバーへ自動再吸着するY範囲上限
@@ -185,38 +210,42 @@ export const FLOAT_BAR = {
 };
 
 // ==========================================
-// 5. 容器（底面角カット）の設定
+// 5. 容器（一体外枠フレーム ＆ 底面角カット）の設定
 // ==========================================
 export const CONTAINER = {
-    CORNER_CUT_SIZE: 44           // 容器底面の左右45度角カットのサイズ（px）
+    FRAME_WIDTH: 8,               // 左右・底面を一周する一体グレー外枠フレーム幅（px）
+    TOP_BAR_HEIGHT: 12,           // 上枠スポーナー黒ゲージ帯の高さ（px）
+    CORNER_CUT_SIZE: 44           // 内壁基準の底面左右45度角カットサイズ（px）
 };
 
 // ==========================================
-// 6. 上部バンパー（危険判定スイッチ）の設定
+// 6. 上部バンパー（本家黄金比 サイド判定ボタン）の設定
 // ==========================================
 export const BUMPER = {
-    WIDTH: 16,                    // 壁から飛び出る厚み（かまぼこ型）
-    HEIGHT_RATIO: 0.15,           // 画面高さに対するバンパーの高さ割合
-    Y_RATIO: 0.39,                // FLOAT_BAR.Y=112 と十分な安全距離を保つY座標位置（39%）
-    PUSH_THRESHOLD: 8,            // 壁側へこの距離以上押し込まれたら赤色(ON)判定
-    MAX_PUSH: 14,                 // 壁側へ押し込める最大距離（px）
+    WIDTH: 18,                    // 内壁から内側へ突出する半円ボタン厚み（px）
+    HEIGHT_RATIO: 0.165,          // 画面高さに対するバンパーの高さ割合（115.5px）
+    Y_RATIO: 0.30,                // 本家実測準拠の引き上げ位置（y=210、下段安全高+60px拡大）
+    PUSH_THRESHOLD: 9,            // フレーム側へこの距離以上押し込まれたら赤色(ON)判定（px）
+    MAX_PUSH: 15,                 // フレーム側へ押し込める最大距離（px）
+    CHAMFER_RADIUS: 7,            // 上下端でゼリーが引っ掛かりにくい角丸面取り半径（px）
     GAME_OVER_HOLD_MS: 250        // 誤爆ゼロの左右同時押し込み確定時間（ms）
 };
 
 // ==========================================
-// 7. 演出およびスコア計算用パラメータ（6つの「動作の間」同期）
+// 7. 演出およびスコア計算用パラメータ（本家準拠 真っ白フラッシュ ＆ 連鎖の間）
 // ==========================================
 export const EFFECTS = {
     MERGE_EXPAND_FRAMES: 10,      // 合体時にぷるんと膨張させるフレーム数
     MERGE_EXPAND_SCALE: 1.12,     // 膨張時の最大スケール倍率
-    MERGE_ANTICIPATION_MIN_MS: 55,// 合体前の「吸い付きの間」最小時間（ms）
-    MERGE_ANTICIPATION_MAX_MS: 140,// 合体前の「吸い付きの間」最大時間（ms）
+    MERGE_ANTICIPATION_MIN_MS: 40,// キレのある合体前「吸い付きの間」最小時間（ms）
+    MERGE_ANTICIPATION_MAX_MS: 95,// 合体前「吸い付きの間」最大時間（ms）
     MERGE_GROW_START_SCALE: 0.78, // 合体時の縮小スポーン開始倍率（重なり・絡み合い根絶）
     MERGE_GROW_DURATION_MS: 150,  // 縮小スポーンから Ease-Out-Back で定着する時間（ms）
     MERGE_GROW_OVERSHOOT: 1.08,   // 成長完了直前にわずかにボヨンと弾むオーバーシュート倍率
-    MERGE_PROTECT_MIN_MS: 70,     // 合体後の面積比例保護時間下限（階段連鎖の間・ms）
-    MERGE_PROTECT_MAX_MS: 220,    // 合体後の面積比例保護時間上限（ms）
-    MERGE_BASE_DELAY_MS: 55,      // 最小ゼリーの合体保護ディレイ基準（ms）
+    MERGE_PROTECT_MIN_MS: 140,    // 合体後の真っ白フラッシュ＆連鎖保護時間下限（ms）
+    MERGE_PROTECT_MAX_MS: 300,    // 合体後の真っ白フラッシュ＆連鎖保護時間上限（ms）
+    MERGE_WHITE_HOLD_RATIO: 0.42, // 保護時間のうち完全真っ白（#ffffff）を保つ前半比率（後半58%で本色へフェード）
+    MERGE_BASE_DELAY_MS: 40,      // 最小ゼリーの合体保護ディレイ基準（ms）
     MERGE_AREA_DELAY_FACTOR: 0.0045 // 面積に応じて吸い付き・保護時間を延ばす係数
 };
 

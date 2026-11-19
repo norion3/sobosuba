@@ -1,23 +1,22 @@
 /**
  * render.js
- * @version v5.0 (Final Overhaul & Refactoring Step 8)
+ * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 10)
  * @changes
- *   - リファクタリング整理として renderGame() を5つの描画サブ関数（drawContainerAndTopBar / drawBumpersAndLedBars / drawSoftBodies / drawAimAndHopGuide / drawWarningOverlay）へ解体し、重複していたポリゴン包含判定を overlap_solver.js の isPointInsidePolygon() へ統一
- *   - 物理座標を揺らさずツノ・シワを根絶する「描画専用1パス軽量スムージング（0.18 / 0.64 / 0.18）」を外縁バッファへ導入し、本家級の滑らかな角丸多角形＆均一黒枠へ美化
- *   - 本家実機準拠の上枠「左右2本スポーナー黒ゲージ（gameState.spawnerGauges連動）＆フック白点」および「左右枠外の赤LED縦バー（押し込み率連動）」を新規描画
- *   - 非選択上段の濁り白枠を廃止し、選択中のみクッキリした太白枠＋中心起点白丸＋太矢印（ホップ時はシアン＋予測ドット）へ刷新
- *   - 2.5D上段飛び越えホップ中のゼリーを最前面レイヤーへ分離し、滞空高さ連動のポップアップ拡大＆軽量ドロップシャドウ描画、合体前の「吸い付き予兆発光（mergePreGlowUntil）」、および上下反転せず読みやすい穏やかな数字回転追従を実装
- *   - GRAVITYキャッシュ不整合対策として constants.js / overlap_solver.js の絶対パスを ?v=5 へ統一
+ *   - 容器外枠を本家準拠の「一体グレー外枠フレーム（左右・底 8px / 上枠 12px）」へ刷新し、底面左右45度角カットスロープおよび内壁境界ラインを physics.js と 0.000px 誤差で完全同期
+ *   - サイド判定ボタン（左右半円バンパー）を内壁矩形（FRAME_WIDTH / TOP_BAR_HEIGHT）で厳密クリップし、フレーム内のボタン真脇へ「幅 5px 角丸赤点灯サイドバー（未押下溝・押し込み率アナログ伸長・ON時真っ赤全点灯＋軽量赤グロウ）」を実装
+ *   - 本家準拠の「合体瞬間真っ白フラッシュ」を実装し、mergeFlashStart / mergeFlashUntil に同期して前半 42%（EFFECTS.MERGE_WHITE_HOLD_RATIO）を完全白（#ffffff）で保持し、後半 58% で本色へ滑らかにフェードバック（太字黒文字を維持）
+ *   - 細密ビーズ（16〜30個・BEAD_RADIUS_RATIO: 0.18）と完全液体変形の密着角丸多角形に合わせ、描画専用1パス軽量スムージング重みを 0.15 / 0.70 / 0.15 へ微調整
+ *   - GRAVITYキャッシュ不整合対策として constants.js / overlap_solver.js の絶対パスを ?v=6 へ統一
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
  * 外殻パーティクルの「外縁（外側のフチ）」へ描画専用の1パス軽量スムージングを適用して
- * ベジェ曲線で結ぶことで、隙間なく密着して美しく変形する本家sobosuba風のスライムを表現します。
+ * ベジェ曲線で結ぶことで、隙間なく密着して液体のように美しく変形する本家sobosuba風のスライムを表現します。
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, ACTIVE_THEME, JELLY_CONFIG, EFFECTS, CONTAINER, PHYSICS, FLOAT_BAR } from '/sobosuba/constants.js?v=5';
-import { isPointInsidePolygon } from '/sobosuba/overlap_solver.js?v=5';
+import { GAME_WIDTH, GAME_HEIGHT, ACTIVE_THEME, JELLY_CONFIG, EFFECTS, CONTAINER, PHYSICS, FLOAT_BAR } from '/sobosuba/constants.js?v=6';
+import { isPointInsidePolygon } from '/sobosuba/overlap_solver.js?v=6';
 
 // ==========================================
 // ゼロアロケーション（毎フレームGC負荷削減）用事前確保バッファ
@@ -62,57 +61,97 @@ function traceSmoothBlobPath(ctx, pts, n) {
     ctx.closePath();
 }
 
+/**
+ * 全モバイルWebView互換の角丸矩形パス構築ヘルパー（サイドバーLED描画用）
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {number} x
+ * @param {number} y
+ * @param {number} w
+ * @param {number} h
+ * @param {number} r
+ */
+function traceRoundedRect(ctx, x, y, w, h, r) {
+    const radius = Math.max(0, Math.min(r, w * 0.5, h * 0.5));
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.arcTo(x + w, y, x + w, y + radius, radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.arcTo(x + w, y + h, x + w - radius, y + h, radius);
+    ctx.lineTo(x + radius, y + h);
+    ctx.arcTo(x, y + h, x, y + h - radius, radius);
+    ctx.lineTo(x, y + radius);
+    ctx.arcTo(x, y, x + radius, y, radius);
+    ctx.closePath();
+}
+
 // ==========================================
-// サブ関数 1：背景・容器・上枠（左右2本スポーナー黒ゲージ＆フック白点）
+// サブ関数 1：背景・一体グレー外枠フレーム・内壁基準45度角カット・上枠（左右2本黒ゲージ＆フック白点）
 // ==========================================
 function drawContainerAndTopBar(ctx, composites, gameState) {
+    const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
+    const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
+    const cut = CONTAINER.CORNER_CUT_SIZE;
+
+    const innerLeft = frameW;
+    const innerRight = GAME_WIDTH - frameW;
+    const innerTop = topBarH;
+    const innerBottom = GAME_HEIGHT - frameW;
+
     // 1. 背景のクリア（漆黒のプレイフィールド）
     ctx.fillStyle = ACTIVE_THEME.containerBg || '#080808';
     ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
 
-    // 2. 容器の底面45度角カット三角形
-    const cut = CONTAINER.CORNER_CUT_SIZE;
+    // 2. 容器底面の45度角カット三角形（physics.js の内壁基準スロープと 0.000px 誤差同期）
     ctx.fillStyle = ACTIVE_THEME.cornerFill || '#262626';
 
     ctx.beginPath();
-    ctx.moveTo(0, GAME_HEIGHT - cut);
-    ctx.lineTo(cut, GAME_HEIGHT);
-    ctx.lineTo(0, GAME_HEIGHT);
+    ctx.moveTo(innerLeft, innerBottom - cut);
+    ctx.lineTo(innerLeft + cut, innerBottom);
+    ctx.lineTo(innerLeft, innerBottom);
     ctx.closePath();
     ctx.fill();
 
     ctx.beginPath();
-    ctx.moveTo(GAME_WIDTH, GAME_HEIGHT - cut);
-    ctx.lineTo(GAME_WIDTH - cut, GAME_HEIGHT);
-    ctx.lineTo(GAME_WIDTH, GAME_HEIGHT);
+    ctx.moveTo(innerRight, innerBottom - cut);
+    ctx.lineTo(innerRight - cut, innerBottom);
+    ctx.lineTo(innerRight, innerBottom);
     ctx.closePath();
     ctx.fill();
 
-    // 3. 容器の外枠ライン（左右壁・斜めスロープ・底面）
+    // 3. 本家準拠の一体グレー外枠フレーム（左・右・底 8px / 上枠 12px）
+    ctx.fillStyle = '#2c2f36';
+    // 上枠
+    ctx.fillRect(0, 0, GAME_WIDTH, topBarH);
+    // 左枠
+    ctx.fillRect(0, topBarH, frameW, GAME_HEIGHT - topBarH);
+    // 右枠
+    ctx.fillRect(GAME_WIDTH - frameW, topBarH, frameW, GAME_HEIGHT - topBarH);
+    // 底枠
+    ctx.fillRect(frameW, GAME_HEIGHT - frameW, GAME_WIDTH - frameW * 2, frameW);
+
+    // 容器の内壁エッジライン（左右内壁・斜め45度スロープ・底面・上枠下端）
     ctx.strokeStyle = ACTIVE_THEME.wallStroke || '#3a3a3a';
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(2, 0);
-    ctx.lineTo(2, GAME_HEIGHT - cut);
-    ctx.lineTo(cut, GAME_HEIGHT - 2);
-    ctx.lineTo(GAME_WIDTH - cut, GAME_HEIGHT - 2);
-    ctx.lineTo(GAME_WIDTH - 2, GAME_HEIGHT - cut);
-    ctx.lineTo(GAME_WIDTH - 2, 0);
+    ctx.moveTo(innerLeft, innerTop);
+    ctx.lineTo(innerLeft, innerBottom - cut);
+    ctx.lineTo(innerLeft + cut, innerBottom);
+    ctx.lineTo(innerRight - cut, innerBottom);
+    ctx.lineTo(innerRight, innerBottom - cut);
+    ctx.lineTo(innerRight, innerTop);
+    ctx.lineTo(innerLeft, innerTop);
     ctx.stroke();
 
-    // 4. 上枠バー ＆ 本家準拠「左右2本スポーナー黒ゲージ（黒が埋まると次のツモが来る）」
-    const topBarHeight = 10;
-    ctx.fillStyle = '#2c2f36';
-    ctx.fillRect(0, 0, GAME_WIDTH, topBarHeight);
-
+    // 4. 上枠バー内の本家準拠「左右2本スポーナー黒ゲージ（黒が埋まると次のツモが来る）」
     const gauges = (gameState && gameState.spawnerGauges) ? gameState.spawnerGauges : null;
     const leftRatio = gauges ? Math.max(0, Math.min(1, gauges.leftGaugeRatio || 0)) : 0;
     const rightRatio = gauges ? Math.max(0, Math.min(1, gauges.rightGaugeRatio || 0)) : 0;
 
-    const trackMarginX = 18;
+    const trackMarginX = frameW + 10;
     const centerGap = 24;
-    const trackY = 2.5;
-    const trackH = 5;
+    const trackH = 6;
+    const trackY = (topBarH - trackH) * 0.5;
     const trackW = (GAME_WIDTH - trackMarginX * 2 - centerGap) * 0.5;
     const leftTrackX = trackMarginX;
     const rightTrackX = GAME_WIDTH - trackMarginX - trackW;
@@ -144,7 +183,7 @@ function drawContainerAndTopBar(ctx, composites, gameState) {
 
     // 5. 上枠直下の「フック白点」（現在上段フロートバーに吊られている各ゼリーのX位置と同期）
     if (composites && composites.length > 0) {
-        const dotY = topBarHeight + 5;
+        const dotY = topBarH + 5;
         ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
         for (let i = 0; i < composites.length; i++) {
             const comp = composites[i];
@@ -160,10 +199,17 @@ function drawContainerAndTopBar(ctx, composites, gameState) {
 }
 
 // ==========================================
-// サブ関数 2：左右半円バンパー ＆ 枠外の赤LED縦バー
+// サブ関数 2：内壁厳密クリップ半円バンパー ＆ フレーム内「幅 5px 角丸赤点灯サイドバー」
 // ==========================================
 function drawBumpersAndLedBars(ctx, bumperState) {
     if (!bumperState) return;
+
+    const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
+    const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
+    const innerLeft = frameW;
+    const innerRight = GAME_WIDTH - frameW;
+    const innerTop = topBarH;
+    const innerBottom = GAME_HEIGHT - frameW;
 
     const drawHalfCircleBumperAndLed = (bumper, isPressed, pushRatio, isLeft) => {
         if (!bumper) return;
@@ -178,10 +224,11 @@ function drawBumpersAndLedBars(ctx, bumperState) {
         const endAngle = isLeft ? (Math.PI * 0.5) : (Math.PI * 1.5);
         const clampedRatio = Math.max(0, Math.min(1, (pushRatio !== undefined) ? pushRatio : (isPressed ? 1 : 0)));
 
-        // (A) 容器内側へ突出する半円（かまぼこ型）バンパー本体
+        // (A) 内壁矩形で厳密クリップされた半円（かまぼこ型）バンパー本体
+        // 押し込まれると一体グレー外枠フレームの奥へ自然に沈み込む
         ctx.save();
         ctx.beginPath();
-        ctx.rect(2, 0, GAME_WIDTH - 4, GAME_HEIGHT);
+        ctx.rect(innerLeft, innerTop, innerRight - innerLeft, innerBottom - innerTop);
         ctx.clip();
 
         if (isPressed) {
@@ -204,29 +251,37 @@ function drawBumpersAndLedBars(ctx, bumperState) {
         ctx.stroke();
         ctx.restore();
 
-        // (B) 本家準拠：左右外枠の「バンパー連動 赤LED縦バー」
-        const ledX = isLeft ? 0.5 : (GAME_WIDTH - 4.5);
-        const ledW = 4;
-        const ledTop = bumper.bounds.min.y + 4;
-        const ledH = Math.max(12, bh - 8);
+        // (B) 本家準拠：左右外枠フレーム内のボタン真脇「幅 5px 角丸赤点灯サイドバー」
+        const ledW = 5;
+        const ledX = isLeft ? ((frameW - ledW) * 0.5) : (GAME_WIDTH - frameW + (frameW - ledW) * 0.5);
+        const ledTop = bumper.bounds.min.y + 3;
+        const ledH = Math.max(16, bh - 6);
+        const ledRadius = ledW * 0.5;
 
-        // LED消灯ベーススロット
-        ctx.fillStyle = '#1b1d22';
-        ctx.fillRect(ledX, ledTop, ledW, ledH);
+        // 未押下スロット溝（フレームに埋め込まれた暗いスリット）
+        traceRoundedRect(ctx, ledX, ledTop, ledW, ledH, ledRadius);
+        ctx.fillStyle = '#14161a';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
 
-        // 押し込み率に応じて中央から上下へ赤LEDが伸び、押し込み確定で全点灯
-        if (clampedRatio > 0.04 || isPressed) {
+        // 押し込み率に応じて中央から上下へ赤サイドバーがアナログ伸長し、ON（押し込み確定）時は真っ赤全点灯＋赤グロウ
+        if (clampedRatio > 0.03 || isPressed) {
             const activeRatio = isPressed ? 1.0 : clampedRatio;
-            const activeH = ledH * activeRatio;
+            const activeH = Math.max(ledW, ledH * activeRatio);
             const activeY = cy - activeH * 0.5;
 
             if (isPressed) {
-                ctx.fillStyle = 'rgba(255, 30, 70, 0.40)';
-                ctx.fillRect(ledX - 1.5, activeY - 2, ledW + 3, activeH + 4);
+                // 高負荷な shadowBlur を使わない軽量赤グロウ演出
+                traceRoundedRect(ctx, ledX - 2, activeY - 3, ledW + 4, activeH + 6, ledRadius + 2);
+                ctx.fillStyle = 'rgba(255, 30, 70, 0.36)';
+                ctx.fill();
             }
 
-            ctx.fillStyle = isPressed ? '#ff1e46' : 'rgba(255, 42, 75, 0.78)';
-            ctx.fillRect(ledX, activeY, ledW, activeH);
+            traceRoundedRect(ctx, ledX, activeY, ledW, activeH, ledRadius);
+            ctx.fillStyle = isPressed ? '#ff1e46' : 'rgba(255, 42, 75, 0.85)';
+            ctx.fill();
         }
     };
 
@@ -245,7 +300,7 @@ function drawBumpersAndLedBars(ctx, bumperState) {
 }
 
 // ==========================================
-// サブ関数 3：ソフトボディ（1パス軽量スムージング・ホップ最前面ポップアップ・吸い付き予兆発光）
+// サブ関数 3：ソフトボディ（細密液体スムージング・ホップ最前面ポップアップ・合体真っ白フラッシュ）
 // ==========================================
 function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
     let particles = comp.particles || null;
@@ -262,7 +317,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
     const jellyValue = comp.jellyValue || particles[0].jellyValue || 1;
     const config = JELLY_CONFIG[jellyValue] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384] || JELLY_CONFIG[8192];
     const n = particles.length;
-    const beadRatio = PHYSICS.BEAD_RADIUS_RATIO || 0.25;
+    const beadRatio = PHYSICS.BEAD_RADIUS_RATIO || 0.18;
     const pRadius = comp.particleRadius || (config.radius * beadRatio);
 
     ensureOuterPointsCapacity(n);
@@ -322,15 +377,15 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
         outPt.y = pCurr.y + ny * pRadius;
     }
 
-    // 3. 描画専用1パス軽量スムージング（0.18 P_{i-1} + 0.64 P_i + 0.18 P_{i+1}）
-    // 物理座標へ一切触れず、描画直前の外縁のみ滑らかにしてツノ・ガタつきを根絶する
+    // 3. 細密ビーズ＋液体変形の美しい密着輪郭向け 描画専用1パス軽量スムージング（0.15 / 0.70 / 0.15）
+    // 物理座標へ一切触れず、角丸多角形の密着エッジを保ちながら微細なガタつきのみ滑らかに除去する
     for (let j = 0; j < n; j++) {
         const prevPt = outerPointsBuffer[(j - 1 + n) % n];
         const currPt = outerPointsBuffer[j];
         const nextPt = outerPointsBuffer[(j + 1) % n];
         const smPt = smoothedPointsBuffer[j];
-        smPt.x = prevPt.x * 0.18 + currPt.x * 0.64 + nextPt.x * 0.18;
-        smPt.y = prevPt.y * 0.18 + currPt.y * 0.64 + nextPt.y * 0.18;
+        smPt.x = prevPt.x * 0.15 + currPt.x * 0.70 + nextPt.x * 0.15;
+        smPt.y = prevPt.y * 0.15 + currPt.y * 0.70 + nextPt.y * 0.15;
     }
 
     // 4. 膨張アニメーション ＆ 2.5Dホップ立体ポップアップスケールの計算
@@ -417,7 +472,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
 
     // (A) 合体前の「吸い付きの間」予兆発光（mergePreGlowUntil 中にふわっと白く輝く）
     if (comp.mergePreGlowUntil && now < comp.mergePreGlowUntil) {
-        const startT = comp.mergePreGlowStart || (comp.mergePreGlowUntil - 75);
+        const startT = comp.mergePreGlowStart || (comp.mergePreGlowUntil - 60);
         const span = Math.max(1, comp.mergePreGlowUntil - startT);
         const prog = Math.max(0, Math.min(1, (now - startT) / span));
         const glowAlpha = 0.12 + prog * 0.36;
@@ -425,18 +480,31 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
         ctx.fill();
     }
 
-    // (B) 合体直後の微細なフラッシュ演出（保護時間・フラッシュ時間中のみふわっと白く光る）
+    // (B) 本家準拠「合体瞬間の真っ白フラッシュ」（保護時間 140〜300ms と 1対1 完全同期）
+    // 前半 42% は完全白（#ffffff）を保持し、後半 58% で本色へ滑らかにフェードバックする
     if (comp.mergeFlashUntil && now < comp.mergeFlashUntil) {
-        const totalFlash = Math.max(120, comp.mergeFlashUntil - (comp.createdAt || (comp.mergeFlashUntil - 120)));
-        const remain = comp.mergeFlashUntil - now;
-        const flashRatio = Math.max(0, Math.min(1, remain / totalFlash));
-        ctx.fillStyle = `rgba(255, 255, 255, ${(flashRatio * 0.45).toFixed(3)})`;
-        ctx.fill();
+        const flashStart = comp.mergeFlashStart || comp.createdAt || (comp.mergeFlashUntil - 160);
+        const totalFlash = Math.max(1, comp.mergeFlashUntil - flashStart);
+        const progress = Math.max(0, Math.min(1, (now - flashStart) / totalFlash));
+        const whiteHoldRatio = (EFFECTS.MERGE_WHITE_HOLD_RATIO !== undefined) ? EFFECTS.MERGE_WHITE_HOLD_RATIO : 0.42;
+
+        if (progress <= whiteHoldRatio) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+        } else {
+            const fadeT = Math.max(0, Math.min(1, (progress - whiteHoldRatio) / Math.max(0.01, 1 - whiteHoldRatio)));
+            const whiteAlpha = Math.pow(1 - fadeT, 1.45);
+            if (whiteAlpha > 0.005) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${whiteAlpha.toFixed(3)})`;
+                ctx.fill();
+            }
+        }
     }
 
     ctx.restore();
 
     // 7. 数字の描画（overlap_solver.js 共有のポリゴン内安全位置補正 ＆ 読みやすい穏やかな回転追従）
+    // 真っ白フラッシュ中も太字黒文字（コントラスト比 21:1）をそのまま維持して描画
     let textX = cx;
     let textY = cy;
     let effectiveThickness = minRadialDist + pRadius;
@@ -503,7 +571,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
     const digitScale = valueText.length >= 5 ? 0.58 : (valueText.length >= 4 ? 0.68 : (valueText.length >= 3 ? 0.82 : 1.0));
     // 上段横長カプセル時は縦半高を基準にバランス良く収める
     const refRadius = comp.isFloating
-        ? Math.min(config.radius, (comp.capsuleHalfHeight || FLOAT_BAR.CHANNEL_HALF_HEIGHT || 21) * 1.15)
+        ? Math.min(config.radius, (comp.capsuleHalfHeight || FLOAT_BAR.CHANNEL_HALF_HEIGHT || 22) * 1.15)
         : config.radius;
     const baseFontSize = Math.max(12, refRadius * 0.62 * digitScale);
     const safeWidthLimit = Math.max(9, effectiveThickness * 1.55 * digitScale);
@@ -563,15 +631,18 @@ function drawSoftBodies(ctx, composites, gameState) {
 function drawAimAndHopGuide(ctx, gameState) {
     if (!gameState || !gameState.isDragging || gameState.isGameOver) return;
 
+    const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
+    const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
+
     let originX = gameState.dragStartX;
     let originY = gameState.dragStartY;
-    let selectedHalfH = 21;
+    let selectedHalfH = 22;
 
     if (gameState.selectedJelly) {
         const sel = gameState.selectedJelly;
         selectedHalfH = sel.isFloating
-            ? (sel.capsuleHalfHeight || Math.min(sel.targetRadius || 21, FLOAT_BAR.CHANNEL_HALF_HEIGHT || 21))
-            : (sel.targetRadius || 21);
+            ? (sel.capsuleHalfHeight || Math.min(sel.targetRadius || 21.5, FLOAT_BAR.CHANNEL_HALF_HEIGHT || 22))
+            : (sel.targetRadius || 21.5);
 
         if (sel.centroid) {
             originX = sel.centroid.x;
@@ -594,7 +665,7 @@ function drawAimAndHopGuide(ctx, gameState) {
     const dist = Math.sqrt(dx * dx + dy * dy);
     const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
     const hasDraggedOut = Boolean(gameState.hasDraggedOut);
-    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -12;
+    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -8;
     const isHopAim = Boolean(gameState.isHopAim || (dist >= cancelRadius && dy < hopTriggerDy));
 
     ctx.save();
@@ -677,8 +748,8 @@ function drawAimAndHopGuide(ctx, gameState) {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        const badgeX = Math.max(18, Math.min(GAME_WIDTH - 18, originX));
-        const badgeY = Math.max(26, originY - selectedHalfH - 22);
+        const badgeX = Math.max(frameW + 14, Math.min(GAME_WIDTH - frameW - 14, originX));
+        const badgeY = Math.max(topBarH + 16, originY - selectedHalfH - 22);
 
         ctx.beginPath();
         ctx.arc(badgeX, badgeY, 12, 0, Math.PI * 2);
@@ -760,10 +831,10 @@ export function renderGame(ctx, world, gameState, bumperState) {
     // 毎フレームの配列新規生成を避けるため world.composites を直接参照
     const composites = (world && world.composites) ? world.composites : Matter.Composite.allComposites(world);
 
-    // 1. 背景・底面角カット・外枠・上枠スポーナー黒ゲージ＆フック白点
+    // 1. 背景・一体グレー外枠フレーム・内壁基準45度角カット・上枠スポーナー黒ゲージ＆フック白点
     drawContainerAndTopBar(ctx, composites, gameState);
 
-    // 2. 左右半円バンパー ＆ 枠外の赤LED縦バー
+    // 2. 内壁厳密クリップ半円バンパー ＆ フレーム内「幅 5px 角丸赤点灯サイドバー」
     drawBumpersAndLedBars(ctx, bumperState);
 
     // 3. ソフトボディ本体（通常レイヤー ＋ ホップ最前面レイヤー）

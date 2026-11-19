@@ -1,28 +1,49 @@
 /**
  * dom_ui.js
- * @version v4.0 (Final Overhaul Step 3)
+ * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 3)
  * @changes
- *   - ゲームオーバー画面のリトライボタン絶対配置を廃止し、小画面（iPhone SE等）や横向き表示でも Final Score とリトライボタンが絶対に重ならない安全なFlexリザルトレイアウトへ修正（GRAVITY下部215pxセーフエリア維持）
- *   - GRAVITYアプリ内WebViewと通常ブラウザ（Safari / Chrome / PC等）を自動判別し、上部ヘッダー余白を UI.SAFE_TOP_HEADER_PX / UI.SAFE_TOP_HEADER_BROWSER_PX へ最適化
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=4 へ統一
+ *   - #topHudHeader 内にパディング非干渉の内側ラッパー行を新設し、GRAVITY左上「<」戻るボタンと絶対非干渉かつ SCORE 絶対中央を維持した左端へ、絵文字不使用のインラインSVG音量ON/OFFボタン（初期OFF）を配置
+ *   - 音量ボタンに対して全8イベント（touchstart / touchmove / touchend / touchcancel / mousedown / mousemove / mouseup / click）の stopPropagation() と二重発火防止を実装し、input.js 無変更のまま誤爆を完全防止
+ *   - initUI(onRetryCallback, onToggleSoundCallback) へのコールバック拡張および音量表示同期用の updateSoundUI(isOn) を追加
+ *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=6 へ統一
  * 
- * 動的DOMマウント、HTML要素の更新、スコア表示、および安全なUI制御を行うモジュール
+ * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、および安全なUI制御を行うモジュール
  * 
  * くねくねバトル方式に則り、HTMLファイルにタグを直書きせず、
  * JS側から動的にCanvasやHUD要素を生成（マウント）します。
- * ※スイカゲーム風のNEXTプレビューUIは撤廃し、スコア表示とゲームオーバーUIのみを管理します。
+ * ※スイカゲーム風のNEXTプレビューUIは撤廃し、スコア表示・音量ON/OFFボタン・ゲームオーバーUIを管理します。
  */
 
-import { UI } from '/sobosuba/constants.js?v=4';
+import { UI } from '/sobosuba/constants.js?v=6';
 
 // DOM要素のキャッシュ
 let elGameContainer;
 let elCanvasStage;
 let elScoreDisplay;
+let elSoundBtn;
+let elSoundIcon;
+let elSoundLabel;
 let elGameOverUI;
 let elFinalScore;
 let elWarningOverlay;
 let elRetryBtn;
+
+// 絵文字不使用の軽量インラインSVGスピーカーアイコン定義
+const SVG_SPEAKER_OFF = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display: block; flex-shrink: 0;">
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+        <line x1="23" y1="9" x2="17" y2="15"></line>
+        <line x1="17" y1="9" x2="23" y2="15"></line>
+    </svg>
+`;
+
+const SVG_SPEAKER_ON = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display: block; flex-shrink: 0;">
+        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+        <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+        <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+    </svg>
+`;
 
 /**
  * GRAVITYアプリ内WebViewかどうかを判別し、最適な上部ヘッダー余白（px）を返す
@@ -74,7 +95,7 @@ export function mountDOM() {
     `;
     document.body.appendChild(gameContainer);
 
-    // 2. 上部HUDヘッダー（GRAVITY上部ネイティブボタン帯回避 ＆ 通常ブラウザ余白最適化）
+    // 2. 上部HUDヘッダー（GRAVITY上部ネイティブボタン帯回避 ＆ パディング非干渉ラッパー行）
     const topHudHeader = document.createElement('div');
     topHudHeader.id = 'topHudHeader';
     topHudHeader.style.cssText = `
@@ -92,9 +113,18 @@ export function mountDOM() {
         z-index: 10;
     `;
     topHudHeader.innerHTML = `
-        <div style="display: inline-flex; flex-direction: row; align-items: baseline; justify-content: center; gap: 8px; padding: 2px 14px; color: white; font-weight: bold; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));">
-            <span style="font-size: 0.7rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.1em; line-height: 1;">Score</span>
-            <span id="scoreDisplay" style="font-feature-settings: 'tnum'; font-size: 1.4rem; line-height: 1.1; color: #60a5fa;">0</span>
+        <div id="topHudInnerRow" style="position: relative; width: 100%; max-width: 420px; min-height: 30px; display: flex; justify-content: center; align-items: center; pointer-events: none;">
+            <!-- GRAVITY規格: <div> タグによる絵文字不使用のインラインSVG音量ON/OFFボタン（初期OFF・左端非干渉配置） -->
+            <div id="soundToggleBtn" role="button" aria-label="音量切り替え" aria-pressed="false" style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); pointer-events: auto; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 26px; padding: 3px 9px; border-radius: 9999px; border: 1px solid rgba(255, 255, 255, 0.16); background-color: rgba(255, 255, 255, 0.06); color: #9ca3af; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.06em; line-height: 1; cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: manipulation; box-sizing: border-box;">
+                <span id="soundToggleIcon" style="display: inline-flex; align-items: center; justify-content: center; pointer-events: none;">${SVG_SPEAKER_OFF}</span>
+                <span id="soundToggleLabel" style="pointer-events: none;">OFF</span>
+            </div>
+
+            <!-- 絶対中央維持スコア表示 -->
+            <div style="display: inline-flex; flex-direction: row; align-items: baseline; justify-content: center; gap: 8px; padding: 2px 14px; color: white; font-weight: bold; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); pointer-events: none;">
+                <span style="font-size: 0.7rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.1em; line-height: 1;">Score</span>
+                <span id="scoreDisplay" style="font-feature-settings: 'tnum'; font-size: 1.4rem; line-height: 1.1; color: #60a5fa;">0</span>
+            </div>
         </div>
     `;
     gameContainer.appendChild(topHudHeader);
@@ -175,8 +205,9 @@ export function mountDOM() {
 /**
  * UI制御モジュールの初期化
  * @param {Function} onRetryCallback - リトライボタンが押された時に実行されるコールバック関数
+ * @param {Function|null} [onToggleSoundCallback] - 音量ON/OFFボタンが押された時に実行されるコールバック関数
  */
-export function initUI(onRetryCallback) {
+export function initUI(onRetryCallback, onToggleSoundCallback = null) {
     // 1. DOMを動的に生成してマウント
     mountDOM();
 
@@ -184,10 +215,93 @@ export function initUI(onRetryCallback) {
     elGameContainer = document.getElementById('game-container');
     elCanvasStage = document.getElementById('canvasStage');
     elScoreDisplay = document.getElementById('scoreDisplay');
+    elSoundBtn = document.getElementById('soundToggleBtn');
+    elSoundIcon = document.getElementById('soundToggleIcon');
+    elSoundLabel = document.getElementById('soundToggleLabel');
     elGameOverUI = document.getElementById('gameOverUI');
     elFinalScore = document.getElementById('finalScore');
     elWarningOverlay = document.getElementById('warningOverlay');
     elRetryBtn = document.getElementById('retryBtn');
+
+    // 初期表示はデフォルト OFF を保証
+    updateSoundUI(false);
+
+    // =========================================================
+    // 音量ON/OFFボタンのバインド
+    // input.js 無変更のまま干渉ゼロを保証するため全8イベントで stopPropagation() を徹底
+    // ＆ touchend/click の二重発火防止（iOS同期ユーザージェスチャー内で即コールバック実行）
+    // =========================================================
+    if (elSoundBtn) {
+        let lastSoundToggleTime = 0;
+        let soundTouchStartX = 0;
+        let soundTouchStartY = 0;
+        let isSoundTouchActive = false;
+
+        const triggerSoundToggle = () => {
+            const now = Date.now();
+            if (now - lastSoundToggleTime < 350) return;
+            lastSoundToggleTime = now;
+
+            if (typeof onToggleSoundCallback === 'function') {
+                const nextState = onToggleSoundCallback();
+                if (typeof nextState === 'boolean') {
+                    updateSoundUI(nextState);
+                }
+            }
+        };
+
+        // マウス系4イベント（window監視の input.js へのバブリングを完全遮断）
+        elSoundBtn.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+        });
+        elSoundBtn.addEventListener('mousemove', (e) => {
+            e.stopPropagation();
+        });
+        elSoundBtn.addEventListener('mouseup', (e) => {
+            e.stopPropagation();
+        });
+        elSoundBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            triggerSoundToggle();
+        });
+
+        // タッチ系4イベント（window監視の input.js へのバブリングを完全遮断）
+        elSoundBtn.addEventListener('touchstart', (e) => {
+            e.stopPropagation();
+            if (e.touches && e.touches.length > 0) {
+                soundTouchStartX = e.touches[0].clientX;
+                soundTouchStartY = e.touches[0].clientY;
+                isSoundTouchActive = true;
+            }
+        }, { passive: true });
+
+        elSoundBtn.addEventListener('touchmove', (e) => {
+            e.stopPropagation();
+        }, { passive: true });
+
+        elSoundBtn.addEventListener('touchend', (e) => {
+            e.stopPropagation();
+            if (!isSoundTouchActive) return;
+            isSoundTouchActive = false;
+
+            if (e.changedTouches && e.changedTouches.length > 0) {
+                const dx = e.changedTouches[0].clientX - soundTouchStartX;
+                const dy = e.changedTouches[0].clientY - soundTouchStartY;
+                const moveDist = Math.sqrt(dx * dx + dy * dy);
+                if (moveDist <= 24) {
+                    if (e.cancelable) {
+                        e.preventDefault();
+                    }
+                    triggerSoundToggle();
+                }
+            }
+        }, { passive: false });
+
+        elSoundBtn.addEventListener('touchcancel', (e) => {
+            e.stopPropagation();
+            isSoundTouchActive = false;
+        }, { passive: true });
+    }
 
     // =========================================================
     // GRAVITY規格: ボタンタグを避け、<div> + stopPropagation でリトライを実装
@@ -242,6 +356,36 @@ export function initUI(onRetryCallback) {
                 }
             }
         }, { passive: false });
+    }
+}
+
+/**
+ * 音量ON/OFFボタンのインラインSVGアイコン・ラベル・配色を最新状態へ同期する
+ * @param {boolean} isOn - 音量がONの場合は true、OFFの場合は false
+ */
+export function updateSoundUI(isOn) {
+    if (!elSoundBtn) {
+        elSoundBtn = document.getElementById('soundToggleBtn');
+        elSoundIcon = document.getElementById('soundToggleIcon');
+        elSoundLabel = document.getElementById('soundToggleLabel');
+    }
+    if (!elSoundBtn) return;
+
+    const enabled = Boolean(isOn);
+    elSoundBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+
+    if (enabled) {
+        elSoundBtn.style.color = '#60a5fa';
+        elSoundBtn.style.borderColor = 'rgba(96, 165, 250, 0.48)';
+        elSoundBtn.style.backgroundColor = 'rgba(96, 165, 250, 0.14)';
+        if (elSoundIcon) elSoundIcon.innerHTML = SVG_SPEAKER_ON;
+        if (elSoundLabel) elSoundLabel.textContent = 'ON';
+    } else {
+        elSoundBtn.style.color = '#9ca3af';
+        elSoundBtn.style.borderColor = 'rgba(255, 255, 255, 0.16)';
+        elSoundBtn.style.backgroundColor = 'rgba(255, 255, 255, 0.06)';
+        if (elSoundIcon) elSoundIcon.innerHTML = SVG_SPEAKER_OFF;
+        if (elSoundLabel) elSoundLabel.textContent = 'OFF';
     }
 }
 

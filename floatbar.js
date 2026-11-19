@@ -1,24 +1,32 @@
 /**
  * floatbar.js
- * @version v5.0 (Final Overhaul & Refactoring Step 6 - New Module)
+ * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 8)
  * @changes
- *   - リファクタリング分離として、main.js から出現テーブル（generateNextValue）・初期配置（initFloatBar）・左右2点スポーナー＆セーフティスポーン（maintainFloatBar）・上段状態参照ヘルパー（getFloatingJellies / getBarHoppingCount）を独立モジュール化
- *   - 上段フロートバーの横長カプセル形状に対応し、getCapsuleHalfExtentsForValue() および getSoftBodyHalfExtents() を用いた横長実幅ベースの初期配置・クリアランス検知・セーフティスポーン探索へ刷新
- *   - 本家上枠の「左右2本スポーナー黒ゲージ（黒が埋まると次のツモが来る）」描画と同期するため、空き距離と供給ディレイ（ゲージの間）を統合した leftGaugeRatio / rightGaugeRatio（0.0〜1.0）を毎フレーム算出・返却する機能を追加
- *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js の絶対パスを ?v=5 へ統一
+ *   - 一体外枠フレーム（CONTAINER.FRAME_WIDTH: 8）およびバンパー面回避余白（FLOAT_BAR.PADDING_X: 26）基準へ、左右スポーナー座標（LEFT_SPAWN_X: 48 / RIGHT_SPAWN_X: 372）・クリアランス検知・初期配置・セーフティスポーン安全幅を完全同期
+ *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js の絶対パスを ?v=6 へ統一
  * 
  * 上部フロートバーのゼリー生成・出現テーブル・左右2点クリアランス検知スポーナー・
  * セーフティスポーンおよび上枠スポーナーゲージ進捗管理を担うモジュール
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, FLOAT_BAR } from '/sobosuba/constants.js?v=5';
+import { GAME_WIDTH, CONTAINER, FLOAT_BAR } from '/sobosuba/constants.js?v=6';
 import {
     createSoftBodyJelly,
     getSoftBodyCentroid,
     getSoftBodyHalfExtents,
     getCapsuleHalfExtentsForValue
-} from '/sobosuba/softbody.js?v=5';
+} from '/sobosuba/softbody.js?v=6';
+
+/**
+ * 一体外枠フレーム（FRAME_WIDTH）およびバンパー面基準（FLOAT_BAR.PADDING_X）と同期した
+ * 上段フロートバーの安全な左右余白（px）を返す
+ * @returns {number}
+ */
+function getSafeBarPaddingX() {
+    const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
+    return Math.max(frameW + 4, FLOAT_BAR.PADDING_X || 26);
+}
 
 // ==========================================
 // 出現テーブル（本家スコア帯準拠）
@@ -146,8 +154,9 @@ function getBarAreaJellies(world, newHalfHeight) {
  * @returns {number} 最小クリアランス（px、負値は重なりを意味する）
  */
 function calcSpawnClearance(spawnX, newHalfW, newHalfH, barAreaJellies) {
-    const minX = FLOAT_BAR.PADDING_X + newHalfW;
-    const maxX = GAME_WIDTH - FLOAT_BAR.PADDING_X - newHalfW;
+    const padX = getSafeBarPaddingX();
+    const minX = padX + newHalfW;
+    const maxX = GAME_WIDTH - padX - newHalfW;
     if (spawnX < minX - 1 || spawnX > maxX + 1) return -Infinity;
 
     let minClearance = Infinity;
@@ -227,7 +236,7 @@ function writeGaugeState(gameState, leftRatio, rightRatio) {
 // 初期配置 ＆ 毎フレーム補充メンテナンス
 // ==========================================
 /**
- * ゲーム開始時に上部フロートバーへ初期ゼリーを横長カプセル実幅間隔で配置する
+ * ゲーム開始時に上部フロートバーへ初期ゼリーを内壁・バンパー面基準の横長カプセル実幅間隔で配置する
  * 開始直後の意図せぬ自動合体を防ぐため、隣接する数字が重複しないように生成する
  * @param {Matter.World} world - Matter.jsの物理世界
  * @param {Object} gameState - ゲーム状態オブジェクト
@@ -235,6 +244,7 @@ function writeGaugeState(gameState, leftRatio, rightRatio) {
 export function initFloatBar(world, gameState) {
     if (!world) return;
 
+    const padX = getSafeBarPaddingX();
     const score = gameState ? gameState.score : 0;
     const count = Math.min(4, FLOAT_BAR.MAX_COUNT || 5);
     const values = [];
@@ -254,7 +264,7 @@ export function initFloatBar(world, gameState) {
     }
 
     const gap = 8;
-    const usableWidth = GAME_WIDTH - FLOAT_BAR.PADDING_X * 2;
+    const usableWidth = GAME_WIDTH - padX * 2;
     const totalWidth = sumWidths + (count - 1) * gap;
     const scaleRatio = totalWidth > usableWidth ? (usableWidth / totalWidth) : 1;
     const actualTotalWidth = totalWidth * scaleRatio;
@@ -263,8 +273,8 @@ export function initFloatBar(world, gameState) {
 
     for (let i = 0; i < count; i++) {
         const hw = halfWidths[i];
-        const minX = FLOAT_BAR.PADDING_X + hw;
-        const maxX = GAME_WIDTH - FLOAT_BAR.PADDING_X - hw;
+        const minX = padX + hw;
+        const maxX = GAME_WIDTH - padX - hw;
         const rawX = cursorX + hw * scaleRatio;
         const clampedX = (minX <= maxX) ? Math.max(minX, Math.min(maxX, rawX)) : (GAME_WIDTH / 2);
 
@@ -279,7 +289,7 @@ export function initFloatBar(world, gameState) {
 }
 
 /**
- * 本家準拠：左右2箇所のスポーナーが横長実幅ベースで空き距離（クリアランス）を検知して補充し、
+ * 本家準拠：左右2箇所のスポーナーが内壁・バンパー面基準の横長実幅ベースで空き距離（クリアランス）を検知して補充し、
  * 両端閉塞かつバーが空の状態が続いた場合はセーフティスポーンで詰みを防ぐ。
  * あわせて上枠描画用の左右スポーナー黒ゲージ進捗率（leftGaugeRatio / rightGaugeRatio）を算出・返却する。
  * @param {Matter.World} world - Matter.jsの物理世界
@@ -292,6 +302,7 @@ export function maintainFloatBar(world, gameState) {
     }
 
     const now = Date.now();
+    const padX = getSafeBarPaddingX();
     const floating = getFloatingJellies(world);
     const hoppingCount = getBarHoppingCount(world);
     const barOwnedCount = floating.length + hoppingCount;
@@ -323,9 +334,9 @@ export function maintainFloatBar(world, gameState) {
 
     const barAreaJellies = getBarAreaJellies(world, newHalfH);
 
-    // 左右2点スポーナーの基準X座標（横長カプセルが壁へめり込まないよう実半幅を考慮）
-    const leftSpawnX = Math.max(FLOAT_BAR.LEFT_SPAWN_X || (FLOAT_BAR.PADDING_X + newHalfW), FLOAT_BAR.PADDING_X + newHalfW);
-    const rightSpawnX = Math.min(FLOAT_BAR.RIGHT_SPAWN_X || (GAME_WIDTH - FLOAT_BAR.PADDING_X - newHalfW), GAME_WIDTH - FLOAT_BAR.PADDING_X - newHalfW);
+    // 左右2点スポーナーの基準X座標（内壁8px＋バンパー面回避の safePadX と横長実半幅を考慮）
+    const leftSpawnX = Math.max(FLOAT_BAR.LEFT_SPAWN_X || (padX + newHalfW), padX + newHalfW);
+    const rightSpawnX = Math.min(FLOAT_BAR.RIGHT_SPAWN_X || (GAME_WIDTH - padX - newHalfW), GAME_WIDTH - padX - newHalfW);
 
     const leftClearance = calcSpawnClearance(leftSpawnX, newHalfW, newHalfH, barAreaJellies);
     const rightClearance = calcSpawnClearance(rightSpawnX, newHalfW, newHalfH, barAreaJellies);
@@ -385,8 +396,8 @@ export function maintainFloatBar(world, gameState) {
     // ==========================================
     const safetyDelay = FLOAT_BAR.SAFETY_SPAWN_DELAY_MS || 1500;
     if (barOwnedCount === 0 && gameState.barEmptySince > 0 && (now - gameState.barEmptySince) >= safetyDelay) {
-        const minX = FLOAT_BAR.PADDING_X + newHalfW;
-        const maxX = GAME_WIDTH - FLOAT_BAR.PADDING_X - newHalfW;
+        const minX = padX + newHalfW;
+        const maxX = GAME_WIDTH - padX - newHalfW;
         let bestX = GAME_WIDTH / 2;
         let bestClearance = -Infinity;
         const samples = 9;

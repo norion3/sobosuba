@@ -1,30 +1,29 @@
 /**
  * main.js
- * @version v5.0 (Final Overhaul & Refactoring Step 9 - Final Integration)
+ * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 11 - Final Integration)
  * @changes
- *   - リファクタリング完成として、上段フロートバー管理を floatbar.js（initFloatBar / maintainFloatBar）へ、操作・エイム・2.5Dホップ軌道予測を aim.js（resetAimState / syncAimToPointer / startAimDrag / updateAimDrag / endAimDrag）へ統合委譲し、起動・ループ・リトライ・リサイズを司る明快な司令塔へ大幅スリム化
- *   - physics.js のバンパー押し込み率（leftPushRatio / rightPushRatio）および floatbar.js の上枠スポーナー黒ゲージ進捗（gameState.spawnerGauges）を render.js へ連携
- *   - ゲームオーバー確定時の「余韻の間（UI.GAME_OVER_DELAY_MS = 550ms）」を統合し、ザップ音再生および両側赤LED点灯を維持した静止盤面を表示してからリザルト画面へ遷移
- *   - GRAVITYキャッシュ不整合対策として、v5.0更新・新規モジュール（constants / physics / softbody / jelly / floatbar / aim / render）の絶対パスインポートを ?v=5 へ統一（既存安定の dom_ui / input / sound は ?v=4 を維持）
+ *   - initUI(startGame, handleToggleSound) へ sound.js の同期ハード初期化付きトグル（toggleSound）を接続し、起動時デフォルト OFF の UI 状態（updateSoundUI）を同期（リトライ時も音量設定を維持）
+ *   - stepPhysics() のコールバックから subDelta を受け取り updateSoftBodies(world, engine, subDelta) へ引き渡すことで遅延適応的圧迫ダンピングを正確に駆動し、endAimDrag(gameState, onLaunched, world) へ world を連携（斜め下すり抜け保護の同数字隣接判定用）
+ *   - GRAVITYキャッシュ不整合対策として、v6.0全更新モジュール（constants / physics / softbody / jelly / floatbar / aim / render / dom_ui / sound）の絶対パスインポートを ?v=6 へ統一（無変更安定の input.js は ?v=4 を維持）
  * 
  * sobosuba風パズル（中空ビーズリング・ソフトボディ版）のマスター統合モジュール
  * 
  * GRAVITY規格に準拠するため、全てのモジュールを絶対パスでインポートし、
  * Matter.jsのサブステップ物理シミュレーション、上部フロートバー管理、
- * 順方向ダイレクトエイム／2.5D上段飛び越えホップ、および描画ループを統合・管理します。
+ * 順方向ダイレクトエイム／2.5D上段飛び越えホップ、音量制御、および描画ループを統合・管理します。
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, UI } from '/sobosuba/constants.js?v=5';
-import { initPhysics, stepPhysics, updateBumpers, leftBumper, rightBumper } from '/sobosuba/physics.js?v=5';
-import { updateSoftBodies } from '/sobosuba/softbody.js?v=5';
-import { handleCollisions, handleMerges, resetMergeQueues } from '/sobosuba/jelly.js?v=5';
-import { initFloatBar, maintainFloatBar } from '/sobosuba/floatbar.js?v=5';
-import { resetAimState, syncAimToPointer, startAimDrag, updateAimDrag, endAimDrag } from '/sobosuba/aim.js?v=5';
-import { renderGame } from '/sobosuba/render.js?v=5';
-import { initUI, applyViewportSize, getCanvasStageElement, updateScoreUI, showGameOverUI, hideGameOverUI, setWarningEffect } from '/sobosuba/dom_ui.js?v=4';
+import { GAME_WIDTH, GAME_HEIGHT, UI } from '/sobosuba/constants.js?v=6';
+import { initPhysics, stepPhysics, updateBumpers, leftBumper, rightBumper } from '/sobosuba/physics.js?v=6';
+import { updateSoftBodies } from '/sobosuba/softbody.js?v=6';
+import { handleCollisions, handleMerges, resetMergeQueues } from '/sobosuba/jelly.js?v=6';
+import { initFloatBar, maintainFloatBar } from '/sobosuba/floatbar.js?v=6';
+import { resetAimState, syncAimToPointer, startAimDrag, updateAimDrag, endAimDrag } from '/sobosuba/aim.js?v=6';
+import { renderGame } from '/sobosuba/render.js?v=6';
+import { initUI, updateSoundUI, applyViewportSize, getCanvasStageElement, updateScoreUI, showGameOverUI, hideGameOverUI, setWarningEffect } from '/sobosuba/dom_ui.js?v=6';
 import { initInput, getPointerState, updateScale } from '/sobosuba/input.js?v=4';
-import { playSoundGameOverZap } from '/sobosuba/sound.js?v=4';
+import { isSoundEnabled, toggleSound, playSoundGameOverZap } from '/sobosuba/sound.js?v=6';
 
 // ==========================================
 // グローバル変数・ゲームステート
@@ -70,7 +69,7 @@ const gameState = {
     dragVectorX: 0,
     dragVectorY: 0,
 
-    // 描画用バンパー最新状態キャッシュ（左右枠外の赤LED縦バー連動用）
+    // 描画用バンパー最新状態キャッシュ（左右枠内の赤点灯サイドバー連動用）
     lastBumperState: {
         leftPressed: false,
         rightPressed: false,
@@ -78,6 +77,15 @@ const gameState = {
         rightPushRatio: 0
     }
 };
+
+// ==========================================
+// 音量トグル制御（ON時に同期ハード初期化を実行しUIを即同期）
+// ==========================================
+function handleToggleSound() {
+    const enabled = toggleSound();
+    updateSoundUI(enabled);
+    return enabled;
+}
 
 // ==========================================
 // ゲーム初期化・リセット処理
@@ -96,12 +104,12 @@ function startGame() {
     // リトライ時のゴーストゼリー発生を防ぐため、前ゲームの合体キューを完全初期化
     resetMergeQueues();
 
-    // 物理エンジンの初期化（超低摩擦の壁・天井クッション・底面角カット・上部左右バンパーの生成）
+    // 物理エンジンの初期化（極低摩擦の壁・天井クッション・底面角カット・上部左右バンパーの生成）
     const physics = initPhysics();
     engine = physics.engine;
     world = physics.world;
 
-    // ステートのリセット
+    // ステートのリセット（音量ON/OFF設定はリトライ時もそのまま維持）
     gameState.score = 0;
     gameState.isGameOver = false;
     gameState.canDrop = true;
@@ -174,7 +182,7 @@ function handleDragEnd() {
             dropCooldownTimer = null;
             if (!gameState.isGameOver) gameState.canDrop = true;
         }, UI.DROP_COOLDOWN_MS);
-    });
+    }, world);
 }
 
 // ==========================================
@@ -192,9 +200,9 @@ function gameLoop(timestamp) {
     gameState.frameCount++;
 
     if (!gameState.isGameOver) {
-        // 1. 4分割サブステップで物理演算およびソフトボディ（横長カプセル・形状保持・分散排斥）を更新
-        stepPhysics(deltaMs, () => {
-            updateSoftBodies(world, engine);
+        // 1. 4分割サブステップで物理演算およびソフトボディ（完全液体物理・遅延適応ダンピング・分散排斥）を更新
+        stepPhysics(deltaMs, (subDelta) => {
+            updateSoftBodies(world, engine, subDelta);
         });
 
         // 2. ドラッグ中に選択Soboがバー上で横移動した場合も、毎フレーム指先方向へ矢印・軌道予測を追従
@@ -208,7 +216,7 @@ function gameLoop(timestamp) {
         // 3. 上部フロートバーの左右2点スポーナー＆セーフティスポーンを監視・補充し上枠黒ゲージ進捗を更新
         maintainFloatBar(world, gameState);
 
-        // 4. 左右バンパーの押し込み変位量・押し込み率（枠外赤LED連動）および同時継続押し込み判定
+        // 4. 左右バンパーの押し込み変位量・押し込み率（枠内赤点灯サイドバー連動）および同時継続押し込み判定
         const bumperResult = updateBumpers(deltaMs);
         gameState.lastBumperState = {
             leftPressed: bumperResult.leftPressed,
@@ -223,7 +231,7 @@ function gameLoop(timestamp) {
             gameState.canDrop = false;
             resetAimState(gameState);
 
-            // 両側赤LED全点灯を維持したままザップ音を即座に再生し、550msの静止余韻後にリザルト表示
+            // 両側赤サイドバー全点灯を維持したままザップ音を即座に再生し、550msの静止余韻後にリザルト表示
             gameState.lastBumperState.leftPressed = true;
             gameState.lastBumperState.rightPressed = true;
             gameState.lastBumperState.leftPushRatio = 1;
@@ -248,7 +256,7 @@ function gameLoop(timestamp) {
         }
     }
 
-    // 描画モジュールへ渡すバンパー状態（枠外赤LED縦バー用の押し込み率を含む）
+    // 描画モジュールへ渡すバンパー状態（枠内赤点灯サイドバー用の押し込み率を含む）
     const renderBumperState = {
         leftBumper,
         rightBumper,
@@ -323,8 +331,9 @@ function bootGame() {
     if (isBooted) return;
     isBooted = true;
 
-    // 1. 先にUIを初期化し、動的にコンテナ・上部中央スコア・Canvas等を生成・マウントさせる
-    initUI(startGame);
+    // 1. 先にUIを初期化し、動的にコンテナ・上部中央スコア・音量ON/OFFボタン・Canvas等を生成・マウントさせる
+    initUI(startGame, handleToggleSound);
+    updateSoundUI(isSoundEnabled());
 
     // 2. 生成された Canvas 要素を取得する
     canvas = document.getElementById('gameCanvas');
