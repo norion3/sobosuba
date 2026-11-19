@@ -1,12 +1,12 @@
 /**
  * softbody.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 6)
+ * @version v7.0 (Fluid Normal Fix, Independent Speed Clamp & Safe Bar-Hop Recatch - Phase 4)
  * @changes
- *   - 液体感を阻害していた真円形状保持（SHAPE_MATCH）および下敷き微振動の原因だったPBD位置ワープを完全撤廃し、質量スケーリング（r^1.35・DENSITY_SCALE_EXP: 0.65）・目標面積比0.98・柔皮バネ・適正曲げ・強化非線形バルク内圧（6.5）・体積粘性（BULK_DAMPING: 0.00055）・穏健な裏返り修復（0.18）による完全液体物理へ刷新
- *   - computeBodyGeometry() で重心速度 comp.centroidVel を毎サブステップ算出（生成・発射時も初期同期）し、着地直後350msのボヨヨン揺れを保護しつつ350〜900msで滑らかに立ち上がる遅延適応的圧迫ダンピングを実装
- *   - 斜め下ショット限定（useBarGrace）の隣カプセル角すり抜け保護を実装し、全 BAR_FLOATING との AABB 重なり完全離脱で即解除（安全上限 220ms）する非爆発制御へ対応
- *   - 2.5D上段ホップ飛行中の半カプセル水平姿勢安定（shapeBlend: 0.5）およびホップ横速度継承率（0.2）同期を実装し、リキャッチ時に壁際閉塞を回避しつつ異数字のみを左右へ押し分けて割り込むセーフ・リキャッチ（同数字は即合体）を追加
- *   - 一体外枠フレーム（CONTAINER.FRAME_WIDTH: 8）基準の安全クランプへ同期し、GRAVITYキャッシュ不整合対策として constants.js / physics.js / overlap_solver.js の絶対パスを ?v=6 へ統一
+ *   - 凹み変形時の「外向き法線反転バグ」を根絶するため、applyVolumeAndShapeForces() の重心方向（radial）内積フォールバックを撤廃し、時計回り閉曲線の幾何学的外向き法線を一貫採用
+ *   - 落下中の横速度削れ（端狙いショットの途中失速）を根絶するため、launchFloatingJelly() および clampParticleVelocities() を MAX_PARTICLE_VX（6.8）と MAX_PARTICLE_VY（7.2）のX/Y独立速度クランプへ変更
+ *   - 上段ホップの乗り越え失敗と高積み上げ時の重なり暴発を防ぐため、ホップ進行方向の前方着地を優先するセーフ・リキャッチ（applySafeRecatchSeparation）および下段ゼリー干渉時の安全着地高度チェック（updateBarHopState）を実装
+ *   - 奇形凍結を解消するため、遅延適応的圧迫ダンピング（applyAdaptiveSettleDamping）へ面積歪み条件（復元途中は減衰を保留）を追加
+ *   - GRAVITYキャッシュ不整合対策として constants.js / physics.js / overlap_solver.js の絶対パスを ?v=7 へ統一
  * 
  * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
@@ -17,9 +17,9 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, PHYSICS, JELLY_CONFIG, FLOAT_BAR, EFFECTS, CONTAINER, COLLISION_CATEGORY } from '/sobosuba/constants.js?v=6';
-import { clampPointToContainer } from '/sobosuba/physics.js?v=6';
-import { solveAntiOverlap } from '/sobosuba/overlap_solver.js?v=6';
+import { GAME_WIDTH, GAME_HEIGHT, PHYSICS, JELLY_CONFIG, FLOAT_BAR, EFFECTS, CONTAINER, COLLISION_CATEGORY } from '/sobosuba/constants.js?v=7';
+import { clampPointToContainer } from '/sobosuba/physics.js?v=7';
+import { solveAntiOverlap } from '/sobosuba/overlap_solver.js?v=7';
 
 const Bodies = Matter.Bodies;
 const Composite = Matter.Composite;
@@ -218,12 +218,13 @@ function startShapeMorph(comp, targetBlend, durationMs, now) {
 }
 
 /**
- * コンポジット全体の全ビーズをX方向へ安全シフトする（セーフ・リキャッチ用）
+ * コンポジット全体の全ビーズを指定量 (shiftX, shiftY) だけ安全シフトする（セーフ・リキャッチ用）
  * @param {Matter.Composite} comp
  * @param {number} shiftX
+ * @param {number} [shiftY=0]
  */
-function shiftSoftBodyX(comp, shiftX) {
-    if (!comp || !comp.particles || Math.abs(shiftX) < 0.05) return;
+function shiftSoftBody(comp, shiftX, shiftY = 0) {
+    if (!comp || !comp.particles || (Math.abs(shiftX) < 0.05 && Math.abs(shiftY) < 0.05)) return;
     const particles = comp.particles;
     const pRadius = comp.particleRadius || 4;
     let sumX = 0;
@@ -235,7 +236,12 @@ function shiftSoftBodyX(comp, shiftX) {
 
     for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
-        const clamped = clampPointToContainer(p.position.x + shiftX, p.position.y, pRadius, tempClampPoint);
+        const clamped = clampPointToContainer(
+            p.position.x + shiftX,
+            p.position.y + shiftY,
+            pRadius,
+            tempClampPoint
+        );
         Body.setPosition(p, { x: clamped.x, y: clamped.y });
         sumX += clamped.x;
         sumY += clamped.y;
@@ -430,6 +436,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     jellyComposite.isFloating = Boolean(isFloating);
     jellyComposite.isBarHopping = false;
     jellyComposite.hopStartTime = 0;
+    jellyComposite.hopDirectionX = 0;
     jellyComposite.barGraceActive = false;
     jellyComposite.barGraceStartTime = 0;
     jellyComposite.hasMerged = Boolean(hasMerged);
@@ -577,6 +584,7 @@ export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }
     jellyComposite.isFloating = false;
     jellyComposite.isBarHopping = false;
     jellyComposite.hopStartTime = 0;
+    jellyComposite.hopDirectionX = 0;
     jellyComposite.lowSpeedMs = 0;
 
     // 斜め下ショット限定すり抜け保護（AABB完全離脱で即解除、安全上限220ms）
@@ -598,24 +606,18 @@ export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }
 
     const addX = addVelocity ? (addVelocity.x || 0) : 0;
     const addY = addVelocity ? (addVelocity.y || 0) : 0;
-    const maxSpeed = PHYSICS.MAX_PARTICLE_SPEED || 5.6;
-    const maxSpeedSq = maxSpeed * maxSpeed;
+    const maxVx = PHYSICS.MAX_PARTICLE_VX || 6.8;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 7.2;
 
     let sumVx = 0;
     let sumVy = 0;
 
     for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
-        // 本家v1.2準拠：バー上での横移動速度を保持したまま発射ベクトルを加算する
-        let vx = p.velocity.x + addX;
-        let vy = p.velocity.y + addY;
+        // 本家v1.2準拠：バー上での横移動速度を保持したまま発射ベクトルを加算し、X/Y独立クランプで横失速を根絶
+        const vx = Math.max(-maxVx, Math.min(maxVx, p.velocity.x + addX));
+        const vy = Math.max(-maxVy, Math.min(maxVy, p.velocity.y + addY));
 
-        const speedSq = vx * vx + vy * vy;
-        if (speedSq > maxSpeedSq) {
-            const scale = maxSpeed / Math.sqrt(speedSq);
-            vx *= scale;
-            vy *= scale;
-        }
         Body.setVelocity(p, { x: vx, y: vy });
         sumVx += vx;
         sumVy += vy;
@@ -637,7 +639,7 @@ export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }
  * @param {Matter.Composite} jellyComposite - ホップさせるゼリーのコンポジット
  * @param {Object} hopVelocity - ホップ初速ベクトル {x, y}（px/substep 単位）
  */
-export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -1.0 }) {
+export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -1.12 }) {
     if (!jellyComposite) return;
     const now = Date.now();
     jellyComposite.isFloating = false;
@@ -655,11 +657,11 @@ export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -1.0 }) {
     if (!particles || particles.length === 0) return;
 
     const hopX = hopVelocity ? (hopVelocity.x || 0) : 0;
-    const hopY = hopVelocity ? (hopVelocity.y || 0) : -1.0;
+    const hopY = hopVelocity ? (hopVelocity.y || 0) : -1.12;
     const inheritVx = (FLOAT_BAR.HOP_INHERIT_VX !== undefined) ? FLOAT_BAR.HOP_INHERIT_VX : 0.2;
     const maxHopSpeed = Math.min(
-        FLOAT_BAR.HOP_MAX_SPEED || 3.9,
-        PHYSICS.MAX_PARTICLE_SPEED || 5.6
+        FLOAT_BAR.HOP_MAX_SPEED || 4.6,
+        PHYSICS.MAX_PARTICLE_VX || 6.8
     );
     const maxHopSpeedSq = maxHopSpeed * maxHopSpeed;
 
@@ -684,11 +686,16 @@ export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -1.0 }) {
     }
 
     const n = particles.length;
+    const avgVx = sumVx / n;
+    const avgVy = sumVy / n;
+    // リキャッチ時に飛び越えた先（進行方向前方）へ優先着地させるためホップ進行方向を記録
+    jellyComposite.hopDirectionX = Math.abs(avgVx) > 0.05 ? (avgVx > 0 ? 1 : -1) : (Math.abs(hopX) > 0.05 ? (hopX > 0 ? 1 : -1) : 0);
+
     if (!jellyComposite.centroidVel) {
-        jellyComposite.centroidVel = { x: sumVx / n, y: sumVy / n };
+        jellyComposite.centroidVel = { x: avgVx, y: avgVy };
     } else {
-        jellyComposite.centroidVel.x = sumVx / n;
-        jellyComposite.centroidVel.y = sumVy / n;
+        jellyComposite.centroidVel.x = avgVx;
+        jellyComposite.centroidVel.y = avgVy;
     }
 }
 
@@ -892,7 +899,7 @@ function applyVolumeAndShapeForces(comp, geom) {
     const { cx, cy, vx: centVx, vy: centVy, signedArea } = geom;
 
     const inversionRatio = (PHYSICS.INVERSION_AREA_RATIO !== undefined) ? PHYSICS.INVERSION_AREA_RATIO : 0.18;
-    const pressureCoeff = PHYSICS.SOFTBODY_PRESSURE || 0.0016;
+    const pressureCoeff = PHYSICS.SOFTBODY_PRESSURE || 0.0024;
     const nlGain = (PHYSICS.PRESSURE_NONLINEAR_GAIN !== undefined) ? PHYSICS.PRESSURE_NONLINEAR_GAIN : 6.5;
     const nlThreshold = (PHYSICS.PRESSURE_NONLINEAR_THRESHOLD !== undefined) ? PHYSICS.PRESSURE_NONLINEAR_THRESHOLD : 0.28;
     const pressureMax = PHYSICS.PRESSURE_RATIO_MAX || 3.8;
@@ -1004,7 +1011,7 @@ function applyVolumeAndShapeForces(comp, geom) {
             radialY = Math.sin(fallbackAngle);
         }
 
-        // 隣接ビーズ間の接線ベクトルから外向き法線を求める
+        // 時計回り閉曲線の幾何学的外向き法線 (ty, -tx) を一貫採用（凹み変形時の法線反転バグを根絶）
         const tx = pNext.x - pPrev.x;
         const ty = pNext.y - pPrev.y;
         const tLen = Math.sqrt(tx * tx + ty * ty);
@@ -1012,12 +1019,8 @@ function applyVolumeAndShapeForces(comp, geom) {
         let nx = radialX;
         let ny = radialY;
         if (tLen > 0.0001) {
-            const candNx = ty / tLen;
-            const candNy = -tx / tLen;
-            if ((candNx * radialX + candNy * radialY) > 0) {
-                nx = candNx;
-                ny = candNy;
-            }
+            nx = ty / tLen;
+            ny = -tx / tLen;
         }
 
         // 1. 力ベース強化非線形バルク内圧
@@ -1047,10 +1050,10 @@ function applyVolumeAndShapeForces(comp, geom) {
 }
 
 /**
- * ホップ着地時の「壁際閉塞回避付き 異数字限定セーフ・リキャッチ」
- * 着地先に重なる異数字カプセルを左右へスッと押し分けて割り込む（同数字は即合体させるため押し分けない）
+ * ホップ着地時の「進行方向前方優先 ＆ 壁際閉塞回避付き 異数字限定セーフ・リキャッチ」
+ * 進行方向の前方（飛び越えた先）へ優先着地し、重なる異数字カプセルを後ろ側へスッと押し分ける（同数字は即合体）
  */
-function applySafeRecatchSeparation(comp, composites) {
+function applySafeRecatchSeparation(comp, composites, hopDirX = 0) {
     if (!comp || !comp.centroid) return;
 
     const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
@@ -1058,6 +1061,7 @@ function applySafeRecatchSeparation(comp, composites) {
     const compHalfW = comp.capsuleHalfWidth || comp.targetRadius || 21.5;
     const minCenterX = padX + compHalfW;
     const maxCenterX = GAME_WIDTH - padX - compHalfW;
+    const forwardDir = (hopDirX > 0.05) ? 1 : ((hopDirX < -0.05) ? -1 : 0);
 
     for (let i = 0; i < composites.length; i++) {
         const other = composites[i];
@@ -1076,27 +1080,46 @@ function applySafeRecatchSeparation(comp, composites) {
         const absDx = Math.abs(dx);
 
         if (absDx < requiredDist) {
-            const overlap = requiredDist - absDx;
             const otherMinX = padX + otherHalfW;
             const otherMaxX = GAME_WIDTH - padX - otherHalfW;
 
-            // 押し分け方向を決定（完全一致時は画面中央から遠い側へ避ける）
+            // 進行方向前方への乗り越え着地が可能かを優先判定（元の側へ押し戻されるバグを解消）
             let pushDir = dx >= 0 ? 1 : -1;
-            if (absDx < 0.5) {
+            let neededSep = requiredDist - absDx;
+
+            if (forwardDir !== 0) {
+                // 相手中心に対する前方方向への符号付き距離（正＝すでに飛び越え済み、負＝中心の手前）
+                const signedForward = (comp.centroid.x - other.centroid.x) * forwardDir;
+                if (signedForward >= -requiredDist * 0.25) {
+                    const forwardSep = requiredDist - signedForward;
+                    const backDir = -forwardDir;
+                    const otherBackRoom = backDir > 0
+                        ? Math.max(0, otherMaxX - other.centroid.x)
+                        : Math.max(0, other.centroid.x - otherMinX);
+                    const selfForwardRoom = forwardDir > 0
+                        ? Math.max(0, maxCenterX - comp.centroid.x)
+                        : Math.max(0, comp.centroid.x - minCenterX);
+
+                    if (otherBackRoom + selfForwardRoom >= forwardSep - 1) {
+                        pushDir = backDir;
+                        neededSep = forwardSep;
+                    }
+                }
+            } else if (absDx < 0.5) {
                 pushDir = (other.centroid.x >= GAME_WIDTH * 0.5) ? 1 : -1;
             }
 
-            // 相手が壁際で外へ動ける余裕量を計測し、足りない分は着地ゼリー側を逆方向へ安全シフト
+            // 相手を pushDir 側へ動かせる余裕量を計測し、足りない分は着地ゼリー側を逆方向（-pushDir）へ安全シフト
             const otherRoom = pushDir > 0
                 ? Math.max(0, otherMaxX - other.centroid.x)
                 : Math.max(0, other.centroid.x - otherMinX);
 
-            const idealOtherShift = overlap * 0.65;
+            const idealOtherShift = neededSep * 0.65;
             const actualOtherShift = Math.min(idealOtherShift, otherRoom);
-            const remainOverlap = overlap - actualOtherShift;
+            const remainOverlap = neededSep - actualOtherShift;
 
             if (actualOtherShift > 0.1) {
-                shiftSoftBodyX(other, pushDir * actualOtherShift);
+                shiftSoftBody(other, pushDir * actualOtherShift, 0);
                 // 滑らかに割り込めるよう軽い横滑り速度も付与
                 const oPts = other.particles;
                 for (let k = 0; k < oPts.length; k++) {
@@ -1114,9 +1137,47 @@ function applySafeRecatchSeparation(comp, composites) {
                     : Math.max(0, comp.centroid.x - minCenterX);
                 const actualSelfShift = Math.min(remainOverlap, selfRoom);
                 if (actualSelfShift > 0.1) {
-                    shiftSoftBodyX(comp, selfDir * actualSelfShift);
+                    shiftSoftBody(comp, selfDir * actualSelfShift, 0);
                 }
             }
+        }
+    }
+}
+
+/**
+ * ホップ着地時に下段フィールド内ゼリーが高く積み上がっている場合、重なり爆発を防ぐため安全高度へ着地位置を補正する
+ */
+function ensureSafeHopLandingAltitude(comp, composites) {
+    if (!comp || !comp.centroid || !comp.aabb) return;
+
+    const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
+    const compHalfH = comp.capsuleHalfHeight || comp.targetRadius || 21.5;
+    const minSafeCenterY = topBarH + compHalfH + 2;
+    const rA = comp.particleRadius || 4;
+    const aA = comp.aabb;
+
+    let minFieldTopY = Infinity;
+    for (let i = 0; i < composites.length; i++) {
+        const other = composites[i];
+        if (!other || other === comp || other.label !== 'jelly_composite' ||
+            other.isFloating || other.isBarHopping || !other.aabb) {
+            continue;
+        }
+        const aB = other.aabb;
+        const rB = other.particleRadius || 4;
+        // 水平方向が重なっている下段ゼリーの最上端を計測
+        if (!(aA.maxX + rA < aB.minX - rB || aA.minX - rA > aB.maxX + rB)) {
+            const topY = aB.minY - rB;
+            if (topY < minFieldTopY) {
+                minFieldTopY = topY;
+            }
+        }
+    }
+
+    if (isFinite(minFieldTopY)) {
+        const desiredSafeY = Math.max(minSafeCenterY, Math.min(FLOAT_BAR.Y, minFieldTopY - compHalfH - 2));
+        if (comp.centroid.y > desiredSafeY + 1) {
+            shiftSoftBody(comp, 0, desiredSafeY - comp.centroid.y);
         }
     }
 }
@@ -1129,12 +1190,17 @@ function updateBarHopState(comp, geom, composites, now, gravityY, gravityScale) 
 
     const particles = comp.particles;
     const n = particles.length;
-    const { cx, cy, vy: avgVy } = geom;
+    const { cx, cy, vx: avgVx, vy: avgVy } = geom;
     const hopGravityScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 0.72;
     const hopMinAirMs = FLOAT_BAR.HOP_MIN_AIR_MS || 115;
     const hopRecatchYMin = FLOAT_BAR.HOP_RECATCH_Y_MIN || 92;
     const hopRecatchYMax = FLOAT_BAR.HOP_RECATCH_Y_MAX || 138;
     const hopMaxAirMs = FLOAT_BAR.HOP_MAX_AIR_MS || 2200;
+
+    // 壁反射などで飛行中の進行方向が変わった場合も最新方向へ同期
+    if (Math.abs(avgVx) > 0.08) {
+        comp.hopDirectionX = avgVx > 0 ? 1 : -1;
+    }
 
     const airMs = now - (comp.hopStartTime || now);
     // 下降フェーズでバー高度帯へ到達、または下抜け防止・タイムアウトで上段バーへ自動再吸着
@@ -1145,9 +1211,15 @@ function updateBarHopState(comp, geom, composites, now, gravityY, gravityScale) 
     const isTimedOut = airMs >= hopMaxAirMs;
 
     if (isDescendingIntoBar || isTimedOut) {
+        const landingHopDirX = comp.hopDirectionX || (Math.abs(avgVx) > 0.05 ? (avgVx > 0 ? 1 : -1) : 0);
+
         comp.isBarHopping = false;
         comp.isFloating = true;
         comp.hopStartTime = 0;
+        comp.hopDirectionX = 0;
+
+        // 下段高積み上げ時の重なり暴発を防ぐ安全着地高度チェックを適用
+        ensureSafeHopLandingAltitude(comp, composites);
 
         // 上段待機カテゴリへ復帰（着地先の同数字と即座に合体・異数字と押し合い可能）
         setSoftBodyCollisionCategory(comp, COLLISION_CATEGORY.BAR_FLOATING);
@@ -1163,8 +1235,8 @@ function updateBarHopState(comp, geom, composites, now, gravityY, gravityScale) 
             });
         }
 
-        // 壁際閉塞回避付きの異数字限定セーフ・リキャッチ（同数字は即合体させるため押し分けない）
-        applySafeRecatchSeparation(comp, composites);
+        // 進行方向前方優先・壁際閉塞回避付きの異数字限定セーフ・リキャッチ（同数字は即合体させるため押し分けない）
+        applySafeRecatchSeparation(comp, composites, landingHopDirX);
         return;
     }
 
@@ -1269,12 +1341,21 @@ function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepDampX, s
 }
 
 /**
- * サブ関数5.5：遅延ランプアップ型「適応的圧迫ダンピング」
- * 着地直後 350ms の液体ボヨヨン揺れは無傷で保護し、下段で全体が静止（< 0.22 px/substep）し続けた場合のみ
+ * サブ関数5.5：遅延ランプアップ型「適応的圧迫ダンピング」（面積歪み復元保護付き）
+ * 着地直後 350ms の液体ボヨヨン揺れおよび面積歪み復元途中は無傷で保護し、
+ * 下段で形状が復元しきって全体が静止（< 0.22 px/substep）し続けた場合のみ
  * 350ms → 900ms へ滑らかに重心相対速度（内部微振動）を減衰させて下敷き小塊をピタッと静寂化する
  */
 function applyAdaptiveSettleDamping(comp, geom, subDeltaMs, substeps) {
     if (comp.isFloating || comp.isBarHopping || comp.isGrowing) {
+        comp.lowSpeedMs = 0;
+        return;
+    }
+
+    // 面積歪みが大きい復元途中は減衰させず奇形凍結を防止
+    const targetArea = comp.targetArea || (Math.PI * (comp.ringRadius || 16) * (comp.ringRadius || 16));
+    const areaRatio = geom.signedArea / Math.max(1, targetArea);
+    if (Math.abs(1 - areaRatio) > 0.12) {
         comp.lowSpeedMs = 0;
         return;
     }
@@ -1314,21 +1395,39 @@ function applyAdaptiveSettleDamping(comp, geom, subDeltaMs, substeps) {
 }
 
 /**
- * サブ関数6：すり抜け・物理爆発防止の最大速度クランプ（SUBSTEPS=4 正規化済み）
+ * サブ関数6：すり抜け・物理爆発防止 ＆ 横失速根絶のX/Y独立最大速度クランプ（SUBSTEPS=4 正規化済み）
  */
-function clampParticleVelocities(comp, maxSpeedSq, maxSpeed) {
+function clampParticleVelocities(comp, maxVx, maxVy) {
     const particles = comp.particles;
     const n = particles.length;
     for (let j = 0; j < n; j++) {
         const body = particles[j];
         const vx = body.velocity.x;
         const vy = body.velocity.y;
-        const speedSq = vx * vx + vy * vy;
-        if (speedSq > maxSpeedSq) {
-            const scale = maxSpeed / Math.sqrt(speedSq);
+        let clampedVx = vx;
+        let clampedVy = vy;
+        let changed = false;
+
+        if (vx > maxVx) {
+            clampedVx = maxVx;
+            changed = true;
+        } else if (vx < -maxVx) {
+            clampedVx = -maxVx;
+            changed = true;
+        }
+
+        if (vy > maxVy) {
+            clampedVy = maxVy;
+            changed = true;
+        } else if (vy < -maxVy) {
+            clampedVy = -maxVy;
+            changed = true;
+        }
+
+        if (changed) {
             Body.setVelocity(body, {
-                x: vx * scale,
-                y: vy * scale
+                x: clampedVx,
+                y: clampedVy
             });
         }
     }
@@ -1351,8 +1450,8 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
     const safeSubDeltaMs = (typeof subDeltaMs === 'number' && subDeltaMs > 0)
         ? subDeltaMs
         : ((1000 / 60) / substeps);
-    const maxSpeed = PHYSICS.MAX_PARTICLE_SPEED || 5.6;
-    const maxSpeedSq = maxSpeed * maxSpeed;
+    const maxVx = PHYSICS.MAX_PARTICLE_VX || 6.8;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 7.2;
 
     // 1フレームあたりの減衰率をサブステップ回数に応じて等価変換
     const stepDampX = Math.pow(FLOAT_BAR.X_DAMPING || 0.986, 1 / substeps);
@@ -1380,17 +1479,17 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
         // 3. 穏健なアンチ裏返り修復 / 強化非線形バルク内圧・体積粘性の適用
         applyVolumeAndShapeForces(comp, geom);
 
-        // 4. 天井非激突 2.5D上段飛び越えホップ（半カプセル水平安定 ＆ セーフ・リキャッチ）
+        // 4. 天井非激突 2.5D上段飛び越えホップ（半カプセル水平安定 ＆ 進行方向優先セーフ・リキャッチ）
         updateBarHopState(comp, geom, composites, now, gravityY, gravityScale);
 
         // 5. 上段フロートバー上の無重力フック・フラット圧縮・低減衰スライド
         applyFloatBarControl(comp, geom.cx, geom.cy, gravityY, gravityScale, stepDampX, stepDampY);
 
-        // 5.5 遅延ランプアップ型「適応的圧迫ダンピング」（下敷き小塊の静寂化）
+        // 5.5 遅延ランプアップ型「適応的圧迫ダンピング」（面積歪み復元保護付き静寂化）
         applyAdaptiveSettleDamping(comp, geom, safeSubDeltaMs, substeps);
 
-        // 6. 全ビーズの最大速度クランプ
-        clampParticleVelocities(comp, maxSpeedSq, maxSpeed);
+        // 6. 全ビーズのX/Y独立最大速度クランプ
+        clampParticleVelocities(comp, maxVx, maxVy);
 
         // 分散非侵入排斥ソルバー対象としてバッファへ登録
         activeJelliesBuffer.push(comp);

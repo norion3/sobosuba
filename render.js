@@ -1,22 +1,22 @@
 /**
  * render.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 10)
+ * @version v7.0 (Fluid Normal Fix, Shrink Compensation, Grow-In Unification & Text Lerp - Phase 8)
  * @changes
- *   - 容器外枠を本家準拠の「一体グレー外枠フレーム（左右・底 8px / 上枠 12px）」へ刷新し、底面左右45度角カットスロープおよび内壁境界ラインを physics.js と 0.000px 誤差で完全同期
- *   - サイド判定ボタン（左右半円バンパー）を内壁矩形（FRAME_WIDTH / TOP_BAR_HEIGHT）で厳密クリップし、フレーム内のボタン真脇へ「幅 5px 角丸赤点灯サイドバー（未押下溝・押し込み率アナログ伸長・ON時真っ赤全点灯＋軽量赤グロウ）」を実装
- *   - 本家準拠の「合体瞬間真っ白フラッシュ」を実装し、mergeFlashStart / mergeFlashUntil に同期して前半 42%（EFFECTS.MERGE_WHITE_HOLD_RATIO）を完全白（#ffffff）で保持し、後半 58% で本色へ滑らかにフェードバック（太字黒文字を維持）
- *   - 細密ビーズ（16〜30個・BEAD_RADIUS_RATIO: 0.18）と完全液体変形の密着角丸多角形に合わせ、描画専用1パス軽量スムージング重みを 0.15 / 0.70 / 0.15 へ微調整
- *   - GRAVITYキャッシュ不整合対策として constants.js / overlap_solver.js の絶対パスを ?v=6 へ統一
+ *   - 凹み変形時の「外向き法線反転バグ」を根絶するため、外縁座標算出の重心方向（radial）内積フォールバックを撤廃し、softbody.js と同じ時計回り閉曲線の幾何学的外向き法線 (ty, -tx) へ統一
+ *   - 描画専用スムージング＋二次ベジェ曲線による輪郭の内向き収縮を微補正し、水風船同士が隙間なくフラットに押し付け合う本家準拠の密着感へ改善
+ *   - 物理の Ease-Out-Back Grow-In との二重膨張（1.21倍）および新規スポーン時の不要膨張を解消するため、描画側の createdAt ベース膨張スケールを撤廃（2.5Dホップ時の立体ポップアップのみ維持）
+ *   - 大きく潰れた際の数字テレポート振動を根絶するため、重心からの相対オフセットに対する軽量時間補間（lerp）を導入（高速飛行・落下時も遅延ゼロで追従）
+ *   - GRAVITYキャッシュ不整合対策として constants.js / overlap_solver.js の絶対パスを ?v=7 へ統一
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
- * 外殻パーティクルの「外縁（外側のフチ）」へ描画専用の1パス軽量スムージングを適用して
+ * 外殻パーティクルの「外縁（外側のフチ）」へ収縮補正および描画専用の1パス軽量スムージングを適用して
  * ベジェ曲線で結ぶことで、隙間なく密着して液体のように美しく変形する本家sobosuba風のスライムを表現します。
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, ACTIVE_THEME, JELLY_CONFIG, EFFECTS, CONTAINER, PHYSICS, FLOAT_BAR } from '/sobosuba/constants.js?v=6';
-import { isPointInsidePolygon } from '/sobosuba/overlap_solver.js?v=6';
+import { GAME_WIDTH, GAME_HEIGHT, ACTIVE_THEME, JELLY_CONFIG, EFFECTS, CONTAINER, PHYSICS, FLOAT_BAR } from '/sobosuba/constants.js?v=7';
+import { isPointInsidePolygon } from '/sobosuba/overlap_solver.js?v=7';
 
 // ==========================================
 // ゼロアロケーション（毎フレームGC負荷削減）用事前確保バッファ
@@ -300,7 +300,7 @@ function drawBumpersAndLedBars(ctx, bumperState) {
 }
 
 // ==========================================
-// サブ関数 3：ソフトボディ（細密液体スムージング・ホップ最前面ポップアップ・合体真っ白フラッシュ）
+// サブ関数 3：ソフトボディ（幾何外向き法線・収縮補正密着スムージング・ホップ最前面ポップアップ・合体真っ白フラッシュ）
 // ==========================================
 function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
     let particles = comp.particles || null;
@@ -319,6 +319,9 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
     const n = particles.length;
     const beadRatio = PHYSICS.BEAD_RADIUS_RATIO || 0.18;
     const pRadius = comp.particleRadius || (config.radius * beadRatio);
+
+    // スムージング＋二次ベジェ曲線による内向き収縮を微補正し、隣同士が隙間なくフラット密着する本家ルックへ調整
+    const visualOuterRadius = pRadius + Math.min(1.6, 0.7 + pRadius * 0.12);
 
     ensureOuterPointsCapacity(n);
 
@@ -357,6 +360,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
             radialY = Math.sin(fallbackAngle);
         }
 
+        // 時計回り閉曲線の幾何学的外向き法線 (ty, -tx) を一貫採用（凹み変形時のトゲ・めくれ込み描画を根絶）
         const tx = pNext.x - pPrev.x;
         const ty = pNext.y - pPrev.y;
         const tLen = Math.sqrt(tx * tx + ty * ty);
@@ -364,17 +368,13 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
         let nx = radialX;
         let ny = radialY;
         if (tLen > 0.0001) {
-            const candNx = ty / tLen;
-            const candNy = -tx / tLen;
-            if ((candNx * radialX + candNy * radialY) > 0) {
-                nx = candNx;
-                ny = candNy;
-            }
+            nx = ty / tLen;
+            ny = -tx / tLen;
         }
 
         const outPt = outerPointsBuffer[j];
-        outPt.x = pCurr.x + nx * pRadius;
-        outPt.y = pCurr.y + ny * pRadius;
+        outPt.x = pCurr.x + nx * visualOuterRadius;
+        outPt.y = pCurr.y + ny * visualOuterRadius;
     }
 
     // 3. 細密ビーズ＋液体変形の美しい密着輪郭向け 描画専用1パス軽量スムージング（0.15 / 0.70 / 0.15）
@@ -388,16 +388,10 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
         smPt.y = prevPt.y * 0.15 + currPt.y * 0.70 + nextPt.y * 0.15;
     }
 
-    // 4. 膨張アニメーション ＆ 2.5Dホップ立体ポップアップスケールの計算
+    // 4. 2.5Dホップ立体ポップアップスケールの計算
+    // （合体時の膨張成長は softbody.js の物理 Ease-Out-Back Grow-In に一本化し、二重膨張・不要膨張を根絶）
     let scale = 1.0;
     const now = renderMeta.now;
-    if (comp.createdAt) {
-        const elapsedMs = now - comp.createdAt;
-        if (elapsedMs >= 0 && elapsedMs < renderMeta.durationMs) {
-            const progress = elapsedMs / renderMeta.durationMs;
-            scale = 1.0 + Math.sin(progress * Math.PI) * (EFFECTS.MERGE_EXPAND_SCALE - 1.0);
-        }
-    }
 
     const isHopping = Boolean(comp.isBarHopping);
     let hopLiftRatio = 0;
@@ -503,13 +497,13 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
 
     ctx.restore();
 
-    // 7. 数字の描画（overlap_solver.js 共有のポリゴン内安全位置補正 ＆ 読みやすい穏やかな回転追従）
+    // 7. 数字の描画（ポリゴン内安全位置補正 ＋ 重心相対オフセットの軽量時間補間でテレポート振動を根絶）
     // 真っ白フラッシュ中も太字黒文字（コントラスト比 21:1）をそのまま維持して描画
-    let textX = cx;
-    let textY = cy;
+    let targetTextX = cx;
+    let targetTextY = cy;
     let effectiveThickness = minRadialDist + pRadius;
 
-    if (!isPointInsidePolygon(textX, textY, smoothedPointsBuffer, n)) {
+    if (!isPointInsidePolygon(targetTextX, targetTextY, smoothedPointsBuffer, n)) {
         let bestDistSq = Infinity;
         const halfN = Math.floor(n / 2);
         let foundInside = false;
@@ -525,8 +519,8 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
                 const dSq = ddx * ddx + ddy * ddy;
                 if (dSq < bestDistSq) {
                     bestDistSq = dSq;
-                    textX = mx;
-                    textY = my;
+                    targetTextX = mx;
+                    targetTextY = my;
                     foundInside = true;
                 }
             }
@@ -541,22 +535,37 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
                 const dSq = ddx * ddx + ddy * ddy;
                 if (dSq < nearestSq) {
                     nearestSq = dSq;
-                    textX = p.x;
-                    textY = p.y;
+                    targetTextX = p.x;
+                    targetTextY = p.y;
                 }
             }
             effectiveThickness = Math.min(effectiveThickness, pRadius * 1.4);
         } else {
             let correctedMin = Infinity;
             for (let j = 0; j < n; j++) {
-                const ox = smoothedPointsBuffer[j].x - textX;
-                const oy = smoothedPointsBuffer[j].y - textY;
+                const ox = smoothedPointsBuffer[j].x - targetTextX;
+                const oy = smoothedPointsBuffer[j].y - targetTextY;
                 const d = Math.sqrt(ox * ox + oy * oy);
                 if (d < correctedMin) correctedMin = d;
             }
             effectiveThickness = Math.min(effectiveThickness, correctedMin);
         }
     }
+
+    // 重心からの相対オフセットのみを軽量補間（高速飛行・落下時は重心に0フレーム遅延追従しつつ境界振動のみ平滑化）
+    const targetOffsetX = targetTextX - cx;
+    const targetOffsetY = targetTextY - cy;
+    if (comp._textOffsetX === undefined || comp._textOffsetY === undefined) {
+        comp._textOffsetX = targetOffsetX;
+        comp._textOffsetY = targetOffsetY;
+    } else {
+        const textLerp = 0.22;
+        comp._textOffsetX += (targetOffsetX - comp._textOffsetX) * textLerp;
+        comp._textOffsetY += (targetOffsetY - comp._textOffsetY) * textLerp;
+    }
+
+    const textX = cx + comp._textOffsetX;
+    const textY = cy + comp._textOffsetY;
 
     // 穏やかな数字回転追従（正弦写像により360度回転時も不連続なく、上下逆さまにならない最大±30度へ収める）
     const rawAngle = comp.avgAngle || 0;
@@ -596,7 +605,6 @@ function drawSoftBodies(ctx, composites, gameState) {
 
     const renderMeta = {
         now: Date.now(),
-        durationMs: EFFECTS.MERGE_EXPAND_FRAMES * (1000 / 60),
         outlineColor: ACTIVE_THEME.outline || '#000000',
         unmergedAlpha: (ACTIVE_THEME.unmergedTextAlpha !== undefined) ? ACTIVE_THEME.unmergedTextAlpha : 0.56,
         isAiming,
@@ -665,7 +673,7 @@ function drawAimAndHopGuide(ctx, gameState) {
     const dist = Math.sqrt(dx * dx + dy * dy);
     const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
     const hasDraggedOut = Boolean(gameState.hasDraggedOut);
-    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -8;
+    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
     const isHopAim = Boolean(gameState.isHopAim || (dist >= cancelRadius && dy < hopTriggerDy));
 
     ctx.save();

@@ -1,29 +1,55 @@
 /**
  * main.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 11 - Final Integration)
+ * @version v7.0 (Fixed-Timestep Integration, Best Score Persistence & v7 Import Sync - Phase 11)
  * @changes
- *   - initUI(startGame, handleToggleSound) へ sound.js の同期ハード初期化付きトグル（toggleSound）を接続し、起動時デフォルト OFF の UI 状態（updateSoundUI）を同期（リトライ時も音量設定を維持）
- *   - stepPhysics() のコールバックから subDelta を受け取り updateSoftBodies(world, engine, subDelta) へ引き渡すことで遅延適応的圧迫ダンピングを正確に駆動し、endAimDrag(gameState, onLaunched, world) へ world を連携（斜め下すり抜け保護の同数字隣接判定用）
- *   - GRAVITYキャッシュ不整合対策として、v6.0全更新モジュール（constants / physics / softbody / jelly / floatbar / aim / render / dom_ui / sound）の絶対パスインポートを ?v=6 へ統一（無変更安定の input.js は ?v=4 を維持）
+ *   - gameLoop() を physics.js (v7.0) の 60Hz 固定タイムステップ駆動へ接続し、updateBumpers() へ固定刻みの実経過物理時間を同期させることで 120Hz 端末での物理・判定ズレを根絶
+ *   - localStorage によるベストスコア永続化（起動時ロード・スコア更新時リアルタイム更新保存・ゲームオーバー時同期表示）を実装し、dom_ui.js の updateBestScoreUI() / showGameOverUI(finalScore, bestScore) へ連携
+ *   - GRAVITYキャッシュ不整合対策として、全更新モジュール（constants / physics / softbody / jelly / floatbar / aim / render / dom_ui / input）の絶対パスインポートを ?v=7 へ統一（無変更の sound.js は ?v=6 を維持）
  * 
  * sobosuba風パズル（中空ビーズリング・ソフトボディ版）のマスター統合モジュール
  * 
  * GRAVITY規格に準拠するため、全てのモジュールを絶対パスでインポートし、
- * Matter.jsのサブステップ物理シミュレーション、上部フロートバー管理、
- * 順方向ダイレクトエイム／2.5D上段飛び越えホップ、音量制御、および描画ループを統合・管理します。
+ * Matter.jsの固定タイムステップ・サブステップ物理シミュレーション、上部フロートバー管理、
+ * 順方向ダイレクトエイム／2.5D上段飛び越えホップ、音量制御、ベストスコア永続化、および描画ループを統合・管理します。
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, UI } from '/sobosuba/constants.js?v=6';
-import { initPhysics, stepPhysics, updateBumpers, leftBumper, rightBumper } from '/sobosuba/physics.js?v=6';
-import { updateSoftBodies } from '/sobosuba/softbody.js?v=6';
-import { handleCollisions, handleMerges, resetMergeQueues } from '/sobosuba/jelly.js?v=6';
-import { initFloatBar, maintainFloatBar } from '/sobosuba/floatbar.js?v=6';
-import { resetAimState, syncAimToPointer, startAimDrag, updateAimDrag, endAimDrag } from '/sobosuba/aim.js?v=6';
-import { renderGame } from '/sobosuba/render.js?v=6';
-import { initUI, updateSoundUI, applyViewportSize, getCanvasStageElement, updateScoreUI, showGameOverUI, hideGameOverUI, setWarningEffect } from '/sobosuba/dom_ui.js?v=6';
-import { initInput, getPointerState, updateScale } from '/sobosuba/input.js?v=4';
+import { GAME_WIDTH, GAME_HEIGHT, UI } from '/sobosuba/constants.js?v=7';
+import { initPhysics, stepPhysics, updateBumpers, leftBumper, rightBumper } from '/sobosuba/physics.js?v=7';
+import { updateSoftBodies } from '/sobosuba/softbody.js?v=7';
+import { handleCollisions, handleMerges, resetMergeQueues } from '/sobosuba/jelly.js?v=7';
+import { initFloatBar, maintainFloatBar } from '/sobosuba/floatbar.js?v=7';
+import { resetAimState, syncAimToPointer, startAimDrag, updateAimDrag, endAimDrag } from '/sobosuba/aim.js?v=7';
+import { renderGame } from '/sobosuba/render.js?v=7';
+import { initUI, updateSoundUI, applyViewportSize, getCanvasStageElement, updateScoreUI, updateBestScoreUI, showGameOverUI, hideGameOverUI, setWarningEffect } from '/sobosuba/dom_ui.js?v=7';
+import { initInput, getPointerState, updateScale } from '/sobosuba/input.js?v=7';
 import { isSoundEnabled, toggleSound, playSoundGameOverZap } from '/sobosuba/sound.js?v=6';
+
+// ==========================================
+// ベストスコア永続化（localStorage 安全ラッパー）
+// ==========================================
+const BEST_SCORE_STORAGE_KEY = 'sobosuba_best_score_v1';
+
+function loadBestScore() {
+    try {
+        if (typeof window === 'undefined' || !window.localStorage) return 0;
+        const raw = window.localStorage.getItem(BEST_SCORE_STORAGE_KEY);
+        const parsed = parseInt(raw, 10);
+        return (Number.isFinite(parsed) && parsed > 0) ? parsed : 0;
+    } catch (_err) {
+        return 0;
+    }
+}
+
+function saveBestScore(bestScore) {
+    try {
+        if (typeof window === 'undefined' || !window.localStorage) return;
+        const safeScore = Math.max(0, Math.floor(Number(bestScore) || 0));
+        window.localStorage.setItem(BEST_SCORE_STORAGE_KEY, String(safeScore));
+    } catch (_err) {
+        // ストレージ制限環境（プライベートブラウズ等）でもゲーム進行を止めない
+    }
+}
 
 // ==========================================
 // グローバル変数・ゲームステート
@@ -39,6 +65,7 @@ let gameOverTimer = null;
 
 const gameState = {
     score: 0,
+    bestScore: loadBestScore(),
     isGameOver: false,
     canDrop: true,
     frameCount: 0,
@@ -109,8 +136,9 @@ function startGame() {
     engine = physics.engine;
     world = physics.world;
 
-    // ステートのリセット（音量ON/OFF設定はリトライ時もそのまま維持）
+    // ステートのリセット（音量ON/OFF設定およびベストスコアはリトライ時もそのまま維持）
     gameState.score = 0;
+    gameState.bestScore = Math.max(gameState.bestScore, loadBestScore());
     gameState.isGameOver = false;
     gameState.canDrop = true;
     gameState.frameCount = 0;
@@ -131,6 +159,7 @@ function startGame() {
 
     // UIのリセット
     updateScoreUI(gameState.score);
+    updateBestScoreUI(gameState.bestScore);
     hideGameOverUI();
     setWarningEffect(false);
 
@@ -145,6 +174,13 @@ function startGame() {
             // 本家完全準拠：未合体Soboが初めて合体に参加した分のみをそのまま加算
             gameState.score += earned;
             updateScoreUI(gameState.score);
+
+            // ベストスコア更新時は即座に永続化＆UI同期
+            if (gameState.score > gameState.bestScore) {
+                gameState.bestScore = gameState.score;
+                saveBestScore(gameState.bestScore);
+                updateBestScoreUI(gameState.bestScore);
+            }
         }
     };
 
@@ -186,7 +222,7 @@ function handleDragEnd() {
 }
 
 // ==========================================
-// メインゲームループ (毎フレーム実行・4分割サブステップ物理駆動)
+// メインゲームループ (毎フレーム実行・60Hz基準固定タイムステップ物理駆動)
 // ==========================================
 function gameLoop(timestamp) {
     requestAnimationFrame(gameLoop);
@@ -200,7 +236,7 @@ function gameLoop(timestamp) {
     gameState.frameCount++;
 
     if (!gameState.isGameOver) {
-        // 1. 4分割サブステップで物理演算およびソフトボディ（完全液体物理・遅延適応ダンピング・分散排斥）を更新
+        // 1. 60Hz基準固定タイムステップ・4分割サブステップで物理演算およびソフトボディを更新
         stepPhysics(deltaMs, (subDelta) => {
             updateSoftBodies(world, engine, subDelta);
         });
@@ -216,8 +252,8 @@ function gameLoop(timestamp) {
         // 3. 上部フロートバーの左右2点スポーナー＆セーフティスポーンを監視・補充し上枠黒ゲージ進捗を更新
         maintainFloatBar(world, gameState);
 
-        // 4. 左右バンパーの押し込み変位量・押し込み率（枠内赤点灯サイドバー連動）および同時継続押し込み判定
-        const bumperResult = updateBumpers(deltaMs);
+        // 4. 左右バンパーの押し込み変位量・押し込み率および同時継続押し込み判定（stepPhysics の固定刻み実経過時間と同期）
+        const bumperResult = updateBumpers();
         gameState.lastBumperState = {
             leftPressed: bumperResult.leftPressed,
             rightPressed: bumperResult.rightPressed,
@@ -241,13 +277,20 @@ function gameLoop(timestamp) {
             setWarningEffect(true);
 
             const finalScoreSnapshot = gameState.score;
+            if (finalScoreSnapshot > gameState.bestScore) {
+                gameState.bestScore = finalScoreSnapshot;
+                saveBestScore(gameState.bestScore);
+                updateBestScoreUI(gameState.bestScore);
+            }
+            const bestScoreSnapshot = gameState.bestScore;
+
             const delayMs = UI.GAME_OVER_DELAY_MS || 550;
             if (gameOverTimer) clearTimeout(gameOverTimer);
             gameOverTimer = setTimeout(() => {
                 gameOverTimer = null;
                 if (gameState.isGameOver) {
                     setWarningEffect(false);
-                    showGameOverUI(finalScoreSnapshot);
+                    showGameOverUI(finalScoreSnapshot, bestScoreSnapshot);
                 }
             }, delayMs);
         } else {
@@ -331,9 +374,10 @@ function bootGame() {
     if (isBooted) return;
     isBooted = true;
 
-    // 1. 先にUIを初期化し、動的にコンテナ・上部中央スコア・音量ON/OFFボタン・Canvas等を生成・マウントさせる
+    // 1. 先にUIを初期化し、動的にコンテナ・上部中央スコア・ベストスコア・音量ON/OFFボタン・Canvas等を生成・マウントさせる
     initUI(startGame, handleToggleSound);
     updateSoundUI(isSoundEnabled());
+    updateBestScoreUI(gameState.bestScore);
 
     // 2. 生成された Canvas 要素を取得する
     canvas = document.getElementById('gameCanvas');

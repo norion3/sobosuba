@@ -1,13 +1,12 @@
 /**
  * physics.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 4)
+ * @version v7.0 (Fixed-Timestep Accumulator & Bumper Calibration - Phase 2)
  * @changes
- *   - 一体外枠フレーム（CONTAINER.FRAME_WIDTH: 8 / CONTAINER.TOP_BAR_HEIGHT: 12）の内壁基準へ、壁・天井・床・底面45度スロープ剛体・バンパー休止位置（x=17 / 403）・バネ支点（自然長20px→最大押込時5px反転なし）・clampPointToContainer() を数式0.000px誤差で完全同期
- *   - サイド判定ボタン（左右バンパー）の物理剛体へ角丸面取り（chamfer: { radius: BUMPER.CHAMFER_RADIUS }）と最適密度（PHYSICS.BUMPER_DENSITY: 0.035）を適用し、上下端での引っ掛かり防止と自然な押し込み手応えを実現
- *   - 下敷き小塊の微振動を物理収束側からも抑えるため、Matter.js の反復回数（engine.positionIterations = 8 / engine.velocityIterations = 6）を強化
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=6 へ統一
+ *   - 120Hz端末（ProMotion等）での物理2倍速・バネ硬化・軌道ズレを根絶するため、stepPhysics() へ60Hz基準の固定タイムステップ・アキュムレータ（fixedSubDelta = (1000 / 60) / SUBSTEPS 固定刻み）を導入し、実行ステップ数を返すよう拡張
+ *   - updateBumpers() を固定刻みの実経過物理時間へ同期させ、実行ステップ0のフレームでも誤カウントしないよう修正
+ *   - 新バンパー密度（PHYSICS.BUMPER_DENSITY: 0.0035）・剛性（0.0065）・減衰（0.08）を反映し、constants.js の絶対パスを /sobosuba/constants.js?v=7 へ統一
  * 
- * Matter.jsを用いた物理世界の初期化、壁の生成、サブステップ駆動、および
+ * Matter.jsを用いた物理世界の初期化、壁の生成、固定タイムステップ・サブステップ駆動、および
  * ゲームオーバー条件となる「左右のサイド判定ボタン（バンパースイッチ）」を構築・制御するモジュール
  * 
  * GRAVITY起動エラーを根絶するため、HTMLの<script>タグ依存を排除し、
@@ -15,7 +14,7 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS, CONTAINER, COLLISION_CATEGORY } from '/sobosuba/constants.js?v=6';
+import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS, CONTAINER, COLLISION_CATEGORY } from '/sobosuba/constants.js?v=7';
 
 // Matter.jsのモジュールエイリアス
 const Engine = Matter.Engine;
@@ -23,6 +22,9 @@ const Bodies = Matter.Bodies;
 const Composite = Matter.Composite;
 const Constraint = Matter.Constraint;
 const Body = Matter.Body;
+
+// 60Hz基準の固定フレーム時間（ms）
+const FIXED_FRAME_MS = 1000 / 60;
 
 // 壁・天井・床・スロープと衝突させるゼリーカテゴリの合成マスク
 const ALL_JELLY_MASK =
@@ -36,11 +38,13 @@ export let world;
 export let leftBumper;
 export let rightBumper;
 
-// バンパーの基準（休止）位置および同時押し込み継続時間
+// バンパーの基準（休止）位置、同時押し込み継続時間、および固定タイムステップ状態
 let restXLeft;
 let restXRight;
 let bumperY;
 let bothPressedDurationMs = 0;
+let physicsAccumulatorMs = 0;
+let lastSteppedMs = 0;
 
 /**
  * 座標 (x, y) を一体外枠フレームの内壁（FRAME_WIDTH / TOP_BAR_HEIGHT）および
@@ -121,6 +125,8 @@ export function initPhysics() {
 
     world = engine.world;
     bothPressedDurationMs = 0;
+    physicsAccumulatorMs = 0;
+    lastSteppedMs = 0;
 
     // ゼリーが積み上がって横圧力を生むように重力を設定
     engine.gravity.y = PHYSICS.GRAVITY_Y;
@@ -206,7 +212,7 @@ export function initPhysics() {
         friction: PHYSICS.FRICTION,
         frictionStatic: PHYSICS.FRICTION_STATIC,
         restitution: 0.15,
-        density: PHYSICS.BUMPER_DENSITY || 0.035,
+        density: PHYSICS.BUMPER_DENSITY || 0.0035,
         chamfer: { radius: chamferRadius },
         label: 'bumper',
         // 下段の FIELD_JELLY のみと衝突し、壁や上段待機・ホップ中ゼリーとは干渉しないフィルタ設定
@@ -290,36 +296,55 @@ function constrainBumpers() {
 }
 
 /**
- * 1フレームの経過時間を複数サブステップ（PHYSICS.SUBSTEPS）に分割して物理演算を安定駆動する
+ * 60Hz基準の固定タイムステップ・アキュムレータ（fixedSubDelta = (1000 / 60) / SUBSTEPS 固定刻み）で
+ * 物理演算を駆動し、60Hz/120Hz/144Hzいずれの端末でも同一の物理速度・剛性・弾道を保証する
  * @param {number} deltaMs - 経過フレーム時間（ミリ秒）
  * @param {Function|null} onBeforeSubStep - 各サブステップ更新直前に実行するコールバック (subDelta, stepIndex, totalSteps)
+ * @returns {number} このフレームで実際に実行された固定サブステップ数
  */
-export function stepPhysics(deltaMs = 1000 / 60, onBeforeSubStep = null) {
-    if (!engine) return;
-
-    // タブ復帰時などの極端な時間飛びによる物理爆発を防ぐためデルタ時間を安全範囲にクランプ
-    const clampedDelta = Math.max(1, Math.min(deltaMs || (1000 / 60), 1000 / 30));
-    const substeps = Math.max(1, PHYSICS.SUBSTEPS || 4);
-    const subDelta = clampedDelta / substeps;
-
-    for (let s = 0; s < substeps; s++) {
-        if (typeof onBeforeSubStep === 'function') {
-            onBeforeSubStep(subDelta, s, substeps);
-        }
-        Engine.update(engine, subDelta);
-        constrainBumpers();
+export function stepPhysics(deltaMs = FIXED_FRAME_MS, onBeforeSubStep = null) {
+    if (!engine) {
+        lastSteppedMs = 0;
+        return 0;
     }
+
+    const substeps = Math.max(1, PHYSICS.SUBSTEPS || 4);
+    const fixedSubDelta = FIXED_FRAME_MS / substeps;
+    const maxFrameDelta = FIXED_FRAME_MS * 2; // タブ復帰時等の極端な時間飛びによる物理爆発を防止
+    const rawDelta = (typeof deltaMs === 'number' && isFinite(deltaMs)) ? deltaMs : FIXED_FRAME_MS;
+    const clampedDelta = Math.max(0, Math.min(rawDelta, maxFrameDelta));
+
+    physicsAccumulatorMs = Math.min(physicsAccumulatorMs + clampedDelta, maxFrameDelta);
+
+    const maxStepsPerFrame = substeps * 2;
+    const plannedSteps = Math.min(maxStepsPerFrame, Math.floor(physicsAccumulatorMs / fixedSubDelta));
+    let executedSteps = 0;
+
+    while (executedSteps < plannedSteps) {
+        if (typeof onBeforeSubStep === 'function') {
+            onBeforeSubStep(fixedSubDelta, executedSteps, plannedSteps);
+        }
+        Engine.update(engine, fixedSubDelta);
+        constrainBumpers();
+        physicsAccumulatorMs -= fixedSubDelta;
+        executedSteps++;
+    }
+
+    lastSteppedMs = executedSteps * fixedSubDelta;
+    return executedSteps;
 }
 
 /**
  * 毎フレーム呼ばれ、バンパーの姿勢・可動範囲を固定し、
  * 押し込み状態・赤点灯サイドバー連動用の押し込み率および左右同時押し込みの継続判定結果を返す
- * @param {number} deltaMs - 経過フレーム時間（ミリ秒）
+ * （stepPhysics の固定刻み経過時間と完全同期）
+ * @param {number} [steppedMs] - 経過物理時間（ミリ秒、省略時は直前の stepPhysics 実経過時間を使用）
  * @returns {{ leftPressed: boolean, rightPressed: boolean, leftPushRatio: number, rightPushRatio: number, bothPressedDurationMs: number, isGameOverTriggered: boolean }}
  */
-export function updateBumpers(deltaMs = 1000 / 60) {
+export function updateBumpers(steppedMs) {
     const state = constrainBumpers();
-    const safeDelta = Math.max(0, Math.min(deltaMs || (1000 / 60), 1000 / 15));
+    const rawDelta = (typeof steppedMs === 'number' && isFinite(steppedMs)) ? steppedMs : lastSteppedMs;
+    const safeDelta = Math.max(0, Math.min(rawDelta, 1000 / 15));
 
     if (state.leftPressed && state.rightPressed) {
         bothPressedDurationMs += safeDelta;

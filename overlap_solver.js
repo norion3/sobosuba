@@ -1,21 +1,19 @@
 /**
  * overlap_solver.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 5)
+ * @version v7.0 (Symmetric Intrusion Push Distribution - Phase 3)
  * @changes
- *   - 上段待機カプセル同士（isFloating 同士）が食い込んだ際に上下へえぐらず左右へ綺麗に押し分ける「横排斥バイアス」を追加し、上段の食い込み・えぐれを根絶
- *   - 下敷き小塊の微振動ジッターを遮断するため、微小侵入スロップ（PHYSICS.OVERLAP_SLOP = 0.6px デッドゾーン）および侵入ビーズ側・相手エッジ側の双方に対する衝突法線接近速度吸収を実装
- *   - 斜め下ショットの隣カプセルすり抜け保護（barGraceActive）と衝突マスクを100%同期させるため、barGraceActive と isFloating ペアの排斥除外を追加
- *   - GRAVITYキャッシュ不整合対策として constants.js / physics.js の絶対パスを ?v=6 へ統一
+ *   - 侵入ビーズ1点だけが単独ワープしてツノ・クチバシ状の奇形を生む現象を根絶するため、侵入側（A）の押し戻しを「侵入ビーズ本体 64% ＋ 両隣ビーズ各 18%」へ対称分散させ、滑らかな接触面を維持
+ *   - GRAVITYキャッシュ不整合対策として constants.js / physics.js の絶対パスを ?v=7 へ統一
  * 
  * ソフトボディ間の「非侵入（Anti-Overlap）排斥ソルバー」および共通幾何判定を提供するモジュール
  * 
- * 広域AABB高速絞り込み ＋ Point-in-Polygon 包含判定 ＋ 最近傍エッジ外向き分散排斥により、
- * 中空ビーズリング同士のめり込み・重なり固定を物理的に解消します。
+ * 広域AABB高速絞り込み ＋ Point-in-Polygon 包含判定 ＋ 双方最近傍エッジ外向き対称分散排斥により、
+ * 中空ビーズリング同士のめり込み・重なり固定および局所的な突起奇形を物理的に解消します。
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { PHYSICS } from '/sobosuba/constants.js?v=6';
-import { clampPointToContainer } from '/sobosuba/physics.js?v=6';
+import { PHYSICS } from '/sobosuba/constants.js?v=7';
+import { clampPointToContainer } from '/sobosuba/physics.js?v=7';
 
 const Body = Matter.Body;
 
@@ -131,7 +129,7 @@ function absorbEdgeApproachVelocity(body, ux, uy, absorbRatio) {
 }
 
 /**
- * 侵入したビーズ（ゼリーA側）を相手ゼリーBの最近傍エッジ外側へ押し戻し、
+ * 侵入したビーズ（ゼリーA側）を相手ゼリーBの最近傍エッジ外側へ対称分散（本体64%＋両隣各18%）で押し戻し、
  * 相手側のエッジ2点およびその外側隣接2ビーズへ反作用を滑らかに分散させる
  * @param {Matter.Composite} compA - 侵入側ゼリー
  * @param {Matter.Composite} compB - 侵入された側ゼリー
@@ -261,8 +259,14 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
         const pushA = push * 0.62;
         const pushB = push * 0.38;
 
-        // (A) 侵入ビーズ本体を外側へ押し戻す
-        applyClampedPush(p, ux * pushA, uy * pushA, rA);
+        // (A) 侵入ビーズ側も対称分散（本体64% ＋ 両隣ビーズ各18%）で押し戻し、ツノ・クチバシ奇形を根絶
+        const pPrevA = ptsA[(i - 1 + nA) % nA];
+        const pNextA = ptsA[(i + 1) % nA];
+        const mainPushA = pushA * 0.64;
+        const sidePushA = pushA * 0.18;
+        applyClampedPush(p, ux * mainPushA, uy * mainPushA, rA);
+        applyClampedPush(pPrevA, ux * sidePushA, uy * sidePushA, rA);
+        applyClampedPush(pNextA, ux * sidePushA, uy * sidePushA, rA);
 
         // 双方衝突法線速度吸収（侵入ビーズ側：相手内部へ潜り込み続ける速度成分を吸収）
         const velDotA = p.velocity.x * ux + p.velocity.y * uy;
@@ -330,8 +334,8 @@ export function solveAntiOverlap(jellies) {
     const count = jellies.length;
     if (count < 2) return;
 
-    const stiffness = PHYSICS.ANTI_OVERLAP_STIFFNESS || 0.65;
-    const maxPush = PHYSICS.ANTI_OVERLAP_MAX_PUSH || 4.0;
+    const stiffness = PHYSICS.ANTI_OVERLAP_STIFFNESS || 0.52;
+    const maxPush = PHYSICS.ANTI_OVERLAP_MAX_PUSH || 2.6;
     const slop = (PHYSICS.OVERLAP_SLOP !== undefined) ? PHYSICS.OVERLAP_SLOP : 0.6;
 
     for (let i = 0; i < count; i++) {

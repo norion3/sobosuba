@@ -1,16 +1,14 @@
 /**
  * input.js
- * @version v4.0 (Final Overhaul Step 4)
+ * @version v7.0 (Constants Version Sync & Duplicate Load Prevention - Phase 9)
  * @changes
- *   - 操作中の指の識別子（activeTouchId）を追跡することで、ドラッグ中に2本目の指や手のひらが画面に触れて離れても発射が暴発しないマルチタッチ誤爆防止を実装
- *   - iOS Safari / GRAVITY WebView での長押しエイム時にOS側の拡大鏡・テキスト選択メニューが介入するのを防ぐため、UI対象外の touchstart で安全に preventDefault() を実行
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=4 へ統一
+ *   - ブラウザ上での constants.js 二重モジュールロード地雷を解消するため、インポートの絶対パスを /sobosuba/constants.js?v=4 から /sobosuba/constants.js?v=7 へ統一
  * 
  * タッチ/マウス操作の追従、順方向ダイレクトエイムの座標・ベクトル計算、
  * およびWebKit特有の余白ドラッグ(ラバーバンド)の物理遮断を管理する入力モジュール
  */
 
-import { GAME_WIDTH, GAME_HEIGHT, PHYSICS } from '/sobosuba/constants.js?v=4';
+import { GAME_WIDTH, GAME_HEIGHT, PHYSICS } from '/sobosuba/constants.js?v=7';
 
 let canvasElement;
 let scaleX = 1;

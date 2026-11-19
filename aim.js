@@ -1,25 +1,23 @@
 /**
  * aim.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 9)
+ * @version v7.0 (Hop Trajectory 1px Sync, Shot Reach & Trigger Calibration - Phase 7)
  * @changes
- *   - 2.5D上段飛び越えホップの初速計算を線形マッピング式（上向き速度 0.96〜1.18、HOP_X_MULTIPLIER: 0.016、横速度継承 avgVx * 0.2）へ刷新し、全サイズでの天井非激突と狙い通りの飛距離を両立
- *   - ホップ軌道予測ドット（updateHopPreviewPoints）を飛行中の半カプセル実半幅・実半高および一体外枠フレーム内壁（CONTAINER.FRAME_WIDTH / CONTAINER.TOP_BAR_HEIGHT）基準の反射計算と 1px 精度で同期
- *   - 斜め下ショット（dy >= 24 かつ dy >= 0.22|dx|、進行方向隣の同数字非隣接）時に隣カプセル角の引っ掛かりを防ぐ useBarGrace 判定連携を追加
- *   - タップ操作開始時に sound.js の ensureAudioRunning() を呼び出し、音量 ON 状態でのオーディオ自動リカバリを保証
- *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js / floatbar.js / sound.js の絶対パスを ?v=6 へ統一
+ *   - ホップ軌道予測ドット（updateHopPreviewPoints）の運動方程式・重力倍率・X/Y独立最大速度クランプ・壁反発係数を softbody.js / physics.js の実物理と 1px 精度で完全同期
+ *   - 塊を確実に乗り越える新ホップ初速定数（HOP_MIN_UP_SPEED: 1.12 / HOP_MAX_UP_SPEED: 1.26 / HOP_X_MULTIPLIER: 0.026 / HOP_MAX_SPEED: 4.6）、誤爆防止閾値（HOP_TRIGGER_DY: -16）、および端まで届く通常ショット定数（AIM_MAX_DRAG: 120 / AIM_FORCE_MULTIPLIER: 0.056 / LAUNCH_GRACE_MIN_DY: -2）を反映
+ *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js / floatbar.js の絶対パスを ?v=7 へ統一（sound.js は ?v=6 を維持）
  * 
  * 上段フロートバーのゼリー選択、360度順方向ダイレクトエイム、
  * 天井非激突2.5D上段飛び越えホップ自動切替および放物線軌道プレビュー計算を担う操作モジュール
  */
 
-import { GAME_WIDTH, CONTAINER, PHYSICS, FLOAT_BAR } from '/sobosuba/constants.js?v=6';
+import { GAME_WIDTH, CONTAINER, PHYSICS, FLOAT_BAR } from '/sobosuba/constants.js?v=7';
 import {
     getSoftBodyCentroid,
     getSoftBodyHalfExtents,
     launchFloatingJelly,
     launchBarHop
-} from '/sobosuba/softbody.js?v=6';
-import { getFloatingJellies } from '/sobosuba/floatbar.js?v=6';
+} from '/sobosuba/softbody.js?v=7';
+import { getFloatingJellies } from '/sobosuba/floatbar.js?v=7';
 import { ensureAudioRunning, playSoundShoot, playSoundHop } from '/sobosuba/sound.js?v=6';
 
 // ==========================================
@@ -65,7 +63,7 @@ export function clampAimVector(dx, dy) {
     let vecX = dx;
     let vecY = dy;
     const rawDist = Math.sqrt(vecX * vecX + vecY * vecY);
-    const maxDrag = PHYSICS.AIM_MAX_DRAG || 150;
+    const maxDrag = PHYSICS.AIM_MAX_DRAG || 120;
 
     if (rawDist > maxDrag) {
         const ratio = maxDrag / rawDist;
@@ -83,14 +81,14 @@ export function clampAimVector(dx, dy) {
  * @returns {{ x: number, y: number }} ホップ初速ベクトル（px/substep 単位）
  */
 export function computeHopVelocity(vecX, vecY) {
-    const xMult = (FLOAT_BAR.HOP_X_MULTIPLIER !== undefined) ? FLOAT_BAR.HOP_X_MULTIPLIER : 0.016;
-    const minUpSpeed = (FLOAT_BAR.HOP_MIN_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MIN_UP_SPEED : 0.96;
-    const maxUpSpeed = (FLOAT_BAR.HOP_MAX_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MAX_UP_SPEED : 1.18;
-    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -8;
-    const maxDrag = Math.max(Math.abs(hopTriggerDy) + 1, PHYSICS.AIM_MAX_DRAG || 150);
+    const xMult = (FLOAT_BAR.HOP_X_MULTIPLIER !== undefined) ? FLOAT_BAR.HOP_X_MULTIPLIER : 0.026;
+    const minUpSpeed = (FLOAT_BAR.HOP_MIN_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MIN_UP_SPEED : 1.12;
+    const maxUpSpeed = (FLOAT_BAR.HOP_MAX_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MAX_UP_SPEED : 1.26;
+    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
+    const maxDrag = Math.max(Math.abs(hopTriggerDy) + 1, PHYSICS.AIM_MAX_DRAG || 120);
     const maxHopSpeed = Math.min(
-        FLOAT_BAR.HOP_MAX_SPEED || 3.9,
-        PHYSICS.MAX_PARTICLE_SPEED || 5.6
+        FLOAT_BAR.HOP_MAX_SPEED || 4.6,
+        PHYSICS.MAX_PARTICLE_VX || 6.8
     );
 
     const vx = vecX * xMult;
@@ -116,7 +114,7 @@ export function computeHopVelocity(vecX, vecY) {
 
 /**
  * 2.5D上段飛び越えホップ時の放物線予測ドット（一体外枠フレーム内壁・天井反射込み、着地先まで7点）を
- * softbody.js / physics.js の半カプセル実寸法・物理定数と 1px 精度で同期して算出する
+ * softbody.js / physics.js の半カプセル実寸法・固定刻み物理定数・X/Y独立速度クランプと 1px 精度で同期して算出する
  * @param {Matter.Engine|null} engine - Matter.js物理エンジン
  * @param {Object} gameState - ゲーム状態オブジェクト
  * @param {Matter.Composite} selected - 選択中のゼリーコンポジット
@@ -144,9 +142,11 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     }
 
     const inheritVx = (FLOAT_BAR.HOP_INHERIT_VX !== undefined) ? FLOAT_BAR.HOP_INHERIT_VX : 0.2;
+    const maxVx = PHYSICS.MAX_PARTICLE_VX || 6.8;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 7.2;
     const maxHopSpeed = Math.min(
-        FLOAT_BAR.HOP_MAX_SPEED || 3.9,
-        PHYSICS.MAX_PARTICLE_SPEED || 5.6
+        FLOAT_BAR.HOP_MAX_SPEED || 4.6,
+        maxVx
     );
     let vx = avgVx * inheritVx + hopVel.x;
     let vy = hopVel.y;
@@ -177,8 +177,10 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     const hopGravScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 0.72;
     const subAccY = gravityY * gravityScale * hopGravScale * subDelta * subDelta;
     const airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012);
+    const wallRestitution = (PHYSICS.RESTITUTION !== undefined) ? PHYSICS.RESTITUTION : 0.16;
     const minAirSteps = Math.ceil((FLOAT_BAR.HOP_MIN_AIR_MS || 115) / subDelta);
     const targetBarY = FLOAT_BAR.Y;
+    const recatchYMax = FLOAT_BAR.HOP_RECATCH_Y_MAX || 138;
 
     let px = centroid.x;
     let py = centroid.y;
@@ -188,18 +190,19 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
 
     const maxSimSteps = 260;
     for (let step = 1; step <= maxSimSteps; step++) {
-        vx *= airDamp;
-        vy = vy * airDamp + subAccY;
+        // softbody.js の clampParticleVelocities (X/Y独立クランプ) ＆ Matter.js 固定刻み積分に完全同期
+        vx = Math.max(-maxVx, Math.min(maxVx, vx * airDamp));
+        vy = Math.max(-maxVy, Math.min(maxVy, vy * airDamp + subAccY));
         px += vx;
         py += vy;
 
-        // 一体外枠フレーム内壁基準の左右壁・天井クッション反射シミュレーション
+        // 一体外枠フレーム内壁基準の左右壁（PHYSICS.RESTITUTION）・天井クッション（0.45）反射シミュレーション
         if (px < minX) {
             px = minX;
-            vx = Math.abs(vx) * 0.55;
+            vx = Math.abs(vx) * wallRestitution;
         } else if (px > maxX) {
             px = maxX;
-            vx = -Math.abs(vx) * 0.55;
+            vx = -Math.abs(vx) * wallRestitution;
         }
         if (py < minY) {
             py = minY;
@@ -210,7 +213,7 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
         hopTraceScratchY.push(py);
 
         // 下降フェーズでバー高度へ到達したら自動再吸着（リキャッチ）予定位置として終了
-        if (step >= minAirSteps && vy >= 0 && py >= targetBarY) {
+        if (step >= minAirSteps && ((vy >= 0 && py >= targetBarY) || py > recatchYMax)) {
             hopTraceScratchY[hopTraceScratchY.length - 1] = targetBarY;
             break;
         }
@@ -231,8 +234,8 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
 }
 
 /**
- * 斜め下ショット時に隣カプセル角の引っ掛かりを防ぐすり抜け保護（useBarGrace）を有効にすべきか判定する
- * （明確な下向き勾配 dy >= 24 かつ dy >= 0.22 * |dx| であり、かつ進行方向すぐ隣に同数字がいない場合のみ true）
+ * 端狙い・斜め下ショット時に隣カプセル角の引っ掛かりを防ぐすり抜け保護（useBarGrace）を有効にすべきか判定する
+ * （dy >= LAUNCH_GRACE_MIN_DY (-2) であり、かつ進行方向すぐ隣に同数字がいない場合のみ true）
  * @param {Matter.Composite} selected - 発射する選択ゼリー
  * @param {{ x: number, y: number }} safeAim - クランプ済みドラッグベクトル
  * @param {Matter.World|null} world - 物理世界（同数字隣接判定用）
@@ -241,10 +244,14 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
 function shouldEnableBarLaunchGrace(selected, safeAim, world) {
     if (!selected || !safeAim) return false;
 
-    const minDy = (FLOAT_BAR.LAUNCH_GRACE_MIN_DY !== undefined) ? FLOAT_BAR.LAUNCH_GRACE_MIN_DY : 24;
+    const minDy = (FLOAT_BAR.LAUNCH_GRACE_MIN_DY !== undefined) ? FLOAT_BAR.LAUNCH_GRACE_MIN_DY : -2;
     const minSlope = (FLOAT_BAR.LAUNCH_GRACE_MIN_SLOPE !== undefined) ? FLOAT_BAR.LAUNCH_GRACE_MIN_SLOPE : 0.22;
 
-    if (safeAim.y < minDy || safeAim.y < minSlope * Math.abs(safeAim.x)) {
+    if (safeAim.y < minDy) {
+        return false;
+    }
+    // LAUNCH_GRACE_MIN_DY が正値指定の場合のみ従来の下向き勾配制限を適用（-2 緩和時は浅い端狙いも保護）
+    if (minDy > 0 && safeAim.y < minSlope * Math.abs(safeAim.x)) {
         return false;
     }
 
@@ -305,7 +312,7 @@ export function syncAimToPointer(engine, gameState, pointerX, pointerY) {
     const clamped = clampAimVector(rawDx, rawDy);
     const dist = Math.sqrt(clamped.x * clamped.x + clamped.y * clamped.y);
     const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
-    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -8;
+    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
 
     // 一度でもキャンセル半径外へ伸ばしたかを記録（「そっと落とし」と「中心戻しキャンセル」の判別用）
     if (dist >= cancelRadius) {
@@ -452,7 +459,7 @@ export function endAimDrag(gameState, onLaunchedCallback = null, world = null) {
 
     const dist = Math.sqrt(vecX * vecX + vecY * vecY);
     const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
-    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -8;
+    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
 
     // 【操作判別】
     // 1. 一度外へ矢印を伸ばしてから中心へ戻して離した場合 → 発射キャンセル（消費しない）
@@ -468,14 +475,15 @@ export function endAimDrag(gameState, onLaunchedCallback = null, world = null) {
         launchBarHop(selected, hopVel);
     } else {
         // 3. タップして外へ伸ばさず離した場合 → 「そっと落とし」（加算初速 0）
-        // 4. 水平〜下方向へ伸ばして離した場合 → 「通常ショット（斜め下限定すり抜け保護付き加算速度発射）」
+        // 4. 水平〜下方向へ伸ばして離した場合 → 「通常ショット（端狙い・斜め下すり抜け保護付き加算速度発射）」
         let addVelocity = { x: 0, y: 0 };
         let useBarGrace = false;
         if (dist >= cancelRadius) {
             const safeAim = clampAimVector(vecX, vecY);
+            const forceMult = (PHYSICS.AIM_FORCE_MULTIPLIER !== undefined) ? PHYSICS.AIM_FORCE_MULTIPLIER : 0.056;
             addVelocity = {
-                x: safeAim.x * PHYSICS.AIM_FORCE_MULTIPLIER,
-                y: safeAim.y * PHYSICS.AIM_FORCE_MULTIPLIER
+                x: safeAim.x * forceMult,
+                y: safeAim.y * forceMult
             };
             useBarGrace = shouldEnableBarLaunchGrace(selected, safeAim, world);
         }

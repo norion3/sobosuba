@@ -1,22 +1,22 @@
 /**
  * floatbar.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 8)
+ * @version v7.0 (Late-Game Spawn Table Scaling & v7 Import Sync - Phase 6)
  * @changes
- *   - 一体外枠フレーム（CONTAINER.FRAME_WIDTH: 8）およびバンパー面回避余白（FLOAT_BAR.PADDING_X: 26）基準へ、左右スポーナー座標（LEFT_SPAWN_X: 48 / RIGHT_SPAWN_X: 372）・クリアランス検知・初期配置・セーフティスポーン安全幅を完全同期
- *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js の絶対パスを ?v=6 へ統一
+ *   - 高スコア帯（スコア 2000 / 5000〜）における 1 の過剰供給を抑え、4 / 8 / 16 の回転率を段階的に引き上げるよう generateNextValue() の出現テーブルを拡張
+ *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js の絶対パスを ?v=7 へ統一
  * 
  * 上部フロートバーのゼリー生成・出現テーブル・左右2点クリアランス検知スポーナー・
  * セーフティスポーンおよび上枠スポーナーゲージ進捗管理を担うモジュール
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, CONTAINER, FLOAT_BAR } from '/sobosuba/constants.js?v=6';
+import { GAME_WIDTH, CONTAINER, FLOAT_BAR } from '/sobosuba/constants.js?v=7';
 import {
     createSoftBodyJelly,
     getSoftBodyCentroid,
     getSoftBodyHalfExtents,
     getCapsuleHalfExtentsForValue
-} from '/sobosuba/softbody.js?v=6';
+} from '/sobosuba/softbody.js?v=7';
 
 /**
  * 一体外枠フレーム（FRAME_WIDTH）およびバンパー面基準（FLOAT_BAR.PADDING_X）と同期した
@@ -29,7 +29,7 @@ function getSafeBarPaddingX() {
 }
 
 // ==========================================
-// 出現テーブル（本家スコア帯準拠）
+// 出現テーブル（本家スコア帯準拠・中終盤段階拡張）
 // ==========================================
 /**
  * 現在のスコア進行に応じて、次に上段フロートバーへ供給するゼリーの数値を抽選する
@@ -40,7 +40,21 @@ export function generateNextValue(score = 0) {
     const rand = Math.random();
     const s = Number(score) || 0;
 
-    // 本家スコア方式（盤面有効値総和）の進行速度に最適化した出現テーブル
+    // 本家スコア方式（盤面有効値総和）の進行速度に最適化した段階的出現テーブル
+    if (s >= 5000) {
+        if (rand > 0.82) return 16; // 18%
+        if (rand > 0.60) return 8;  // 22%
+        if (rand > 0.32) return 4;  // 28%
+        if (rand > 0.12) return 2;  // 20%
+        return 1;                   // 12%
+    }
+    if (s >= 2000) {
+        if (rand > 0.87) return 16; // 13%
+        if (rand > 0.70) return 8;  // 17%
+        if (rand > 0.44) return 4;  // 26%
+        if (rand > 0.18) return 2;  // 26%
+        return 1;                   // 18%
+    }
     if (s >= 700) {
         if (rand > 0.92) return 16; // 8%
         if (rand > 0.80) return 8;  // 12%

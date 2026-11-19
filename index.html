@@ -1,4 +1,10 @@
 <!DOCTYPE html>
+<!--
+  index.html
+  @version v7.0 (Unused CDN Removal - Phase 12)
+  @changes
+    - 未使用の Tailwind CSS CDN スクリプト（https://cdn.tailwindcss.com）を削除し、初回ロード時間を短縮
+-->
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
@@ -7,9 +13,6 @@
     
     <!-- 【最重要】相対パスの解決先をGitHubのリポジトリルートへ固定 -->
     <base href="https://norion3.github.io/sobosuba/">
-    
-    <!-- UI構築用 Tailwind CSS (物理エンジン等のコアライブラリはJS内でESMとしてインポートします) -->
-    <script src="https://cdn.tailwindcss.com"></script>
     
     <style>
         /* =========================================================

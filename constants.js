@@ -1,15 +1,14 @@
 /**
  * constants.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 1)
+ * @version v7.0 (Fluid Shape, Shot Reach, Bar-Hop & Bumper Calibration - Phase 1)
  * @changes
- *   - 一体外枠フレーム（FRAME_WIDTH: 8 / TOP_BAR_HEIGHT: 12）およびサイド判定ボタン黄金比（Y_RATIO: 0.30 / HEIGHT_RATIO: 0.165 / WIDTH: 18 / PUSH_THRESHOLD: 9 / MAX_PUSH: 15 / CHAMFER_RADIUS: 7 / BUMPER_STIFFNESS: 0.010 / BUMPER_DAMPING: 0.06 / BUMPER_DENSITY: 0.035）を定義
- *   - 内幅404pxへ最適化したサイズカーブ（1: 21.5px 〜 16384: 146px / 32768: 164px）、細密ビーズ数（16〜30個・BEAD_RADIUS_RATIO: 0.18）、および質量スケーリング指数（DENSITY_SCALE_EXP: 0.65）へ刷新
- *   - SHAPE_MATCH / PBD位置ワープを0へ撤廃し、目標面積比0.98・柔皮バネ（0.15）・適正曲げ（0.045）・強化非線形内圧（0.0016 / ゲイン6.5 / 閾値0.28 / 上限3.8）・体積粘性（BULK_DAMPING: 0.00055）・超低摩擦（0.015）・低空気抵抗（0.0012）・遅延適応ダンピング（350〜900ms）・微小侵入スロップ（0.6px）・重心衝突音閾値（0.65 / 450ms）を定義
- *   - 矢印通りの弾道と天井非激突ホップのため、GRAVITY_Y: 0.94・AIM_FORCE_MULTIPLIER: 0.038・MAX_PARTICLE_SPEED: 5.6・斜め下すり抜け保護定数（220ms / dy>=24 / slope>=0.22）・FLOAT_BAR（Y: 108 / PADDING_X: 26 / LEFT_SPAWN_X: 48 / RIGHT_SPAWN_X: 372 / CHANNEL_HALF_HEIGHT: 22）・ホップ定数（HOP_TRIGGER_DY: -8 / HOP_GRAVITY_SCALE: 0.72 / HOP_MIN_UP_SPEED: 0.96 / HOP_MAX_UP_SPEED: 1.18 / HOP_X_MULTIPLIER: 0.016 / HOP_INHERIT_VX: 0.2）へ更新
- *   - 本家準拠の合体真っ白フラッシュ＆連鎖の間（吸い付き40〜95ms / 保護＆真っ白フラッシュ140〜300ms / MERGE_WHITE_HOLD_RATIO: 0.42）を定義
+ *   - 端まで一直線に届くショットと横失速根絶のため、AIM_MAX_DRAG（120）・AIM_FORCE_MULTIPLIER（0.056）・X/Y独立速度上限（MAX_PARTICLE_VX: 6.8 / MAX_PARTICLE_VY: 7.2）・斜め下すり抜け保護の最小下向き条件緩和（LAUNCH_GRACE_MIN_DY: -2）を定義
+ *   - 天井非激突かつ塊を確実に飛び越える上段ホップのため、HOP_TRIGGER_DY（-16）・HOP_MIN_UP_SPEED（1.12）・HOP_MAX_UP_SPEED（1.26）・HOP_X_MULTIPLIER（0.026）・HOP_MAX_SPEED（4.6）へ調整
+ *   - 下の塊のV字折れ・勾玉奇形を根絶しつつ水風船の流動感を保つため、SKIN_STIFFNESS（0.28）・BEND_STIFFNESS（0.13）・SOFTBODY_PRESSURE（0.0024）・ANTI_OVERLAP_STIFFNESS（0.52）・ANTI_OVERLAP_MAX_PUSH（2.6）へ刷新
+ *   - ゼリー総質量と釣り合う左右バンパー感度へ再正規化するため、BUMPER_DENSITY（0.0035）・BUMPER_STIFFNESS（0.0065）・BUMPER_DAMPING（0.08）へ調整
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
- * v6.0改修対象モジュールから絶対パス（/sobosuba/constants.js?v=6）でインポートして使用されます。
+ * v7.0改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
  */
 
 // ==========================================
@@ -104,15 +103,15 @@ export const PHYSICS = {
     DENSITY_SCALE_EXP: 0.65,      // 質量比を r^1.35 へ抑え下敷き圧壊を防ぐ密度スケーリング指数
     BEAD_RADIUS_RATIO: 0.18,      // 全体半径に対する細密外周ビーズ半径の基準比率
     BEAD_MIN_OVERLAP_RATIO: 1.35, // 隣接ビーズ直径 >= 1.35 * 辺長 を保証する隙間ゼロ比率
-    SKIN_STIFFNESS: 0.15,         // 柔軟に伸びて角へ流れ込む皮の張り剛性
-    BEND_STIFFNESS: 0.045,        // 液体的な密着変形とフック奇形防止を両立する1つ飛ばし曲げ拘束
+    SKIN_STIFFNESS: 0.28,         // 水風船の流動感とV字折れ・勾玉奇形防止を両立する皮の張り剛性
+    BEND_STIFFNESS: 0.13,         // 液体的な密着変形とフック奇形根絶を両立する1つ飛ばし曲げ拘束
     SOFTBODY_DAMPING: 0.02,       // SUBSTEPS=4 正規化済みの低バネ減衰
 
     // PBD位置ワープ・真円形状保持の完全撤廃 ＋ 強化非線形バルク内圧 ＋ 体積粘性
     TARGET_AREA_RATIO: 0.98,      // シワ折れを起こさず微小な遊びを確保する目標面積比
     PBD_AREA_STIFFNESS: 0,        // 永久微振動の原因となるPBD位置ワープを完全撤廃
     PBD_MAX_CORRECTION: 0,        // PBD位置ワープ上限0（純粋な力ベース内圧へ完全移行）
-    SOFTBODY_PRESSURE: 0.0016,    // 主軸となる力ベース内部圧力係数
+    SOFTBODY_PRESSURE: 0.0024,    // 主軸となる力ベース内部圧力係数（自然な水風船の張りを確保）
     PRESSURE_NONLINEAR_GAIN: 6.5, // 極限圧迫時のみ急増する非線形バルク反発係数（13倍荷重耐性）
     PRESSURE_NONLINEAR_THRESHOLD: 0.28, // 非線形バルク反発が立ち上がる圧縮率閾値
     PRESSURE_RATIO_MAX: 3.8,      // 陽的積分安定性を守る圧力比上限クランプ
@@ -128,26 +127,28 @@ export const PHYSICS = {
     SETTLE_MAX_DAMPING: 0.88,     // 完全圧迫静止時の重心相対速度減衰係数（1フレーム換算）
 
     // 分散非侵入排斥ソルバー（微小侵入スロップによる下敷きジッター遮断）
-    ANTI_OVERLAP_STIFFNESS: 0.65, // 分散型 Point-in-Polygon 侵入ビーズ排斥強度
-    ANTI_OVERLAP_MAX_PUSH: 4.0,   // 1サブステップあたりの最大排斥距離（px）
+    ANTI_OVERLAP_STIFFNESS: 0.52, // 分散型 Point-in-Polygon 侵入ビーズ排斥強度（突起奇形防止）
+    ANTI_OVERLAP_MAX_PUSH: 2.6,   // 1サブステップあたりの最大排斥距離（px）
     OVERLAP_SLOP: 0.6,            // 微小侵入（0.6px未満）を無視するデッドゾーン（px）
-    MAX_PARTICLE_SPEED: 5.6,      // 一直線弾道と非トンネリング（最小ビーズ径の62%）を両立する最大速度
+    MAX_PARTICLE_SPEED: 5.6,      // 互換維持用（合体衝撃波等の上限基準）
+    MAX_PARTICLE_VX: 6.8,         // 落下中の横速度削れを防ぐ非トンネリング範囲内の水平最大速度（px/substep）
+    MAX_PARTICLE_VY: 7.2,         // 落下中の横速度と独立して制御する垂直最大速度（px/substep）
 
     // 互換維持用
     DENSITY_CORE: 0.002,
     SOFTBODY_STIFFNESS: 0.04,
     SOFTBODY_PERIMETER_STIFFNESS: 0.15,
 
-    // バンパー関連（GRAVITY_Y: 0.94 ＆ 質量スケーリングに最適化）
-    BUMPER_STIFFNESS: 0.010,      // 適度な圧力で自然に押し込めるバネ剛性
-    BUMPER_DAMPING: 0.06,         // バンパーのバネ減衰
-    BUMPER_DENSITY: 0.035,        // 重すぎて動かなくなるのを防ぐ最適バンパー密度
+    // バンパー関連（ゼリー総質量 1.2〜11.1 に合わせた再正規化）
+    BUMPER_STIFFNESS: 0.0065,     // 積み上げ圧力で自然に押し込めるバネ剛性
+    BUMPER_DAMPING: 0.08,         // バンパーのバネ減衰
+    BUMPER_DENSITY: 0.0035,       // バンパー質量を約6.83へ適正化しゼリーとの釣り合いを確保
 
     // 順方向ダイレクトエイム関連（SUBSTEPS=4 正規化済み・360度エイム解放）
     SLINGSHOT_FORCE_MULTIPLIER: 0.00015, // 互換用
     SLINGSHOT_MAX_DRAG: 150,             // 互換用
-    AIM_FORCE_MULTIPLIER: 0.038,         // 矢印の方向へ力強く一直線に飛ぶ通常ショット初速係数
-    AIM_MAX_DRAG: 150,                   // 最大ドラッグ距離（px）
+    AIM_FORCE_MULTIPLIER: 0.056,         // 端まで一直線に届く通常ショット初速係数（80pxでvx=4.48）
+    AIM_MAX_DRAG: 120,                   // スマホ片手スワイプで最大威力を出しやすいドラッグ距離（px）
     AIM_CANCEL_RADIUS: 22,               // 指揺れ誤爆を防ぐキャンセル判定半径（px）
 
     // 合体時膨張インパルス ＆ 重心法線接近速度ベースの衝突音閾値
@@ -178,7 +179,7 @@ export const FLOAT_BAR = {
 
     // 斜め下ショット時の隣カプセル角引っ掛かり防止（AABB離脱までの一時すり抜け保護）
     LAUNCH_BAR_GRACE_MAX_MS: 220, // AABB離脱待ちすり抜け保護の安全上限時間（ms）
-    LAUNCH_GRACE_MIN_DY: 24,      // すり抜け保護を発動する最小下向きドラッグ量（px）
+    LAUNCH_GRACE_MIN_DY: -2,      // 浅い角度の端狙いショットでも隣カプセル失速を防ぐ下向き発動条件（px）
     LAUNCH_GRACE_MIN_SLOPE: 0.22, // 真横当てバー上合体を保護する最小下向き勾配（dy >= 0.22 * |dx|）
 
     // 上段「横長カプセル（ピル）形状」圧縮 ＆ 発射／着地モーフィング定数
@@ -193,13 +194,13 @@ export const FLOAT_BAR = {
     TAP_SELECT_EXTRA_RADIUS: 28,  // 各ゼリー実幅・実高に加えるタップ許容マージン（px）
 
     // 天井非激突 2.5D 上段飛び越えホップ ＆ セーフ・リキャッチ定数
-    HOP_TRIGGER_DY: -8,           // わずかな斜め上ドラッグ（dy < -8）から軽快にホップモードへ切替
+    HOP_TRIGGER_DY: -16,          // 横狙いショットの誤爆を防ぎつつ上向きドラッグでホップへ切替
     HOP_FORCE_MULTIPLIER: 0.026,  // 互換維持用
-    HOP_MIN_UP_SPEED: 0.96,       // 天井へ激突せず1個〜複数個を綺麗に飛び越える最小上向き初速
-    HOP_MAX_UP_SPEED: 1.18,       // 上昇高55px以内に収め天井非激突を保証する最大上向き初速
-    HOP_X_MULTIPLIER: 0.016,      // 1個飛び〜端から端まで狙い通り届く横方向初速係数
+    HOP_MIN_UP_SPEED: 1.12,       // 天井非激突（上昇約53px）を保ち1個〜複数個を確実に飛び越える最小上向き初速
+    HOP_MAX_UP_SPEED: 1.26,       // 天井非激突（上昇約68px）を保ち大ジャンプする最大上向き初速
+    HOP_X_MULTIPLIER: 0.026,      // 塊を確実に乗り越え端から端まで届く強化横方向初速係数
     HOP_INHERIT_VX: 0.2,          // 予測ドットとのズレを防ぐ控えめなバー横速度継承率
-    HOP_MAX_SPEED: 3.9,           // ホップ時の最大合成初速（px/substep）
+    HOP_MAX_SPEED: 4.6,           // ホップ時の最大合成初速（px/substep）
     HOP_GRAVITY_SCALE: 0.72,      // 軽快で美しい山なりアーチを描くホップ専用重力倍率
     HOP_MIN_AIR_MS: 115,          // 発射直後に即再吸着しないための最小滞空時間（ms）
     HOP_RECATCH_Y_MIN: 92,        // 下降中にバーへ自動再吸着するY範囲下限

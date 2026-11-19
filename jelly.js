@@ -1,24 +1,23 @@
 /**
  * jelly.js
- * @version v6.0 (Fluid Physics, Controls, Bumper & Audio Overhaul Step 7)
+ * @version v7.0 (Merge Momentum Inheritance & Soft Attraction - Phase 5)
  * @changes
- *   - 本家準拠の真っ白フラッシュ＆連鎖のリズムを実現するため、合体保護時間（140〜300ms）と真っ白フラッシュ（mergeFlashStart / mergeFlashUntil）を1対1で完全同期させ、合体前の吸い付き時間を短くキレのある 40〜95ms へ調整
- *   - 下敷き小塊のぶつかり音連打を100%根絶するため、ビーズ単体の速度判定を廃止し、ゼリー重心速度（comp.centroidVel）に基づく重心法線接近速度判定（閾値 0.65）および同一ゼリーペア別 450ms クールダウン（エントリ200超過時の期限切れ自動パージ・リトライ時全消去付き）を実装
- *   - 一体外枠フレーム（CONTAINER.FRAME_WIDTH: 8 / CONTAINER.TOP_BAR_HEIGHT: 12）の内壁基準へ合体時の安全生成クランプを同期し、新速度域（MAX_PARTICLE_SPEED: 5.6）へ合体衝撃波クランプを調整
- *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js / sound.js の絶対パスを ?v=6 へ統一
+ *   - 吸い付きディレイ中（40〜95ms）の反発分離ワープを防ぐため、合体待機ペア間で離反相対速度を対称吸収しつつ穏やかに引き寄せる処理（applyMergeAttraction）を追加
+ *   - 空中・押し込み合体時のピタッと停止を解消するため、合体実行時に親2体の平均重心速度を算出して新ゼリーへ運動量継承（initialVelocity）するよう実装
+ *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js の絶対パスを ?v=7 へ統一（sound.js は ?v=6 を維持）
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
- * 複雑な中空ビーズリング同士が接触した際、合体前の「吸い付きの間」を経て古いコンポジットを破棄し、
- * 一段階大きなソフトボディを縮小スポーン→Ease-Out-Back膨張成長で安全に再構築します。
+ * 複雑な中空ビーズリング同士が接触した際、合体前の「吸い付きの間」に穏やかに引き寄せ合って古いコンポジットを破棄し、
+ * 親2体の運動量を継承した一段階大きなソフトボディを縮小スポーン→Ease-Out-Back膨張成長で安全に再構築します。
  * 上部フロートバー上での横長カプセル事前合体（ホップ着地合体含む）と、
  * フィールド内合体時の膨張インパルス（Radial Impulse）および重心法線ベースの衝突音判定を管理します。
  * GCスパイク（画面カクつき）を防ぐため、配列再代入を禁止しインプレース更新を徹底します。
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, CONTAINER, JELLY_CONFIG, PHYSICS, FLOAT_BAR, EFFECTS, SCORE } from '/sobosuba/constants.js?v=6';
-import { createSoftBodyJelly, getSoftBodyCentroid, getCapsuleHalfExtentsForValue } from '/sobosuba/softbody.js?v=6';
+import { GAME_WIDTH, GAME_HEIGHT, CONTAINER, JELLY_CONFIG, PHYSICS, FLOAT_BAR, EFFECTS, SCORE } from '/sobosuba/constants.js?v=7';
+import { createSoftBodyJelly, getSoftBodyCentroid, getCapsuleHalfExtentsForValue } from '/sobosuba/softbody.js?v=7';
 import { playSoundCollide, playSoundMerge } from '/sobosuba/sound.js?v=6';
 
 const Composite = Matter.Composite;
@@ -71,6 +70,81 @@ function calcAreaMergeProtectMs(value) {
     const maxMs = EFFECTS.MERGE_PROTECT_MAX_MS || 300;
     const areaFactor = EFFECTS.MERGE_AREA_DELAY_FACTOR || 0.0045;
     return Math.max(minMs, Math.min(maxMs, Math.round(minMs + area * areaFactor)));
+}
+
+/**
+ * ソフトボディの全ビーズから現在の平均重心速度を安全に取得する
+ * @param {Matter.Composite} comp - 対象のゼリーコンポジット
+ * @returns {{ x: number, y: number }}
+ */
+function getSoftBodyAverageVelocity(comp) {
+    if (!comp) return { x: 0, y: 0 };
+    const particles = comp.particles;
+    if (!particles || particles.length === 0) {
+        return comp.centroidVel ? { x: comp.centroidVel.x || 0, y: comp.centroidVel.y || 0 } : { x: 0, y: 0 };
+    }
+
+    let sumVx = 0;
+    let sumVy = 0;
+    const n = particles.length;
+    for (let i = 0; i < n; i++) {
+        sumVx += particles[i].velocity.x;
+        sumVy += particles[i].velocity.y;
+    }
+    return { x: sumVx / n, y: sumVy / n };
+}
+
+/**
+ * 吸い付きディレイ中の合体ペアに対して、全体の並進運動量を保存したまま
+ * 離反相対速度を対称吸収し、互いに穏やかに引き寄せる（反発分離ワープ防止）
+ * @param {Matter.Composite} compA
+ * @param {Matter.Composite} compB
+ * @param {boolean} isFloatingMerge - バー上合体かどうか
+ */
+function applyMergeAttraction(compA, compB, isFloatingMerge) {
+    if (!compA || !compB || !compA.particles || !compB.particles) return;
+
+    const posA = getSoftBodyCentroid(compA);
+    const posB = getSoftBodyCentroid(compB);
+    if (!posA || !posB) return;
+
+    const dx = posB.x - posA.x;
+    const dy = isFloatingMerge ? 0 : (posB.y - posA.y);
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 0.5) return;
+
+    const ux = dx / dist;
+    const uy = dy / dist;
+
+    const velA = getSoftBodyAverageVelocity(compA);
+    const velB = getSoftBodyAverageVelocity(compB);
+
+    // 2体が反発して離れようとしている法線相対速度成分のみ対称に吸収（全体並進運動量は完全保存）
+    const relApproach = (velA.x - velB.x) * ux + (velA.y - velB.y) * uy;
+    let dv = Math.min(0.14, dist * 0.006);
+    if (relApproach < 0) {
+        dv += (-relApproach) * 0.25;
+    }
+
+    const addX = ux * dv;
+    const addY = uy * dv;
+    const ptsA = compA.particles;
+    const ptsB = compB.particles;
+
+    for (let i = 0; i < ptsA.length; i++) {
+        const p = ptsA[i];
+        Body.setVelocity(p, {
+            x: p.velocity.x + addX,
+            y: p.velocity.y + addY
+        });
+    }
+    for (let i = 0; i < ptsB.length; i++) {
+        const p = ptsB[i];
+        Body.setVelocity(p, {
+            x: p.velocity.x - addX,
+            y: p.velocity.y - addY
+        });
+    }
 }
 
 /**
@@ -247,13 +321,15 @@ export function handleCollisions(event, allowCollideSound = true) {
 }
 
 /**
- * 物理演算の更新(afterUpdate)後に、安全にソフトボディの追加・削除を行う
+ * 物理演算の更新(afterUpdate)後に、吸い付きディレイ中の引き寄せおよび安全にソフトボディの追加・削除を行う
  * @param {Matter.World} world - 現在の物理世界
  */
 export function handleMerges(world) {
     const now = Date.now();
+    const maxVx = PHYSICS.MAX_PARTICLE_VX || 6.8;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 7.2;
 
-    // 1. 「吸い付きの間」ディレイキューをチェックし、猶予時間が経過したものを実行キューへ移す
+    // 1. 「吸い付きの間」ディレイキューをチェックし、待機中は穏やかに引き寄せ、猶予経過で実行キューへ移す
     for (let i = pendingMerges.length - 1; i >= 0; i--) {
         const pm = pendingMerges[i];
         if (now >= pm.executeTime) {
@@ -265,14 +341,37 @@ export function handleMerges(world) {
                 ? FLOAT_BAR.Y
                 : ((latestA && latestB) ? ((latestA.y + latestB.y) / 2) : pm.y);
 
+            // 親2体の平均運動量を継承（空中・押し込み合体時のピタッと停止を解消）
+            const velA = getSoftBodyAverageVelocity(pm.compA);
+            const velB = getSoftBodyAverageVelocity(pm.compB);
+            const avgVx = (velA.x + velB.x) * 0.5;
+            const avgVy = (velA.y + velB.y) * 0.5;
+            let inheritedVelocity;
+
+            if (pm.isFloating) {
+                inheritedVelocity = {
+                    x: Math.max(-2.5, Math.min(2.5, avgVx * 0.75)),
+                    y: 0
+                };
+            } else {
+                inheritedVelocity = {
+                    x: Math.max(-maxVx, Math.min(maxVx, avgVx * 0.85)),
+                    y: Math.max(-maxVy, Math.min(maxVy, avgVy * 0.85))
+                };
+            }
+
             compositesToRemove.push(pm.compA, pm.compB);
             compositesToAdd.push({
                 x: finalX,
                 y: finalY,
                 value: pm.value,
-                isFloating: pm.isFloating
+                isFloating: pm.isFloating,
+                initialVelocity: inheritedVelocity
             });
             pendingMerges.splice(i, 1);
+        } else {
+            // 吸い付きディレイ中の反発分離ワープを抑える穏やかな対称引き寄せ
+            applyMergeAttraction(pm.compA, pm.compB, pm.isFloating);
         }
     }
 
@@ -325,13 +424,13 @@ export function handleMerges(world) {
                 spawnY = (minY <= maxY) ? Math.max(minY, Math.min(maxY, spawnY)) : (GAME_HEIGHT / 2);
             }
 
-            // 新しい一段階大きな中空ビーズリングを「縮小スポーン（0.78倍）→ Ease-Out-Back 膨張成長」で生成
+            // 新しい一段階大きな中空ビーズリングを「親2体の運動量継承 ＋ 縮小スポーン（0.78倍）→ Ease-Out-Back 膨張成長」で生成
             // バー上合体の場合は isFloating = true により横長カプセル形状で安全生成、hasMerged = true を付与
             const newJellyComposite = createSoftBodyJelly(
                 spawnX,
                 spawnY,
                 val,
-                null,
+                data.initialVelocity || null,
                 data.isFloating,
                 true,
                 growStartScale
