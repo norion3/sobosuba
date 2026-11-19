@@ -1,11 +1,10 @@
 /**
  * physics.js
- * @version v3.0 (Overhaul Step 5)
+ * @version v4.0 (Final Overhaul Step 5)
  * @changes
- *   - 粘り気を無くし壁・床・45度スロープ沿いに滑らかに流れるよう、容器およびバンパーを超低摩擦化（PHYSICS.FRICTION / FRICTION_STATIC 適用）
- *   - 1フレームを複数サブステップ（PHYSICS.SUBSTEPS = 4）に分割して物理演算とバンパー姿勢固定を安定駆動する stepPhysics() を実装
- *   - 一瞬のかすめ接触による誤爆を防ぐため、左右バンパー同時押し込みの継続時間（BUMPER.GAME_OVER_HOLD_MS）を計測・判定する支援機能を updateBumpers() へ追加
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=3 へ統一
+ *   - PBD面積補正やソフトボディ間非侵入排斥ソルバーが底面の45度角カットスロープを貫通しないよう、スロープ境界を含めて安全に座標制限するヘルパー clampPointToContainer() を追加
+ *   - SUBSTEPS=4 正規化済みのバンパーバネ剛性・減衰（constants.js?v=4）を適用し、上段飛び越えホップ時に天井へ軽く当たっても張り付かず滑らかに反射する天井クッション設定へ調整
+ *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=4 へ統一
  * 
  * Matter.jsを用いた物理世界の初期化、壁の生成、サブステップ駆動、および
  * ゲームオーバー条件となる「左右のスリムバンパースイッチ」を構築・制御するモジュール
@@ -15,7 +14,7 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS, CONTAINER } from '/sobosuba/constants.js?v=3';
+import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS, CONTAINER } from '/sobosuba/constants.js?v=4';
 
 // Matter.jsのモジュールエイリアス
 const Engine = Matter.Engine;
@@ -40,6 +39,55 @@ let restXLeft;
 let restXRight;
 let bumperY;
 let bothPressedDurationMs = 0;
+
+/**
+ * 座標 (x, y) を容器の壁・天井・床および底面左右の45度角カットスロープの内側へ安全にクランプする
+ * （softbody.js の PBD面積補正・非侵入排斥ソルバーによるスロープ貫通を防止）
+ * @param {number} x - 判定対象のX座標
+ * @param {number} y - 判定対象のY座標
+ * @param {number} margin - 壁・スロープ面から確保する内側マージン（ビーズ半径など）
+ * @param {{ x: number, y: number }|null} out - GC負荷削減用の出力先オブジェクト（省略時は新規作成）
+ * @returns {{ x: number, y: number }} クランプ後の座標
+ */
+export function clampPointToContainer(x, y, margin = 0, out = null) {
+    const safeMargin = Math.max(0, margin);
+    let cx = Math.max(safeMargin, Math.min(GAME_WIDTH - safeMargin, x));
+    let cy = Math.max(safeMargin, Math.min(GAME_HEIGHT - safeMargin, y));
+
+    const cut = CONTAINER.CORNER_CUT_SIZE;
+    if (cut > 0) {
+        const invSqrt2 = Math.SQRT1_2;
+
+        // 左下45度スロープ: 頂点 (0, GAME_HEIGHT - cut) - (cut, GAME_HEIGHT)
+        // 内側（右上）法線ベクトル = (invSqrt2, -invSqrt2)
+        const leftDist = (cx - cy + GAME_HEIGHT - cut) * invSqrt2;
+        if (leftDist < safeMargin) {
+            const push = safeMargin - leftDist;
+            cx += push * invSqrt2;
+            cy -= push * invSqrt2;
+        }
+
+        // 右下45度スロープ: 頂点 (GAME_WIDTH - cut, GAME_HEIGHT) - (GAME_WIDTH, GAME_HEIGHT - cut)
+        // 内側（左上）法線ベクトル = (-invSqrt2, -invSqrt2)
+        const rightDist = (GAME_WIDTH + GAME_HEIGHT - cut - cx - cy) * invSqrt2;
+        if (rightDist < safeMargin) {
+            const push = safeMargin - rightDist;
+            cx -= push * invSqrt2;
+            cy -= push * invSqrt2;
+        }
+
+        // スロープ押し戻し後の最終的な矩形内安全クランプ
+        cx = Math.max(safeMargin, Math.min(GAME_WIDTH - safeMargin, cx));
+        cy = Math.max(safeMargin, Math.min(GAME_HEIGHT - safeMargin, cy));
+    }
+
+    if (out) {
+        out.x = cx;
+        out.y = cy;
+        return out;
+    }
+    return { x: cx, y: cy };
+}
 
 /**
  * 物理エンジンの初期化と壁・スリムバンパーの生成
@@ -71,6 +119,15 @@ export function initPhysics() {
         }
     };
 
+    // 上段飛び越えホップ時に天井へ軽く当たっても張り付かず滑らかに反射する天井クッション設定
+    const ceilingOptions = {
+        ...wallOptions,
+        friction: 0.01,
+        frictionStatic: 0.01,
+        restitution: 0.45,
+        label: 'ceiling'
+    };
+
     // 容器底面の左右45度角カット（スロープ壁）の座標計算
     const cut = CONTAINER.CORNER_CUT_SIZE;
     const slopeLength = cut * Math.SQRT2 * 1.6;
@@ -93,8 +150,8 @@ export function initPhysics() {
     );
 
     Composite.add(world, [
-        // 天井（上方向への飛び出し・画面外消滅を防止）
-        Bodies.rectangle(GAME_WIDTH / 2, -WALL_THICKNESS / 2, GAME_WIDTH * 2, WALL_THICKNESS, { ...wallOptions, label: 'ceiling' }),
+        // 天井（上方向への飛び出し防止 ＆ 上段ホップ時の柔らかいクッション反射）
+        Bodies.rectangle(GAME_WIDTH / 2, -WALL_THICKNESS / 2, GAME_WIDTH * 2, WALL_THICKNESS, ceilingOptions),
         // 床 (厚めに設定してすり抜け防止)
         Bodies.rectangle(GAME_WIDTH / 2, GAME_HEIGHT + WALL_THICKNESS / 2, GAME_WIDTH * 2, WALL_THICKNESS, wallOptions),
         // 左右の完全な見えない壁（バンパーの裏側で、ゼリーの漏れを最終的に防ぐ）
@@ -132,7 +189,7 @@ export function initPhysics() {
     // プレイ領域を圧迫しないスリムな右バンパー
     rightBumper = Bodies.rectangle(restXRight, bumperY, BUMPER.WIDTH, bumperHeight, bumperOptions);
 
-    // バンパーを壁に繋ぐスプリング（バネ）制約
+    // バンパーを壁に繋ぐスプリング（バネ）制約（SUBSTEPS=4 正規化済みの剛性・減衰を使用）
     const leftSpring = Constraint.create({
         pointA: { x: -20, y: bumperY },
         bodyB: leftBumper,

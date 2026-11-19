@@ -1,10 +1,10 @@
 /**
  * dom_ui.js
- * @version v3.0 (Overhaul Step 3)
+ * @version v4.0 (Final Overhaul Step 3)
  * @changes
- *   - GRAVITYの左上「<」戻るボタンおよび右上アイコン群と絶対に干渉しないよう、上部ネイティブUI帯（UI.SAFE_TOP_HEADER_PX）の下に上部中央スコア表示を配置
- *   - visualViewport 連動の自動縦横レイアウトに対応するため、固定ビューポートコンテナ（#game-container）・上部HUDヘッダー（#topHudHeader）・伸縮キャンバスステージ（#canvasStage）の3層構造へ整備し、applyViewportSize() と getCanvasStageElement() を追加
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=3 へ統一
+ *   - ゲームオーバー画面のリトライボタン絶対配置を廃止し、小画面（iPhone SE等）や横向き表示でも Final Score とリトライボタンが絶対に重ならない安全なFlexリザルトレイアウトへ修正（GRAVITY下部215pxセーフエリア維持）
+ *   - GRAVITYアプリ内WebViewと通常ブラウザ（Safari / Chrome / PC等）を自動判別し、上部ヘッダー余白を UI.SAFE_TOP_HEADER_PX / UI.SAFE_TOP_HEADER_BROWSER_PX へ最適化
+ *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=4 へ統一
  * 
  * 動的DOMマウント、HTML要素の更新、スコア表示、および安全なUI制御を行うモジュール
  * 
@@ -13,7 +13,7 @@
  * ※スイカゲーム風のNEXTプレビューUIは撤廃し、スコア表示とゲームオーバーUIのみを管理します。
  */
 
-import { UI } from '/sobosuba/constants.js?v=3';
+import { UI } from '/sobosuba/constants.js?v=4';
 
 // DOM要素のキャッシュ
 let elGameContainer;
@@ -25,11 +25,35 @@ let elWarningOverlay;
 let elRetryBtn;
 
 /**
+ * GRAVITYアプリ内WebViewかどうかを判別し、最適な上部ヘッダー余白（px）を返す
+ * @returns {number} 上部追加余白（px）
+ */
+function getOptimalTopHeaderPaddingPx() {
+    const ua = (typeof navigator !== 'undefined' && navigator.userAgent) ? navigator.userAgent : '';
+    const isGravityUA = /gravity/i.test(ua);
+    const isAndroidWebView = /;\s*wv\)/i.test(ua);
+    const isIOSDevice = /(iPhone|iPad|iPod)/i.test(ua);
+    const isIOSWebView = isIOSDevice && !/Safari\//i.test(ua);
+    const hasWKBridge = Boolean(
+        typeof window !== 'undefined' &&
+        window.webkit &&
+        window.webkit.messageHandlers
+    );
+
+    if (isGravityUA || isAndroidWebView || isIOSWebView || hasWKBridge) {
+        return UI.SAFE_TOP_HEADER_PX;
+    }
+    return (UI.SAFE_TOP_HEADER_BROWSER_PX !== undefined) ? UI.SAFE_TOP_HEADER_BROWSER_PX : 8;
+}
+
+/**
  * ゲームのDOM構造を動的に生成してbodyにマウントする
  */
 export function mountDOM() {
     // 既にマウントされていればスキップ
     if (document.getElementById('game-container')) return;
+
+    const topPaddingPx = getOptimalTopHeaderPaddingPx();
 
     // 1. ゲームコンテナの生成（visualViewport 連動の縦横自動レイアウト基盤）
     const gameContainer = document.createElement('div');
@@ -50,7 +74,7 @@ export function mountDOM() {
     `;
     document.body.appendChild(gameContainer);
 
-    // 2. 上部HUDヘッダー（GRAVITY上部ネイティブボタン帯を完全回避し、上部中央にスコアを配置）
+    // 2. 上部HUDヘッダー（GRAVITY上部ネイティブボタン帯回避 ＆ 通常ブラウザ余白最適化）
     const topHudHeader = document.createElement('div');
     topHudHeader.id = 'topHudHeader';
     topHudHeader.style.cssText = `
@@ -59,7 +83,7 @@ export function mountDOM() {
         display: flex;
         justify-content: center;
         align-items: center;
-        padding-top: calc(env(safe-area-inset-top, 0px) + ${UI.SAFE_TOP_HEADER_PX}px);
+        padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx}px);
         padding-bottom: 4px;
         padding-left: 16px;
         padding-right: 16px;
@@ -118,24 +142,29 @@ export function mountDOM() {
     `;
 
     // Tailwindを使わず、インラインスタイルで安全にUIを構築
+    // 小画面でも Final Score とリトライボタンが絶対に重ならない安全なFlexリザルト構造
     uiLayer.innerHTML = `
         <!-- 警告表示用オーバーレイ -->
         <div id="warningOverlay" style="position: absolute; inset: 0; background-color: #ef4444; opacity: 0; pointer-events: none; transition: opacity 100ms; mix-blend-mode: screen; z-index: 0;"></div>
 
-        <!-- Game Over UI (GRAVITY規格準拠: backdrop-filter不使用) -->
-        <div id="gameOverUI" style="display: none; pointer-events: auto; background-color: rgba(0, 0, 0, 0.85); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; z-index: 50;">
-            <h1 style="font-size: 3rem; font-weight: 900; color: #ef4444; margin-bottom: 0.5rem; text-shadow: 0 0 15px rgba(239, 68, 68, 1); letter-spacing: 0.1em;">GAME OVER</h1>
-            <p style="color: #fca5a5; font-size: 0.875rem; margin-bottom: 2rem;">両側のバンパーが押し込まれました</p>
-            
-            <div style="text-align: center; margin-bottom: 3rem;">
-                <p style="color: #9ca3af; font-size: 1.125rem; text-transform: uppercase; letter-spacing: 0.05em;">Final Score</p>
-                <p id="finalScore" style="color: #60a5fa; font-size: 4.5rem; font-weight: bold; font-feature-settings: 'tnum'; margin-top: 0.5rem; text-shadow: 0 4px 6px rgba(0,0,0,0.1);">0</p>
-            </div>
-            
-            <!-- GRAVITY規格: 215pxセーフエリアに配置する <div> タグボタン -->
-            <div style="position: absolute; bottom: calc(env(safe-area-inset-bottom, 0px) + ${UI.SAFE_BOTTOM_PX}px);">
-                <div id="retryBtn" style="pointer-events: auto; background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: white; font-weight: bold; font-size: 1.25rem; padding: 1rem 2.5rem; border-radius: 9999px; box-shadow: 0 0 20px rgba(59, 130, 246, 0.6); display: inline-flex; justify-content: center; align-items: center; cursor: pointer; transition: transform 0.1s;">
-                    もう一度プレイ
+        <!-- Game Over UI (GRAVITY規格準拠: backdrop-filter不使用・215pxセーフエリア確保のFlexレイアウト) -->
+        <div id="gameOverUI" style="display: none; pointer-events: auto; background-color: rgba(0, 0, 0, 0.85); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx}px); padding-right: 16px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + min(${UI.SAFE_BOTTOM_PX}px, 32vh)); padding-left: 16px; box-sizing: border-box; overflow-y: auto; z-index: 50;">
+            <div style="width: 100%; max-width: 380px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: clamp(0.75rem, 2.5vh, 1.75rem); margin: auto 0;">
+                <div style="text-align: center;">
+                    <h1 style="font-size: clamp(2rem, 8vw, 3rem); font-weight: 900; color: #ef4444; margin: 0 0 0.4rem 0; line-height: 1.1; text-shadow: 0 0 15px rgba(239, 68, 68, 1); letter-spacing: 0.1em;">GAME OVER</h1>
+                    <p style="color: #fca5a5; font-size: clamp(0.75rem, 3.2vw, 0.875rem); margin: 0;">両側のバンパーが押し込まれました</p>
+                </div>
+
+                <div style="text-align: center;">
+                    <p style="color: #9ca3af; font-size: clamp(0.875rem, 3.5vw, 1.125rem); text-transform: uppercase; letter-spacing: 0.05em; margin: 0;">Final Score</p>
+                    <p id="finalScore" style="color: #60a5fa; font-size: clamp(2.75rem, 12vw, 4.5rem); font-weight: bold; font-feature-settings: 'tnum'; line-height: 1.1; margin: 0.35rem 0 0 0; text-shadow: 0 4px 6px rgba(0,0,0,0.1);">0</p>
+                </div>
+
+                <!-- GRAVITY規格: セーフエリア上に非干渉配置する <div> タグボタン -->
+                <div style="flex-shrink: 0; margin-top: clamp(0.25rem, 1.5vh, 0.75rem);">
+                    <div id="retryBtn" style="pointer-events: auto; background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: white; font-weight: bold; font-size: clamp(1rem, 4.2vw, 1.25rem); padding: clamp(0.75rem, 2vh, 1rem) clamp(1.75rem, 7vw, 2.5rem); border-radius: 9999px; box-shadow: 0 0 20px rgba(59, 130, 246, 0.6); display: inline-flex; justify-content: center; align-items: center; cursor: pointer; transition: transform 0.1s;">
+                        もう一度プレイ
+                    </div>
                 </div>
             </div>
         </div>

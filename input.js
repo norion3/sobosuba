@@ -1,16 +1,16 @@
 /**
  * input.js
- * @version v3.0 (Overhaul Step 4)
+ * @version v4.0 (Final Overhaul Step 4)
  * @changes
- *   - 動的リサイズ・高解像度（DPR）Canvasでも座標が1pxもズレないよう、X/Y独立スケール変換（scaleX / scaleY）と visualViewport リサイズ追従へ強化
- *   - ドラッグ中に選択Soboがバー上で横移動しても指先方向へ正確に矢印が追従できるよう、最新の指先座標を保持・取得する getPointerState() を追加し、AIM_MAX_DRAG 準拠のベクトル計算および touchcancel 保護を実装
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=3 へ統一
+ *   - 操作中の指の識別子（activeTouchId）を追跡することで、ドラッグ中に2本目の指や手のひらが画面に触れて離れても発射が暴発しないマルチタッチ誤爆防止を実装
+ *   - iOS Safari / GRAVITY WebView での長押しエイム時にOS側の拡大鏡・テキスト選択メニューが介入するのを防ぐため、UI対象外の touchstart で安全に preventDefault() を実行
+ *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=4 へ統一
  * 
  * タッチ/マウス操作の追従、順方向ダイレクトエイムの座標・ベクトル計算、
  * およびWebKit特有の余白ドラッグ(ラバーバンド)の物理遮断を管理する入力モジュール
  */
 
-import { GAME_WIDTH, GAME_HEIGHT, PHYSICS } from '/sobosuba/constants.js?v=3';
+import { GAME_WIDTH, GAME_HEIGHT, PHYSICS } from '/sobosuba/constants.js?v=4';
 
 let canvasElement;
 let scaleX = 1;
@@ -18,6 +18,7 @@ let scaleY = 1;
 
 // ポインタ・ドラッグ操作の現在状態（Sobo横移動時の毎フレーム指先追従用）
 let isDragging = false;
+let activeTouchId = null;
 let startX = 0;
 let startY = 0;
 let lastCurrentX = 0;
@@ -66,6 +67,19 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
      */
     function isIgnoredUITarget(target) {
         return Boolean(target && typeof target.closest === 'function' && target.closest('#gameOverUI'));
+    }
+
+    /**
+     * TouchList から指定した identifier のタッチオブジェクトを検索する
+     */
+    function findTouchById(touchList, id) {
+        if (!touchList || id === null) return null;
+        for (let i = 0; i < touchList.length; i++) {
+            if (touchList[i].identifier === id) {
+                return touchList[i];
+            }
+        }
+        return null;
     }
 
     // =========================================================
@@ -117,16 +131,18 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
     // 1. マウス操作のバインド (PCブラウザ用)
     // =========================================================
     window.addEventListener('mousedown', (e) => {
-        // UIレイヤー（ゲームオーバー画面のボタン等）へのクリックは無視する
-        if (isIgnoredUITarget(e.target)) return;
+        // タッチ操作中、またはUIレイヤー（ゲームオーバー画面のボタン等）へのクリックは無視する
+        if (activeTouchId !== null || isIgnoredUITarget(e.target)) return;
         handleDragStart(e.clientX, e.clientY);
     });
 
     window.addEventListener('mousemove', (e) => {
+        if (activeTouchId !== null) return;
         handleDragMove(e.clientX, e.clientY);
     });
 
     window.addEventListener('mouseup', () => {
+        if (activeTouchId !== null) return;
         handleDragEnd();
     });
 
@@ -135,8 +151,22 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
     // =========================================================
     window.addEventListener('touchstart', (e) => {
         if (isIgnoredUITarget(e.target)) return;
-        if (e.touches && e.touches.length > 0) {
-            handleDragStart(e.touches[0].clientX, e.touches[0].clientY);
+
+        // iOS Safari / GRAVITY WebView 対策：長押しエイム時の拡大鏡・選択メニュー介入を防止
+        if (e.cancelable) {
+            e.preventDefault();
+        }
+
+        // マルチタッチ誤爆防止：既に別の指で操作中なら2本目以降の指は無視する
+        if (activeTouchId !== null || isDragging) return;
+
+        const touch = (e.changedTouches && e.changedTouches.length > 0)
+            ? e.changedTouches[0]
+            : ((e.touches && e.touches.length > 0) ? e.touches[0] : null);
+
+        if (touch) {
+            activeTouchId = touch.identifier;
+            handleDragStart(touch.clientX, touch.clientY);
         }
     }, { passive: false });
 
@@ -145,17 +175,34 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
         if (e.cancelable) {
             e.preventDefault();
         }
-        if (e.touches && e.touches.length > 0) {
-            handleDragMove(e.touches[0].clientX, e.touches[0].clientY);
+        if (activeTouchId === null) return;
+
+        // 追跡中の操作指（activeTouchId）の座標のみを反映
+        const activeTouch = findTouchById(e.touches, activeTouchId);
+        if (activeTouch) {
+            handleDragMove(activeTouch.clientX, activeTouch.clientY);
         }
     }, { passive: false }); // preventDefault()を有効にするため passive: false を明示
 
-    window.addEventListener('touchend', () => {
-        handleDragEnd();
+    window.addEventListener('touchend', (e) => {
+        if (activeTouchId === null) return;
+
+        // 追跡中の操作指が離れた場合のみドラッグ終了（他の指の離脱による暴発を完全防止）
+        const endedTouch = findTouchById(e.changedTouches, activeTouchId);
+        if (endedTouch) {
+            activeTouchId = null;
+            handleDragEnd();
+        }
     });
 
-    window.addEventListener('touchcancel', () => {
-        handleDragEnd();
+    window.addEventListener('touchcancel', (e) => {
+        if (activeTouchId === null) return;
+
+        const canceledTouch = findTouchById(e.changedTouches, activeTouchId);
+        if (canceledTouch) {
+            activeTouchId = null;
+            handleDragEnd();
+        }
     });
 }
 

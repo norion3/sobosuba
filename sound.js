@@ -1,18 +1,24 @@
 /**
  * sound.js
- * @version v3.0 (Overhaul Step 2)
+ * @version v4.0 (Final Overhaul Step 2)
  * @changes
- *   - 連鎖数に応じて合体音の音程が半音ずつ心地よく上昇する playSoundMerge(chainCount) へ拡張
- *   - 本家sobosuba特徴の電気的・衝撃的なゲームオーバー演出音 playSoundGameOverZap() を追加
+ *   - 衝突音（playSoundCollide）に60msのスロットリング制御を追加し、複数ビーズ同時衝突による音割れ・多重発火を防止
+ *   - 衝突音のピッチをゼリーの大きさ（jellyValue）に連動させ、小さいほど高め・大きいほど低めの自然なASMR質感へ改善
+ *   - 上段飛び越えホップ（Bar-Hop）用の軽快な効果音 playSoundHop() を新規追加
+ *   - 発射音・衝突音・連鎖ピッチ合体音・ゲームオーバーザップ音全体の音量バランスを最適化
  * 
  * Web Audio APIを使用した軽量サウンドモジュール
  * 
  * 外部の音声ファイルに依存せず、オシレーター（波形合成）を用いて
- * 「発射音」「接触音」「合体音（連鎖ピッチ上昇対応）」「ゲームオーバーザップ音」を
+ * 「発射音」「ホップ音」「サイズ連動接触音」「合体音（連鎖ピッチ上昇対応）」「ゲームオーバーザップ音」を
  * 動的に生成・再生します。
  */
 
 let audioCtx = null;
+
+// 衝突音の多重発火・音割れを防ぐためのスロットリング管理（60ms）
+let lastCollideSoundTime = 0;
+const COLLIDE_THROTTLE_MS = 60;
 
 /**
  * オーディオコンテキストの初期化
@@ -30,12 +36,12 @@ export function initSound() {
 }
 
 /**
- * 発射音（スリングショット）
+ * 発射音（通常ショット／そっと落とし）
  * 軽く弾くような短い音（周波数が瞬間的に上がる）
  */
 export function playSoundShoot() {
     if (!audioCtx) return;
-    
+
     const osc = audioCtx.createOscillator();
     const gainNode = audioCtx.createGain();
 
@@ -44,13 +50,13 @@ export function playSoundShoot() {
     gainNode.connect(audioCtx.destination);
 
     const now = audioCtx.currentTime;
-    
+
     // ピッチ（周波数）を急激に上げて「シュッ」と飛ばす質感を出す
     osc.frequency.setValueAtTime(300, now);
     osc.frequency.exponentialRampToValueAtTime(600, now + 0.1);
 
-    // 音量（エンベロープ）の制御
-    gainNode.gain.setValueAtTime(0.3, now);
+    // 音量（エンベロープ）の制御（全体バランス最適化）
+    gainNode.gain.setValueAtTime(0.24, now);
     gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
 
     osc.start(now);
@@ -58,34 +64,81 @@ export function playSoundShoot() {
 }
 
 /**
- * 接触音（ぷるんとした物体同士のぶつかり）
- * @param {number} intensity - 衝突の強さ（0.0 〜 1.0）。弱い衝突では音を鳴らさない制御などに使います。
+ * 上段飛び越えホップ音（Bar-Hop）
+ * 上向きドラッグで他の塊を飛び越える際の軽快な「ポィン」という音
  */
-export function playSoundCollide(intensity = 0.5) {
-    // コンテキストが無い、または衝撃が弱すぎる（0.1未満）場合はスキップして処理を軽くする
-    if (!audioCtx || intensity < 0.1) return;
-    
+export function playSoundHop() {
+    if (!audioCtx) return;
+
     const osc = audioCtx.createOscillator();
     const gainNode = audioCtx.createGain();
 
-    osc.type = 'sine'; // 柔らかい音にするためサイン波を使用
+    osc.type = 'sine';
     osc.connect(gainNode);
     gainNode.connect(audioCtx.destination);
 
     const now = audioCtx.currentTime;
-    
-    // 衝突の強さによって音の高さ（周波数）を少し変える
-    const freq = 150 + (intensity * 100);
-    osc.frequency.setValueAtTime(freq, now);
-    osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
 
-    // 音量も強さに比例させる（ただし最大0.4に抑えてうるさくならないようにする）
-    const maxGain = Math.min(0.4, intensity * 0.5);
-    gainNode.gain.setValueAtTime(maxGain, now);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+    // 柔らかく弾み上がるピッチカーブで「飛び越え感」を演出
+    osc.frequency.setValueAtTime(250, now);
+    osc.frequency.exponentialRampToValueAtTime(560, now + 0.09);
+    osc.frequency.exponentialRampToValueAtTime(490, now + 0.14);
+
+    // 耳障りにならない軽快な音量エンベロープ
+    gainNode.gain.setValueAtTime(0.001, now);
+    gainNode.gain.linearRampToValueAtTime(0.22, now + 0.015);
+    gainNode.gain.exponentialRampToValueAtTime(0.008, now + 0.14);
 
     osc.start(now);
-    osc.stop(now + 0.1);
+    osc.stop(now + 0.14);
+}
+
+/**
+ * 接触音（ぷるんとした物体同士のぶつかり）
+ * 60msスロットリングおよびゼリーサイズ連動ピッチ変化に対応
+ * @param {number} intensity - 衝突の強さ（0.0 〜 1.0）。弱い衝突では音を鳴らさない制御などに使います。
+ * @param {number} jellyValue - 衝突したゼリーの数値（小さいほど高音、大きいほど低音）
+ */
+export function playSoundCollide(intensity = 0.5, jellyValue = 4) {
+    // コンテキストが無い、または衝撃が弱すぎる（0.1未満）場合はスキップして処理を軽くする
+    if (!audioCtx || intensity < 0.1) return;
+
+    // 60ms以内の連続発火を制限し、中空ビーズ複数同時接触による音割れを防止
+    const nowMs = performance.now();
+    if (nowMs - lastCollideSoundTime < COLLIDE_THROTTLE_MS) return;
+    lastCollideSoundTime = nowMs;
+
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+
+    osc.type = 'sine'; // 柔らかいぷるぷる感にするためサイン波を使用
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    const now = audioCtx.currentTime;
+    const clampedIntensity = Math.max(0.1, Math.min(1.0, Number(intensity) || 0.5));
+
+    // ゼリーの大きさ（2の累乗ランク：0〜14）に応じて基準ピッチを滑らかに変化
+    // 小さいゼリー(1, 2)は軽やかな高め(約260Hz)、大きいゼリー(1024〜16384)は落ち着いた低め(約95Hz)
+    const safeVal = Math.max(1, Number(jellyValue) || 4);
+    const tier = Math.min(14, Math.max(0, Math.log2(safeVal)));
+    const sizeRatio = 1 - (tier / 14); // 1.0(最小) 〜 0.0(最大)
+    const baseFreq = 95 + (sizeRatio * 165);
+
+    // 衝突の強さをわずかに上乗せして自然な抑揚をつける
+    const startFreq = baseFreq + (clampedIntensity * 45);
+    const endFreq = Math.max(55, baseFreq * 0.68);
+
+    osc.frequency.setValueAtTime(startFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.09);
+
+    // 全体バランスに合わせ、強さに比例しつつ最大0.28に抑制
+    const maxGain = Math.min(0.28, clampedIntensity * 0.34);
+    gainNode.gain.setValueAtTime(maxGain, now);
+    gainNode.gain.exponentialRampToValueAtTime(0.008, now + 0.09);
+
+    osc.start(now);
+    osc.stop(now + 0.09);
 }
 
 /**
@@ -95,7 +148,7 @@ export function playSoundCollide(intensity = 0.5) {
  */
 export function playSoundMerge(chainCount = 0) {
     if (!audioCtx) return;
-    
+
     const osc = audioCtx.createOscillator();
     const gainNode = audioCtx.createGain();
 
@@ -104,7 +157,7 @@ export function playSoundMerge(chainCount = 0) {
     gainNode.connect(audioCtx.destination);
 
     const now = audioCtx.currentTime;
-    
+
     // 連鎖数に応じて半音ずつ（12平均律）ピッチを上昇させる（最大1オクターブ上昇）
     const safeChain = Math.min(12, Math.max(0, Number(chainCount) || 0));
     const pitchRatio = Math.pow(2, safeChain / 12);
@@ -115,10 +168,10 @@ export function playSoundMerge(chainCount = 0) {
     osc.frequency.setValueAtTime(startFreq, now);
     osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.1);
 
-    // 一瞬で音量を上げ（アタック）、少し余韻を残して消える（リリース）
-    gainNode.gain.setValueAtTime(0, now);
-    gainNode.gain.linearRampToValueAtTime(0.4, now + 0.02);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+    // 一瞬で音量を上げ（アタック）、連鎖連続再生でも音割れしないバランスに最適化
+    gainNode.gain.setValueAtTime(0.001, now);
+    gainNode.gain.linearRampToValueAtTime(0.30, now + 0.02);
+    gainNode.gain.exponentialRampToValueAtTime(0.008, now + 0.2);
 
     osc.start(now);
     osc.stop(now + 0.2);
@@ -143,8 +196,8 @@ export function playSoundGameOverZap() {
     zapOsc.frequency.exponentialRampToValueAtTime(520, now + 0.14);
     zapOsc.frequency.exponentialRampToValueAtTime(65, now + duration);
 
-    zapGain.gain.setValueAtTime(0.28, now);
-    zapGain.gain.exponentialRampToValueAtTime(0.18, now + 0.14);
+    zapGain.gain.setValueAtTime(0.22, now);
+    zapGain.gain.exponentialRampToValueAtTime(0.14, now + 0.14);
     zapGain.gain.exponentialRampToValueAtTime(0.005, now + duration);
 
     zapOsc.connect(zapGain);
@@ -157,7 +210,7 @@ export function playSoundGameOverZap() {
     buzzOsc.frequency.setValueAtTime(160, now);
     buzzOsc.frequency.exponentialRampToValueAtTime(48, now + 0.26);
 
-    buzzGain.gain.setValueAtTime(0.2, now);
+    buzzGain.gain.setValueAtTime(0.14, now);
     buzzGain.gain.exponentialRampToValueAtTime(0.005, now + 0.26);
 
     buzzOsc.connect(buzzGain);
