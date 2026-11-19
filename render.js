@@ -1,12 +1,10 @@
 /**
  * render.js
- * @version v7.0 (Fluid Normal Fix, Shrink Compensation, Grow-In Unification & Text Lerp - Phase 8)
+ * @version v7.2 (Text Visibility, Anti-Jitter Deadzone & Smoothstep Merge Flash - Phase 5)
  * @changes
- *   - 凹み変形時の「外向き法線反転バグ」を根絶するため、外縁座標算出の重心方向（radial）内積フォールバックを撤廃し、softbody.js と同じ時計回り閉曲線の幾何学的外向き法線 (ty, -tx) へ統一
- *   - 描画専用スムージング＋二次ベジェ曲線による輪郭の内向き収縮を微補正し、水風船同士が隙間なくフラットに押し付け合う本家準拠の密着感へ改善
- *   - 物理の Ease-Out-Back Grow-In との二重膨張（1.21倍）および新規スポーン時の不要膨張を解消するため、描画側の createdAt ベース膨張スケールを撤廃（2.5Dホップ時の立体ポップアップのみ維持）
- *   - 大きく潰れた際の数字テレポート振動を根絶するため、重心からの相対オフセットに対する軽量時間補間（lerp）を導入（高速飛行・落下時も遅延ゼロで追従）
- *   - GRAVITYキャッシュ不整合対策として constants.js / overlap_solver.js の絶対パスを ?v=7 へ統一
+ *   - 潰された塊の数字視認性を改善するため、フォントサイズ算出に多角形の面積等価半径をブレンドして過度な縮小を防止し、最小フォントサイズを 11.5px へ引き上げ、未合体文字ウェイトを 600（合体済みは 900）・透明度フォールバックを 0.72 へ改善
+ *   - 圧迫下での数字ブルブル振動を完全根絶するため、描画専用の文字位置・角度・フォントサイズに対して微小変化デッドゾーン（位置 0.45px / 角度 0.025rad / サイズ 0.35px）＋ローパス補間（lerp）を導入（高速移動時は遅延ゼロ追従）
+ *   - 本家準拠の「白く変わりゆっくり結合後の色へ戻る間」を演出するため、合体真っ白フラッシュの保持比率フォールバックを 0.35 へ同期し、色戻りフェードを滑らかな Smoothstep 反転カーブ（1 - t * t * (3 - 2 * t)）へ更新
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -466,7 +464,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
 
     // (A) 合体前の「吸い付きの間」予兆発光（mergePreGlowUntil 中にふわっと白く輝く）
     if (comp.mergePreGlowUntil && now < comp.mergePreGlowUntil) {
-        const startT = comp.mergePreGlowStart || (comp.mergePreGlowUntil - 60);
+        const startT = comp.mergePreGlowStart || (comp.mergePreGlowUntil - 65);
         const span = Math.max(1, comp.mergePreGlowUntil - startT);
         const prog = Math.max(0, Math.min(1, (now - startT) / span));
         const glowAlpha = 0.12 + prog * 0.36;
@@ -474,20 +472,20 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
         ctx.fill();
     }
 
-    // (B) 本家準拠「合体瞬間の真っ白フラッシュ」（保護時間 140〜300ms と 1対1 完全同期）
-    // 前半 42% は完全白（#ffffff）を保持し、後半 58% で本色へ滑らかにフェードバックする
+    // (B) 本家準拠「合体瞬間の真っ白フラッシュ」（保護時間 340〜660ms と 1対1 完全同期）
+    // 前半 35% は完全白（#ffffff）を保持し、後半 65% で Smoothstep 反転カーブによりゆっくり本色へ溶け戻る
     if (comp.mergeFlashUntil && now < comp.mergeFlashUntil) {
-        const flashStart = comp.mergeFlashStart || comp.createdAt || (comp.mergeFlashUntil - 160);
+        const flashStart = comp.mergeFlashStart || comp.createdAt || (comp.mergeFlashUntil - 340);
         const totalFlash = Math.max(1, comp.mergeFlashUntil - flashStart);
         const progress = Math.max(0, Math.min(1, (now - flashStart) / totalFlash));
-        const whiteHoldRatio = (EFFECTS.MERGE_WHITE_HOLD_RATIO !== undefined) ? EFFECTS.MERGE_WHITE_HOLD_RATIO : 0.42;
+        const whiteHoldRatio = (EFFECTS.MERGE_WHITE_HOLD_RATIO !== undefined) ? EFFECTS.MERGE_WHITE_HOLD_RATIO : 0.35;
 
         if (progress <= whiteHoldRatio) {
             ctx.fillStyle = '#ffffff';
             ctx.fill();
         } else {
             const fadeT = Math.max(0, Math.min(1, (progress - whiteHoldRatio) / Math.max(0.01, 1 - whiteHoldRatio)));
-            const whiteAlpha = Math.pow(1 - fadeT, 1.45);
+            const whiteAlpha = 1 - fadeT * fadeT * (3 - 2 * fadeT);
             if (whiteAlpha > 0.005) {
                 ctx.fillStyle = `rgba(255, 255, 255, ${whiteAlpha.toFixed(3)})`;
                 ctx.fill();
@@ -497,11 +495,21 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
 
     ctx.restore();
 
-    // 7. 数字の描画（ポリゴン内安全位置補正 ＋ 重心相対オフセットの軽量時間補間でテレポート振動を根絶）
+    // 7. 数字の描画（面積等価半径ブレンド視認性改善 ＋ 位置・角度・サイズのデッドゾーン＆ローパス補間でブルブル振動根絶）
     // 真っ白フラッシュ中も太字黒文字（コントラスト比 21:1）をそのまま維持して描画
     let targetTextX = cx;
     let targetTextY = cy;
     let effectiveThickness = minRadialDist + pRadius;
+
+    // 外縁ポリゴンの実面積から面積等価半径（sqrt(area / pi)）を算出（細長く潰れた際の過度な文字縮小を防止）
+    let signedOuterArea = 0;
+    for (let j = 0; j < n; j++) {
+        const p1 = smoothedPointsBuffer[j];
+        const p2 = smoothedPointsBuffer[(j + 1) % n];
+        signedOuterArea += (p1.x * p2.y - p2.x * p1.y);
+    }
+    const outerArea = Math.abs(signedOuterArea) * 0.5;
+    const equivalentRadius = Math.sqrt(Math.max(1, outerArea) / Math.PI);
 
     if (!isPointInsidePolygon(targetTextX, targetTextY, smoothedPointsBuffer, n)) {
         let bestDistSq = Infinity;
@@ -552,45 +560,69 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
         }
     }
 
-    // 重心からの相対オフセットのみを軽量補間（高速飛行・落下時は重心に0フレーム遅延追従しつつ境界振動のみ平滑化）
-    const targetOffsetX = targetTextX - cx;
-    const targetOffsetY = targetTextY - cy;
-    if (comp._textOffsetX === undefined || comp._textOffsetY === undefined) {
-        comp._textOffsetX = targetOffsetX;
-        comp._textOffsetY = targetOffsetY;
+    // (1) 文字位置の安定化：微小振動（< 0.45px）はピタッと固定、高速飛行・落下時は遅延ゼロ追従
+    if (comp._renderTextX === undefined || comp._renderTextY === undefined) {
+        comp._renderTextX = targetTextX;
+        comp._renderTextY = targetTextY;
     } else {
-        const textLerp = 0.22;
-        comp._textOffsetX += (targetOffsetX - comp._textOffsetX) * textLerp;
-        comp._textOffsetY += (targetOffsetY - comp._textOffsetY) * textLerp;
+        const dxText = targetTextX - comp._renderTextX;
+        const dyText = targetTextY - comp._renderTextY;
+        const distSqText = dxText * dxText + dyText * dyText;
+        if (distSqText >= 0.2025) { // 0.45 * 0.45
+            const posLerp = (distSqText > 9.0) ? 1.0 : 0.28;
+            comp._renderTextX += dxText * posLerp;
+            comp._renderTextY += dyText * posLerp;
+        }
     }
+    const textX = comp._renderTextX;
+    const textY = comp._renderTextY;
 
-    const textX = cx + comp._textOffsetX;
-    const textY = cy + comp._textOffsetY;
-
-    // 穏やかな数字回転追従（正弦写像により360度回転時も不連続なく、上下逆さまにならない最大±30度へ収める）
+    // (2) 文字角度の安定化：正弦写像（最大±30度）＋ 微小振動（< 0.025rad）デッドゾーン＆ローパス補間
     const rawAngle = comp.avgAngle || 0;
-    const displayAngle = comp.isFloating ? (Math.sin(rawAngle) * 0.14) : (Math.sin(rawAngle) * 0.52);
+    const targetAngle = comp.isFloating ? (Math.sin(rawAngle) * 0.14) : (Math.sin(rawAngle) * 0.52);
+    if (comp._renderTextAngle === undefined) {
+        comp._renderTextAngle = targetAngle;
+    } else {
+        const angleDiff = targetAngle - comp._renderTextAngle;
+        if (Math.abs(angleDiff) >= 0.025) {
+            comp._renderTextAngle += angleDiff * 0.22;
+        }
+    }
+    const displayAngle = comp._renderTextAngle;
 
-    ctx.save();
-    ctx.translate(textX, textY);
-    ctx.rotate(displayAngle);
-    ctx.scale(scale, scale);
-
+    // (3) フォントサイズの算出＆安定化：短辺1点＋面積等価半径ブレンド・最小 11.5px 保証・微小振動（< 0.35px）固定
     const valueText = String(jellyValue);
     const digitScale = valueText.length >= 5 ? 0.58 : (valueText.length >= 4 ? 0.68 : (valueText.length >= 3 ? 0.82 : 1.0));
     // 上段横長カプセル時は縦半高を基準にバランス良く収める
     const refRadius = comp.isFloating
         ? Math.min(config.radius, (comp.capsuleHalfHeight || FLOAT_BAR.CHANNEL_HALF_HEIGHT || 22) * 1.15)
         : config.radius;
-    const baseFontSize = Math.max(12, refRadius * 0.62 * digitScale);
-    const safeWidthLimit = Math.max(9, effectiveThickness * 1.55 * digitScale);
-    const fontSize = Math.min(baseFontSize, safeWidthLimit);
+    const blendedThickness = effectiveThickness * 0.55 + equivalentRadius * 0.45;
+    const baseFontSize = Math.max(11.5, refRadius * 0.62 * digitScale);
+    const safeWidthLimit = Math.max(11.5, blendedThickness * 1.55 * digitScale);
+    const targetFontSize = Math.max(11.5, Math.min(baseFontSize, safeWidthLimit));
+
+    if (comp._renderFontSize === undefined) {
+        comp._renderFontSize = targetFontSize;
+    } else {
+        const sizeDiff = targetFontSize - comp._renderFontSize;
+        if (Math.abs(sizeDiff) >= 0.35) {
+            comp._renderFontSize += sizeDiff * 0.22;
+        }
+    }
+    const fontSize = comp._renderFontSize;
+
+    ctx.save();
+    ctx.translate(textX, textY);
+    ctx.rotate(displayAngle);
+    ctx.scale(scale, scale);
+
     const isMerged = Boolean(comp.hasMerged);
 
-    // 本家完全準拠：未合体は細字・薄色（スコア未加算）、合体済みは太字・濃色（スコア加算済み）
+    // 本家準拠＋視認性強化：未合体は中太（600）・透明度0.72（スコア未加算）、合体済みは極太（900）・不透明（スコア加算済み）
     ctx.fillStyle = config.text || ACTIVE_THEME.text || '#000000';
     ctx.globalAlpha = isMerged ? 1.0 : renderMeta.unmergedAlpha;
-    ctx.font = `${isMerged ? '900' : '400'} ${fontSize.toFixed(1)}px "Courier New", Courier, monospace`;
+    ctx.font = `${isMerged ? '900' : '600'} ${fontSize.toFixed(1)}px "Courier New", Courier, monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(valueText, 0, 0);
@@ -606,7 +638,7 @@ function drawSoftBodies(ctx, composites, gameState) {
     const renderMeta = {
         now: Date.now(),
         outlineColor: ACTIVE_THEME.outline || '#000000',
-        unmergedAlpha: (ACTIVE_THEME.unmergedTextAlpha !== undefined) ? ACTIVE_THEME.unmergedTextAlpha : 0.56,
+        unmergedAlpha: (ACTIVE_THEME.unmergedTextAlpha !== undefined) ? ACTIVE_THEME.unmergedTextAlpha : 0.72,
         isAiming,
         selectedMatchValue: isAiming ? gameState.selectedJelly.jellyValue : null,
         resonanceAlpha: (0.35 + pulseWave * 0.50).toFixed(3),

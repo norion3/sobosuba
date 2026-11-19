@@ -1,10 +1,9 @@
 /**
  * jelly.js
- * @version v7.0 (Merge Momentum Inheritance & Soft Attraction - Phase 5)
+ * @version v7.2 (Impulse X/Y Independent Clamp & Merge Timing Fallback Sync - Phase 3)
  * @changes
- *   - 吸い付きディレイ中（40〜95ms）の反発分離ワープを防ぐため、合体待機ペア間で離反相対速度を対称吸収しつつ穏やかに引き寄せる処理（applyMergeAttraction）を追加
- *   - 空中・押し込み合体時のピタッと停止を解消するため、合体実行時に親2体の平均重心速度を算出して新ゼリーへ運動量継承（initialVelocity）するよう実装
- *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js の絶対パスを ?v=7 へ統一（sound.js は ?v=6 を維持）
+ *   - 高速落下中のゼリーが合体衝撃波で急ブレーキする不整合を解消するため、フィールド内合体インパルスの速度クランプを MAX_PARTICLE_VX（10.5）/ MAX_PARTICLE_VY（11.0）のX/Y独立クランプへ統一
+ *   - 本家準拠の合体の間・真っ白→ゆっくり色戻り演出に合わせ、吸い付き時間・保護時間・連鎖ウィンドウのフォールバック値を v7.2 新定数（65 / 130 / 340 / 660 / 0.010 / 1400）へ同期
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
@@ -43,7 +42,7 @@ let lastMergeSoundTime = 0;
 let currentChainCount = 0;
 
 /**
- * ゼリーの面積に応じた合体前の「吸い付きの間（40〜95ms）」を算出する
+ * ゼリーの面積に応じた合体前の「吸い付きの間（65〜130ms）」を算出する
  * @param {number} value - 合体元のゼリー数値
  * @returns {number} 吸い付きディレイ時間（ミリ秒）
  */
@@ -51,14 +50,14 @@ function calcAreaAnticipationDelayMs(value) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384] || JELLY_CONFIG[8192];
     const radius = config ? config.radius : 21.5;
     const area = Math.PI * radius * radius;
-    const minMs = EFFECTS.MERGE_ANTICIPATION_MIN_MS || EFFECTS.MERGE_BASE_DELAY_MS || 40;
-    const maxMs = EFFECTS.MERGE_ANTICIPATION_MAX_MS || 95;
-    const areaFactor = EFFECTS.MERGE_AREA_DELAY_FACTOR || 0.0045;
+    const minMs = EFFECTS.MERGE_ANTICIPATION_MIN_MS || EFFECTS.MERGE_BASE_DELAY_MS || 65;
+    const maxMs = EFFECTS.MERGE_ANTICIPATION_MAX_MS || 130;
+    const areaFactor = EFFECTS.MERGE_AREA_DELAY_FACTOR || 0.010;
     return Math.max(minMs, Math.min(maxMs, Math.round(minMs + area * areaFactor)));
 }
 
 /**
- * ゼリーの面積に応じた合体後の保護時間（140〜300ms：真っ白フラッシュ＆連鎖の間と1対1同期）を算出する
+ * ゼリーの面積に応じた合体後の保護時間（340〜660ms：真っ白フラッシュ＆連鎖の間と1対1同期）を算出する
  * @param {number} value - 合体後に生成されたゼリー数値
  * @returns {number} 合体保護時間（ミリ秒）
  */
@@ -66,9 +65,9 @@ function calcAreaMergeProtectMs(value) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384] || JELLY_CONFIG[8192];
     const radius = config ? config.radius : 21.5;
     const area = Math.PI * radius * radius;
-    const minMs = EFFECTS.MERGE_PROTECT_MIN_MS || 140;
-    const maxMs = EFFECTS.MERGE_PROTECT_MAX_MS || 300;
-    const areaFactor = EFFECTS.MERGE_AREA_DELAY_FACTOR || 0.0045;
+    const minMs = EFFECTS.MERGE_PROTECT_MIN_MS || 340;
+    const maxMs = EFFECTS.MERGE_PROTECT_MAX_MS || 660;
+    const areaFactor = EFFECTS.MERGE_AREA_DELAY_FACTOR || 0.010;
     return Math.max(minMs, Math.min(maxMs, Math.round(minMs + area * areaFactor)));
 }
 
@@ -261,7 +260,7 @@ export function handleCollisions(event, allowCollideSound = true) {
                     compA.isMerging = true;
                     compB.isMerging = true;
 
-                    // 合体前の短くキレのある「吸い付きの間（40〜95ms）」用メタデータを相互付与
+                    // 合体前の「吸い付きの間（65〜130ms）」用メタデータを相互付与
                     // overlap_solver.js がこのペア同士の排斥を除外し、render.js が予兆発光を描画する
                     const delayMs = calcAreaAnticipationDelayMs(bodyA.jellyValue);
                     const executeTime = now + delayMs;
@@ -326,8 +325,8 @@ export function handleCollisions(event, allowCollideSound = true) {
  */
 export function handleMerges(world) {
     const now = Date.now();
-    const maxVx = PHYSICS.MAX_PARTICLE_VX || 6.8;
-    const maxVy = PHYSICS.MAX_PARTICLE_VY || 7.2;
+    const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 11.0;
 
     // 1. 「吸い付きの間」ディレイキューをチェックし、待機中は穏やかに引き寄せ、猶予経過で実行キューへ移す
     for (let i = pendingMerges.length - 1; i >= 0; i--) {
@@ -387,11 +386,9 @@ export function handleMerges(world) {
 
     // 3. 追加（合体後の成長）処理
     if (compositesToAdd.length > 0) {
-        const chainWindowMs = SCORE.CHAIN_WINDOW_MS || 1000;
+        const chainWindowMs = SCORE.CHAIN_WINDOW_MS || 1400;
         const growStartScale = EFFECTS.MERGE_GROW_START_SCALE || 0.78;
         const baseImpulse = PHYSICS.MERGE_RADIAL_IMPULSE || 1.45;
-        const maxSpeed = PHYSICS.MAX_PARTICLE_SPEED || 5.6;
-        const maxSpeedSq = maxSpeed * maxSpeed;
 
         // 一体外枠フレーム（FRAME_WIDTH / TOP_BAR_HEIGHT）の内壁基準クランプ定数
         const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
@@ -436,7 +433,7 @@ export function handleMerges(world) {
                 growStartScale
             );
 
-            // 本家準拠：合体保護時間（140〜300ms）と真っ白フラッシュ（mergeFlashStart / mergeFlashUntil）を1対1完全同期
+            // 本家準拠：合体保護時間（340〜660ms）と真っ白フラッシュ（mergeFlashStart / mergeFlashUntil）を1対1完全同期
             // 真っ白から本色へ戻りきった瞬間に次の連鎖合体が解禁される
             const protectionMs = calcAreaMergeProtectMs(val);
             newJellyComposite.mergeProtectedUntil = now + protectionMs;
@@ -455,7 +452,7 @@ export function handleMerges(world) {
             playSoundMerge(currentChainCount);
 
             // ==========================================
-            // フィールド内合体時の連鎖膨張インパルス（SUBSTEPS=4 ＆ 新速度域 MAX_PARTICLE_SPEED: 5.6 対応）
+            // フィールド内合体時の連鎖膨張インパルス（X/Y独立最大速度上限 MAX_PARTICLE_VX / MAX_PARTICLE_VY 統一）
             // ==========================================
             // バー上での事前合体時は待機列を吹き飛ばさないよう衝撃波をスキップする
             if (!data.isFloating) {
@@ -477,16 +474,9 @@ export function handleMerges(world) {
                         if (dist > 0.001 && dist < effectRadius) {
                             // 近いほど強く、遠いほど弱い押し出しになるよう線形減衰させる
                             const impulseMagnitude = baseImpulse * (1 - (dist / effectRadius));
-                            let vx = body.velocity.x + (dx / dist) * impulseMagnitude;
-                            let vy = body.velocity.y + (dy / dist) * impulseMagnitude;
+                            const vx = Math.max(-maxVx, Math.min(maxVx, body.velocity.x + (dx / dist) * impulseMagnitude));
+                            const vy = Math.max(-maxVy, Math.min(maxVy, body.velocity.y + (dy / dist) * impulseMagnitude));
 
-                            // すり抜け防止のため最大速度上限でクランプ
-                            const speedSq = vx * vx + vy * vy;
-                            if (speedSq > maxSpeedSq) {
-                                const scale = maxSpeed / Math.sqrt(speedSq);
-                                vx *= scale;
-                                vy *= scale;
-                            }
                             Body.setVelocity(body, { x: vx, y: vy });
                         }
                     }

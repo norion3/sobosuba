@@ -1,9 +1,10 @@
 /**
  * constants.js
- * @version v7.1 (Bar-Hop Velocity Calibration for Matter.js 0.20 _baseDelta - Phase 1)
+ * @version v7.2 (Text Visibility, Upper Bar Fluidity & Merge Flash Timing - Phase 1)
  * @changes
- *   - Matter.js 0.20.0 の速度正規化（px/frame 単位・timeScale = 0.25）に合わせて上段ホップ定数を再正規化し、全サイズ天井非激突（上昇 47〜60px）・キレのある山なり滞空（0.55〜0.62秒）・1個飛び〜端から端までの十分な飛距離を両立（HOP_GRAVITY_SCALE: 1.35 / HOP_MIN_UP_SPEED: 5.80 / HOP_MAX_UP_SPEED: 6.55 / HOP_X_MULTIPLIER: 0.075 / HOP_MAX_SPEED: 11.5 / HOP_MIN_AIR_MS: 160）
- *   - 上記ホップ速度および非トンネリング範囲（1サブステップ最大移動 2.625〜2.75px）に合わせて、X/Y独立最大速度上限を更新（MAX_PARTICLE_VX: 10.5 / MAX_PARTICLE_VY: 11.0）
+ *   - 潰された未合体ゼリーの視認性を向上するため、COLOR_THEMES.default.unmergedTextAlpha を 0.56 から 0.72 へ引き上げ
+ *   - 上段フロートバー上の塊にぷるんとした液体感とたわみを取り戻すため、FLOAT_BAR.CHANNEL_COMPRESSION_STIFFNESS（0.16 → 0.055）および FLOAT_BAR.Y_DAMPING（0.88 → 0.945）を緩和
+ *   - 本家準拠の「白く変わりゆっくり結合後の色へ戻る間」を演出するため、EFFECTS（MERGE_ANTICIPATION_MIN_MS: 65 / MERGE_ANTICIPATION_MAX_MS: 130 / MERGE_PROTECT_MIN_MS: 340 / MERGE_PROTECT_MAX_MS: 660 / MERGE_WHITE_HOLD_RATIO: 0.35 / MERGE_AREA_DELAY_FACTOR: 0.010）および SCORE.CHAIN_WINDOW_MS（1400）を更新
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -40,7 +41,7 @@ export const COLOR_THEMES = {
         cornerFill: '#262626',
         outline: '#000000',
         text: '#000000',
-        unmergedTextAlpha: 0.56,      // モバイル小画面でも判読しやすい未合体文字透明度
+        unmergedTextAlpha: 0.72,      // 潰れた状態でも一目で読める未合体文字透明度
         colors: {
             1:     '#ff2a4b', // ビビッドレッド
             2:     '#ffeb1a', // レモンイエロー
@@ -171,7 +172,7 @@ export const FLOAT_BAR = {
     SPRING_STIFFNESS: 0.09,       // バーY高度へ保持する弾性フック強度
     PACK_FORCE: 0.00005,          // バー上で穏やかに中央寄りへ保つ微弱引力
     X_DAMPING: 0.986,             // 横方向の極低ダンピング（スルスル滑る本家挙動）
-    Y_DAMPING: 0.88,              // 縦方向の揺れを抑えるダンピング
+    Y_DAMPING: 0.945,             // 上段でもタプタプ揺れる液体感を残す縦方向ダンピング
     SPAWN_DELAY_MS: 260,          // スポーナー供給の「ゲージの間」（ms）
     SAFETY_SPAWN_DELAY_MS: 1500,  // 両端閉塞かつバー空時のセーフティスポーン待機時間（ms）
 
@@ -182,7 +183,7 @@ export const FLOAT_BAR = {
 
     // 上段「横長カプセル（ピル）形状」圧縮 ＆ 発射／着地モーフィング定数
     CHANNEL_HALF_HEIGHT: 22,      // 1(21.5px)が丸く収まり4〜64が横長に伸びるフラット帯半高
-    CHANNEL_COMPRESSION_STIFFNESS: 0.16, // フラット帯上下端へ収める柔らかな圧縮フック強度
+    CHANNEL_COMPRESSION_STIFFNESS: 0.055, // 定規のような直線を避け、丸みとたわみのある液体感を残す圧縮強度
     CAPSULE_MAX_HALF_WIDTH: 110,  // 上段カプセルの最大半幅上限（px）
     MORPH_DURATION_MS: 160,       // 発射時の「変身の間」（横長カプセル→円形リング復元時間・ms）
     RECATCH_MORPH_DURATION_MS: 140, // ホップ着地時の「着席の間」（円形→横長カプセル復帰時間・ms）
@@ -236,21 +237,21 @@ export const BUMPER = {
 export const EFFECTS = {
     MERGE_EXPAND_FRAMES: 10,      // 合体時にぷるんと膨張させるフレーム数
     MERGE_EXPAND_SCALE: 1.12,     // 膨張時の最大スケール倍率
-    MERGE_ANTICIPATION_MIN_MS: 40,// キレのある合体前「吸い付きの間」最小時間（ms）
-    MERGE_ANTICIPATION_MAX_MS: 95,// 合体前「吸い付きの間」最大時間（ms）
+    MERGE_ANTICIPATION_MIN_MS: 65,// 合体直前の吸い付き溜め最小時間（ms）
+    MERGE_ANTICIPATION_MAX_MS: 130,// 合体直前の吸い付き溜め最大時間（ms）
     MERGE_GROW_START_SCALE: 0.78, // 合体時の縮小スポーン開始倍率（重なり・絡み合い根絶）
     MERGE_GROW_DURATION_MS: 150,  // 縮小スポーンから Ease-Out-Back で定着する時間（ms）
     MERGE_GROW_OVERSHOOT: 1.08,   // 成長完了直前にわずかにボヨンと弾むオーバーシュート倍率
-    MERGE_PROTECT_MIN_MS: 140,    // 合体後の真っ白フラッシュ＆連鎖保護時間下限（ms）
-    MERGE_PROTECT_MAX_MS: 300,    // 合体後の真っ白フラッシュ＆連鎖保護時間上限（ms）
-    MERGE_WHITE_HOLD_RATIO: 0.42, // 保護時間のうち完全真っ白（#ffffff）を保つ前半比率（後半58%で本色へフェード）
+    MERGE_PROTECT_MIN_MS: 340,    // 合体後の真っ白フラッシュ＆連鎖保護時間下限（ms）
+    MERGE_PROTECT_MAX_MS: 660,    // 合体後の真っ白フラッシュ＆連鎖保護時間上限（ms）
+    MERGE_WHITE_HOLD_RATIO: 0.35, // 保護時間のうち完全真っ白（#ffffff）を保つ前半比率（後半65%でゆっくり本色へフェード）
     MERGE_BASE_DELAY_MS: 40,      // 最小ゼリーの合体保護ディレイ基準（ms）
-    MERGE_AREA_DELAY_FACTOR: 0.0045 // 面積に応じて吸い付き・保護時間を延ばす係数
+    MERGE_AREA_DELAY_FACTOR: 0.010 // 面積に応じて吸い付き・保護時間を延ばす係数
 };
 
 export const SCORE = {
     COMBO_MULTIPLIER: 1.5,        // 互換維持用（本家仕様では盤面有効値総和スコアを使用）
-    CHAIN_WINDOW_MS: 1000         // 連鎖合体（音程上昇演出用）の判定ウィンドウ（ms）
+    CHAIN_WINDOW_MS: 1400         // 連鎖合体（音程上昇演出用）の判定ウィンドウ（ms）
 };
 
 // ==========================================

@@ -1,9 +1,9 @@
 /**
  * softbody.js
- * @version v7.1 (Bar-Hop Velocity Calibration for Matter.js 0.20 _baseDelta - Phase 2)
+ * @version v7.2 (Upper Bar Fluidity & Posture Guide Relaxation - Phase 2)
  * @changes
- *   - launchBarHop() の maxHopSpeed クランプが MAX_PARTICLE_VX で不必要に頭打ちにならないよう FLOAT_BAR.HOP_MAX_SPEED（11.5）を直接適用
- *   - Matter.js 0.20 px/frame 正規化済みの新定数へ、launchFloatingJelly()・launchBarHop()・updateBarHopState()・updateSoftBodies() のフォールバック値を同期（HOP_MIN_UP_SPEED: 5.80 / HOP_MAX_SPEED: 11.5 / HOP_GRAVITY_SCALE: 1.35 / HOP_MIN_AIR_MS: 160 / MAX_PARTICLE_VX: 10.5 / MAX_PARTICLE_VY: 11.0）
+ *   - 上段フロートバー上の塊にぷるんとした液体感とたわみを取り戻すため、applyFloatBarControl() の理想カプセル座標へのX方向強制力を撤廃し、Y方向姿勢ガイドを極弱（0.00032 → 0.00006）へ緩和
+ *   - 上下レール圧縮（CHANNEL_COMPRESSION_STIFFNESS: 0.055）および縦方向減衰（FLOAT_BAR.Y_DAMPING: 0.945）のフォールバック値を v7.2 新定数へ同期
  * 
  * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
@@ -1259,7 +1259,7 @@ function updateBarHopState(comp, geom, composites, now, gravityY, gravityScale) 
 }
 
 /**
- * サブ関数5：上段フロートバー上の無重力フック・上下フラットレール圧縮・横長カプセル姿勢維持・低減衰横スライド制御
+ * サブ関数5：上段フロートバー上の無重力フック・柔らかな上下レール圧縮・極弱姿勢ガイド・低減衰横スライド制御
  */
 function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepDampX, stepDampY) {
     if (!comp.isFloating) return;
@@ -1280,7 +1280,7 @@ function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepDampX, s
     const capRingHalfH = (comp.capsuleRingHalfHeight || Math.max(4, (FLOAT_BAR.CHANNEL_HALF_HEIGHT || 22) - (comp.particleRadius || 4))) * curScale;
     const channelTopY = targetY - capRingHalfH;
     const channelBottomY = targetY + capRingHalfH;
-    const compStiff = FLOAT_BAR.CHANNEL_COMPRESSION_STIFFNESS || 0.16;
+    const compStiff = (FLOAT_BAR.CHANNEL_COMPRESSION_STIFFNESS !== undefined) ? FLOAT_BAR.CHANNEL_COMPRESSION_STIFFNESS : 0.055;
     const capPts = comp.capsuleLocalPoints;
 
     // 中央方向への微弱な寄せ力（左右端スポーナーからスルスル合流させる）
@@ -1309,24 +1309,22 @@ function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepDampX, s
         let forceX = boundaryForceX * body.mass;
         let forceY = antiGravityY + baseHoldY * body.mass;
 
-        // 2. 上下フラットレール圧縮フック（高さ約44pxの帯に美しく収める）
+        // 2. 上下フラットレール圧縮フック（定規のような直線を避け、丸みとたわみのある柔らかい帯に収める）
         if (body.position.y < channelTopY) {
             forceY += (channelTopY - body.position.y) * compStiff * 0.0018 * body.mass;
         } else if (body.position.y > channelBottomY) {
             forceY += (channelBottomY - body.position.y) * compStiff * 0.0018 * body.mass;
         }
 
-        // 3. 横長カプセル水平姿勢の穏やかな保持（待機中に縦向きへ回ってしまうのを防止しつつ横の潰れは許容）
+        // 3. 横長カプセル水平姿勢の極弱ガイド（X方向強制を撤廃し、液体らしい丸みとたわみを許容）
         if (capPts && capPts[j]) {
-            const idealX = cx + capPts[j].x * curScale;
             const idealY = targetY + capPts[j].y * curScale;
-            forceX += (idealX - body.position.x) * 0.00018 * body.mass;
-            forceY += (idealY - body.position.y) * 0.00032 * body.mass;
+            forceY += (idealY - body.position.y) * 0.00006 * body.mass;
         }
 
         Body.applyForce(body, body.position, { x: forceX, y: forceY });
 
-        // 横方向は極低ダンピング（スルスル滑る）、縦方向は揺れを抑える減衰を適用
+        // 横方向は極低ダンピング（スルスル滑る）、縦方向は液体らしいタプタプ揺れを残す減衰を適用
         Body.setVelocity(body, {
             x: body.velocity.x * stepDampX,
             y: body.velocity.y * stepDampY
@@ -1449,7 +1447,7 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
 
     // 1フレームあたりの減衰率をサブステップ回数に応じて等価変換
     const stepDampX = Math.pow(FLOAT_BAR.X_DAMPING || 0.986, 1 / substeps);
-    const stepDampY = Math.pow(FLOAT_BAR.Y_DAMPING || 0.88, 1 / substeps);
+    const stepDampY = Math.pow(FLOAT_BAR.Y_DAMPING || 0.945, 1 / substeps);
 
     const now = Date.now();
     activeJelliesBuffer.length = 0;
@@ -1476,7 +1474,7 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
         // 4. 天井非激突 2.5D上段飛び越えホップ（半カプセル水平安定 ＆ 進行方向優先セーフ・リキャッチ）
         updateBarHopState(comp, geom, composites, now, gravityY, gravityScale);
 
-        // 5. 上段フロートバー上の無重力フック・フラット圧縮・低減衰スライド
+        // 5. 上段フロートバー上の無重力フック・柔らかな上下レール圧縮・低減衰スライド
         applyFloatBarControl(comp, geom.cx, geom.cy, gravityY, gravityScale, stepDampX, stepDampY);
 
         // 5.5 遅延ランプアップ型「適応的圧迫ダンピング」（面積歪み復元保護付き静寂化）

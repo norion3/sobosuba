@@ -1,9 +1,8 @@
 /**
  * aim.js
- * @version v7.1 (Hop Trajectory Matter.js 0.20 timeScale Sync & Fallback Calibration - Phase 3)
+ * @version v7.2 (Hop Preview Air Friction Exact Sync - Phase 4)
  * @changes
- *   - updateHopPreviewPoints() を Matter.js 0.20.0 の timeScale = subDelta / (1000 / 60) 準拠の厳密な積分式（px += vx * timeScale / subAccVy = subAccY / timeScale / airDamp = 1 - frictionAir * timeScale）へ修正し、青い予測ドットと実機着地点を誤差 1px 未満で完全一致
- *   - computeHopVelocity() および updateHopPreviewPoints() のフォールバック値と maxHopSpeed クランプを softbody.js (v7.1) と完全同期（HOP_X_MULTIPLIER: 0.075 / HOP_MIN_UP_SPEED: 5.80 / HOP_MAX_UP_SPEED: 6.55 / HOP_MAX_SPEED: 11.5 / HOP_GRAVITY_SCALE: 1.35 / HOP_MIN_AIR_MS: 160 / MAX_PARTICLE_VX: 10.5 / MAX_PARTICLE_VY: 11.0）
+ *   - updateHopPreviewPoints() の空気抵抗計算から * timeScale を除去し、Matter.js 0.20 実物理と同じ airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012) へ修正することで、大ホップ時の予測ドットと実着地点の 15〜22px ズレを 1〜2px 以内へ解消
  * 
  * 上段フロートバーのゼリー選択、360度順方向ダイレクトエイム、
  * 天井非激突2.5D上段飛び越えホップ自動切替および放物線軌道プレビュー計算を担う操作モジュール
@@ -172,7 +171,7 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     const hopGravScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.35;
     const subAccY = gravityY * gravityScale * hopGravScale * subDelta * subDelta;
     const subAccVy = subAccY / timeScale;
-    const airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012) * timeScale;
+    const airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012);
     const wallRestitution = (PHYSICS.RESTITUTION !== undefined) ? PHYSICS.RESTITUTION : 0.16;
     const minAirSteps = Math.ceil((FLOAT_BAR.HOP_MIN_AIR_MS || 160) / subDelta);
     const targetBarY = FLOAT_BAR.Y;

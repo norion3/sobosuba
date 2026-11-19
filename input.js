@@ -1,8 +1,8 @@
 /**
  * input.js
- * @version v7.0 (Constants Version Sync & Duplicate Load Prevention - Phase 9)
+ * @version v7.2 (Focus Loss & Visibility Interruption Touch Reset - Phase 6)
  * @changes
- *   - ブラウザ上での constants.js 二重モジュールロード地雷を解消するため、インポートの絶対パスを /sobosuba/constants.js?v=4 から /sobosuba/constants.js?v=7 へ統一
+ *   - ドラッグ中のOS通知・アプリ切替・タブ非表示によって touchend / touchcancel が欠落しても操作不能にならないよう、window.blur および document.visibilitychange リスナーを追加し activeTouchId とドラッグ状態を安全リセットするよう修正
  * 
  * タッチ/マウス操作の追従、順方向ダイレクトエイムの座標・ベクトル計算、
  * およびWebKit特有の余白ドラッグ(ラバーバンド)の物理遮断を管理する入力モジュール
@@ -200,6 +200,22 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
         if (canceledTouch) {
             activeTouchId = null;
             handleDragEnd();
+        }
+    });
+
+    // =========================================================
+    // 3. OS通知・アプリ切替・タブ非表示時のタッチ操作固着（操作不能化）防止
+    // =========================================================
+    function handlePointerInterruption() {
+        if (activeTouchId === null && !isDragging) return;
+        activeTouchId = null;
+        handleDragEnd();
+    }
+
+    window.addEventListener('blur', handlePointerInterruption);
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            handlePointerInterruption();
         }
     });
 }
