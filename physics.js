@@ -1,13 +1,13 @@
 /**
  * physics.js
- * @version v2.0 (Bugfix Step 3)
+ * @version v3.0 (Overhaul Step 5)
  * @changes
- *   - 静的壁とバンパーの衝突フィルタ（collisionFilter）を分離し、バンパーが壁側へ正しく押し込める構造へ修正
- *   - updateBumpers() の押し込み判定符号を正しい向きへ修正し、押し込みすぎ・飛び出しすぎを防ぐX座標クランプを追加
- *   - 上方向への飛び出し・画面外消滅を防ぐ見えない天井壁を追加
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスに ?v=2 を付与
+ *   - 粘り気を無くし壁・床・45度スロープ沿いに滑らかに流れるよう、容器およびバンパーを超低摩擦化（PHYSICS.FRICTION / FRICTION_STATIC 適用）
+ *   - 1フレームを複数サブステップ（PHYSICS.SUBSTEPS = 4）に分割して物理演算とバンパー姿勢固定を安定駆動する stepPhysics() を実装
+ *   - 一瞬のかすめ接触による誤爆を防ぐため、左右バンパー同時押し込みの継続時間（BUMPER.GAME_OVER_HOLD_MS）を計測・判定する支援機能を updateBumpers() へ追加
+ *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=3 へ統一
  * 
- * Matter.jsを用いた物理世界の初期化、壁の生成、および
+ * Matter.jsを用いた物理世界の初期化、壁の生成、サブステップ駆動、および
  * ゲームオーバー条件となる「左右のスリムバンパースイッチ」を構築・制御するモジュール
  * 
  * GRAVITY起動エラーを根絶するため、HTMLの<script>タグ依存を排除し、
@@ -15,7 +15,7 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS, CONTAINER } from '/sobosuba/constants.js?v=2';
+import { GAME_WIDTH, GAME_HEIGHT, WALL_THICKNESS, BUMPER, PHYSICS, CONTAINER } from '/sobosuba/constants.js?v=3';
 
 // Matter.jsのモジュールエイリアス
 const Engine = Matter.Engine;
@@ -35,10 +35,11 @@ export let world;
 export let leftBumper;
 export let rightBumper;
 
-// バンパーの基準（休止）位置
+// バンパーの基準（休止）位置および同時押し込み継続時間
 let restXLeft;
 let restXRight;
 let bumperY;
+let bothPressedDurationMs = 0;
 
 /**
  * 物理エンジンの初期化と壁・スリムバンパーの生成
@@ -51,16 +52,18 @@ export function initPhysics() {
 
     engine = Engine.create();
     world = engine.world;
-    
-    // ゼリーが積み上がって横圧力を生むように重力を少し強めに設定
+    bothPressedDurationMs = 0;
+
+    // ゼリーが積み上がって横圧力を生むように重力を設定
     engine.gravity.y = PHYSICS.GRAVITY_Y;
 
-    // --- 床・天井・見えない壁・底面角カットスロープの生成 ---
-    const wallOptions = { 
-        isStatic: true, 
-        render: { visible: false }, 
-        friction: PHYSICS.FRICTION, 
-        restitution: 0.1,
+    // --- 床・天井・見えない壁・底面角カットスロープの生成（超低摩擦化） ---
+    const wallOptions = {
+        isStatic: true,
+        render: { visible: false },
+        friction: PHYSICS.FRICTION,
+        frictionStatic: PHYSICS.FRICTION_STATIC,
+        restitution: PHYSICS.RESTITUTION,
         // ゼリーとは衝突し、バンパーとは衝突しないフィルタ設定
         collisionFilter: {
             category: CATEGORY_WALL,
@@ -105,15 +108,16 @@ export function initPhysics() {
     // --- 左右スリムスイッチ（バンパー）機構の構築 ---
     bumperY = GAME_HEIGHT * BUMPER.Y_RATIO;
     const bumperHeight = GAME_HEIGHT * BUMPER.HEIGHT_RATIO;
-    
+
     // バンパーの初期X座標（フィールド内側へ突出している状態を休止状態とする）
     restXLeft = BUMPER.WIDTH / 2;
     restXRight = GAME_WIDTH - (BUMPER.WIDTH / 2);
 
-    const bumperOptions = { 
+    const bumperOptions = {
         isStatic: false, // バネで動くようにスライドアクションを許可
-        friction: 0.05, 
-        restitution: 0.1,
+        friction: PHYSICS.FRICTION,
+        frictionStatic: PHYSICS.FRICTION_STATIC,
+        restitution: 0.15,
         density: 0.05, // 重くして簡単には動かないようにする（ゼリーの圧力が必要）
         label: 'bumper',
         // ゼリーとは衝突し、左右の静的壁とは衝突せず壁側へ押し込めるフィルタ設定
@@ -146,16 +150,18 @@ export function initPhysics() {
     });
 
     Composite.add(world, [leftBumper, rightBumper, leftSpring, rightSpring]);
-    
+
     return { engine, world };
 }
 
 /**
- * 毎フレーム呼ばれ、バンパーの姿勢と可動範囲を強制固定し、壁側への押し込まれ具合を判定して返す
- * @returns {Object} 左右バンパーが閾値以上押し込まれているか(isPressed)の判定結果
+ * バンパーのY座標・角度・左右可動範囲を強制固定し、現在の押し込み状態を算出する内部関数
+ * @returns {{ leftPressed: boolean, rightPressed: boolean }}
  */
-export function updateBumpers() {
-    if (!leftBumper || !rightBumper) return { leftPressed: false, rightPressed: false };
+function constrainBumpers() {
+    if (!leftBumper || !rightBumper) {
+        return { leftPressed: false, rightPressed: false };
+    }
 
     const maxPush = BUMPER.MAX_PUSH || 14;
 
@@ -178,4 +184,53 @@ export function updateBumpers() {
     const rightPressed = (clampedRightX - restXRight) > BUMPER.PUSH_THRESHOLD;
 
     return { leftPressed, rightPressed };
+}
+
+/**
+ * 1フレームの経過時間を複数サブステップ（PHYSICS.SUBSTEPS）に分割して物理演算を安定駆動する
+ * @param {number} deltaMs - 経過フレーム時間（ミリ秒）
+ * @param {Function|null} onBeforeSubStep - 各サブステップ更新直前に実行するコールバック (subDelta, stepIndex, totalSteps)
+ */
+export function stepPhysics(deltaMs = 1000 / 60, onBeforeSubStep = null) {
+    if (!engine) return;
+
+    // タブ復帰時などの極端な時間飛びによる物理爆発を防ぐためデルタ時間を安全範囲にクランプ
+    const clampedDelta = Math.max(1, Math.min(deltaMs || (1000 / 60), 1000 / 30));
+    const substeps = Math.max(1, PHYSICS.SUBSTEPS || 4);
+    const subDelta = clampedDelta / substeps;
+
+    for (let s = 0; s < substeps; s++) {
+        if (typeof onBeforeSubStep === 'function') {
+            onBeforeSubStep(subDelta, s, substeps);
+        }
+        Engine.update(engine, subDelta);
+        constrainBumpers();
+    }
+}
+
+/**
+ * 毎フレーム呼ばれ、バンパーの姿勢・可動範囲を固定し、
+ * 押し込み状態および左右同時押し込みの継続判定結果を返す
+ * @param {number} deltaMs - 経過フレーム時間（ミリ秒）
+ * @returns {{ leftPressed: boolean, rightPressed: boolean, bothPressedDurationMs: number, isGameOverTriggered: boolean }}
+ */
+export function updateBumpers(deltaMs = 1000 / 60) {
+    const state = constrainBumpers();
+    const safeDelta = Math.max(0, Math.min(deltaMs || (1000 / 60), 1000 / 15));
+
+    if (state.leftPressed && state.rightPressed) {
+        bothPressedDurationMs += safeDelta;
+    } else {
+        bothPressedDurationMs = 0;
+    }
+
+    const holdMs = BUMPER.GAME_OVER_HOLD_MS || 200;
+    const isGameOverTriggered = bothPressedDurationMs >= holdMs;
+
+    return {
+        leftPressed: state.leftPressed,
+        rightPressed: state.rightPressed,
+        bothPressedDurationMs,
+        isGameOverTriggered
+    };
 }

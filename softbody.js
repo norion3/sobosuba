@@ -1,21 +1,22 @@
 /**
  * softbody.js
- * @version v2.0 (Bugfix Step 4)
+ * @version v3.0 (Overhaul Step 6)
  * @changes
- *   - 上部フロートバー上でゼリー同士を中央へ寄せて接触・合体を促す横方向引力（FLOAT_BAR.PACK_FORCE）を追加
- *   - 面積の負転・極小化や接線法線の反転時に、重心から外側への放射状ベクトルへ切り替える裏返り崩壊フェイルセーフを実装
- *   - すり抜け・物理爆発を防ぐため、コアおよび全パーティクルの速度を PHYSICS.MAX_PARTICLE_SPEED 以下へ制限するクランプを追加
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスに ?v=2 を付与
+ *   - 重い中心コア剛体を完全撤廃し、本家準拠の「中空ビーズリング（隣接皮バネ＋1つ飛ばし曲げ拘束）」構造へ刷新
+ *   - 毎サブステップ実行を前提とした PBD（位置ベース）面積保存圧力およびアンチ裏返り自動修復を実装し、小さいゼリーのペシャンコ崩壊を根絶
+ *   - 本家スコア仕様対応の hasMerged フラグ管理、重心（centroid）および循環平均による平均回転角（avgAngle）の毎ステップ更新を追加
+ *   - 上部フロートバー上の横方向減衰を低減（FLOAT_BAR.X_DAMPING）してスルスル滑る挙動へ改善し、launchFloatingJelly() を本家v1.2準拠の「加算速度発射」へ変更
+ *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=3 へ統一
  * 
- * ソフトボディ（ぐにゃぐにゃ剛体）の生成・物理更新モジュール
+ * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
- * 水風船のような内部圧力（面積保存による膨張力）と裏返り防止ロジック、
- * および上部フロートバーでの無重力浮遊ロジックを実装します。
+ * 中心に剛体コアを持たず、外周の数珠つなぎビーズと表面張力・曲げ拘束・PBD面積保存圧力により、
+ * 粘り気がなく水風船のように流動的に変形する本家sobosuba風の挙動を実現します。
  * ESM経由でMatter.jsを直接読み込み、起動エラーを防ぎます。
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, PHYSICS, JELLY_CONFIG, FLOAT_BAR } from '/sobosuba/constants.js?v=2';
+import { GAME_WIDTH, GAME_HEIGHT, PHYSICS, JELLY_CONFIG, FLOAT_BAR } from '/sobosuba/constants.js?v=3';
 
 const Bodies = Matter.Bodies;
 const Composite = Matter.Composite;
@@ -26,130 +27,126 @@ const Body = Matter.Body;
 let jellyIdCounter = 0;
 
 /**
- * ぐにゃぐにゃ変形するソフトボディゼリーを生成する
- * @param {number} x - 投下・生成するX座標
- * @param {number} y - 投下・生成するY座標
+ * 中空ビーズリング型ソフトボディゼリー（Sobo）を生成する
+ * @param {number} x - 生成する中心X座標
+ * @param {number} y - 生成する中心Y座標
  * @param {number} value - ゼリーの数値 (1, 2, 4, 8...)
- * @param {Object} initialVelocity - 発射時の初速ベクトル {x, y} (無い場合はnull)
+ * @param {Object|null} initialVelocity - 生成時の初速ベクトル {x, y} (無い場合はnull)
  * @param {boolean} isFloating - 上部フロートバー上で無重力浮遊させるかどうか
- * @returns {Matter.Composite} 生成されたソフトボディの複合体
+ * @param {boolean} hasMerged - 既に合体に参加済み（スコア加算済み・太字表示）かどうか
+ * @returns {Matter.Composite} 生成された中空ビーズリングの複合体
  */
-export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloating = false) {
-    const config = JELLY_CONFIG[value] || JELLY_CONFIG[8192];
+export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloating = false, hasMerged = false) {
+    const config = JELLY_CONFIG[value] || JELLY_CONFIG[16384] || JELLY_CONFIG[8192];
     const radius = config.radius;
-    const particleCount = config.particles || 12; // 外殻を構成するパーティクルの数
-    const particleRadius = radius * 0.25; // 外殻の小円サイズ
+    const particleCount = Math.max(12, config.particles || 12);
+    const beadRatio = PHYSICS.BEAD_RADIUS_RATIO || 0.22;
+    const particleRadius = Math.max(3.5, radius * beadRatio);
     const ringRadius = Math.max(4, radius - particleRadius);
-    
+
     // ソフトボディ全体をまとめるコンポジット（複合体）
     const jellyComposite = Composite.create({ label: 'jelly_composite' });
     const currentJellyId = `jelly_${jellyIdCounter++}`;
+    const createdAt = Date.now();
 
-    // パーティクル同士が内側で反発して爆発するのを防ぐためのコリジョングループ
-    // 同じグループ番号(負の値)を持つ剛体同士は衝突しなくなります
+    // 同一ゼリー内のビーズ同士が反発して爆発するのを防ぐ負のコリジョングループ
     const group = Body.nextGroup(true);
 
     // ==========================================
-    // 1. 中心のコア剛体を生成
-    // ==========================================
-    const coreRadius = radius * 0.3;
-    const core = Bodies.circle(x, y, coreRadius, {
-        density: PHYSICS.DENSITY_CORE,
-        friction: PHYSICS.FRICTION,
-        restitution: PHYSICS.RESTITUTION,
-        label: 'jelly_core',
-        collisionFilter: { group: group }
-    });
-    
-    // 衝突判定や描画時に使用するメタデータを付与
-    core.jellyValue = value;
-    core.jellyId = currentJellyId;
-    core.isMerging = false;
-    core.parentComposite = jellyComposite;
-    core.createdAt = Date.now();
-
-    Composite.add(jellyComposite, core);
-
-    // ==========================================
-    // 2. 外殻パーティクル剛体と、コアを繋ぐ柔軟なバネの生成
+    // 1. 外周ビーズ剛体（中空リング：中心コアなし）の生成
     // ==========================================
     const particles = [];
-    
+
     for (let i = 0; i < particleCount; i++) {
         const angle = (i / particleCount) * Math.PI * 2;
-        // コアを中心とした円周上に時計回り（Canvas座標系）で配置
+        // 中心から時計回り（Canvas座標系）にリング配置
         const px = x + Math.cos(angle) * ringRadius;
         const py = y + Math.sin(angle) * ringRadius;
-        
+
         const particle = Bodies.circle(px, py, particleRadius, {
             density: PHYSICS.DENSITY_PARTICLE,
             friction: PHYSICS.FRICTION,
+            frictionStatic: PHYSICS.FRICTION_STATIC,
+            frictionAir: PHYSICS.FRICTION_AIR,
             restitution: PHYSICS.RESTITUTION,
             label: 'jelly_particle',
             collisionFilter: { group: group }
         });
 
-        // 外殻パーティクルにもメタデータを付与
+        // 衝突判定・合体・回転角算出用のメタデータを付与
         particle.jellyValue = value;
         particle.jellyId = currentJellyId;
         particle.isMerging = false;
         particle.parentComposite = jellyComposite;
         particle.particleRadius = particleRadius;
+        particle.initialAngle = angle;
 
         particles.push(particle);
         Composite.add(jellyComposite, particle);
-        
-        // コアと外殻パーティクルを繋ぐバネ（流動性を出すため柔軟に設定）
-        const coreConstraint = Constraint.create({
-            bodyA: core,
-            bodyB: particle,
-            length: ringRadius,
-            stiffness: PHYSICS.SOFTBODY_STIFFNESS,
-            damping: PHYSICS.SOFTBODY_DAMPING,
-            render: { visible: false }
-        });
-        Composite.add(jellyComposite, coreConstraint);
     }
 
     // ==========================================
-    // 3. 外殻パーティクル同士を繋ぐ表面張力バネ（輪郭）の生成
+    // 2. 隣接ビーズ間の皮の張りバネ（表面張力）の生成
     // ==========================================
     const segmentLength = 2 * ringRadius * Math.sin(Math.PI / particleCount);
     for (let i = 0; i < particleCount; i++) {
         const p1 = particles[i];
         const p2 = particles[(i + 1) % particleCount];
-        
-        const perimeterConstraint = Constraint.create({
+
+        const skinConstraint = Constraint.create({
             bodyA: p1,
             bodyB: p2,
             length: segmentLength,
-            stiffness: PHYSICS.SOFTBODY_PERIMETER_STIFFNESS,
+            stiffness: PHYSICS.SKIN_STIFFNESS,
             damping: PHYSICS.SOFTBODY_DAMPING,
             render: { visible: false }
         });
-        Composite.add(jellyComposite, perimeterConstraint);
+        Composite.add(jellyComposite, skinConstraint);
+    }
+
+    // ==========================================
+    // 3. 1つ飛ばしビーズ間の弱い曲げ拘束（シワ折れ・鋭角崩壊防止）
+    // ==========================================
+    const bendLength = 2 * ringRadius * Math.sin((2 * Math.PI) / particleCount);
+    for (let i = 0; i < particleCount; i++) {
+        const p1 = particles[i];
+        const p2 = particles[(i + 2) % particleCount];
+
+        const bendConstraint = Constraint.create({
+            bodyA: p1,
+            bodyB: p2,
+            length: bendLength,
+            stiffness: PHYSICS.BEND_STIFFNESS,
+            damping: PHYSICS.SOFTBODY_DAMPING,
+            render: { visible: false }
+        });
+        Composite.add(jellyComposite, bendConstraint);
     }
 
     // コンポジット自体に高速参照用・物理更新用のメタデータを保持
     jellyComposite.jellyId = currentJellyId;
     jellyComposite.jellyValue = value;
     jellyComposite.isMerging = false;
-    jellyComposite.isFloating = isFloating;
-    jellyComposite.core = core;
+    jellyComposite.isFloating = Boolean(isFloating);
+    jellyComposite.hasMerged = Boolean(hasMerged);
+    jellyComposite.createdAt = createdAt;
     jellyComposite.particles = particles;
     jellyComposite.targetRadius = radius;
     jellyComposite.ringRadius = ringRadius;
     jellyComposite.particleRadius = particleRadius;
-    // 外周パーティクル中心が囲む正多角形の目標面積
+    jellyComposite.centroid = { x, y };
+    jellyComposite.avgAngle = 0;
+    // 外周ビーズ中心が囲む正多角形の目標面積
     jellyComposite.targetArea = 0.5 * particleCount * ringRadius * ringRadius * Math.sin((2 * Math.PI) / particleCount);
 
     // ==========================================
-    // 4. 発射時の初速付与
+    // 4. 初期速度の付与
     // ==========================================
     if (initialVelocity) {
-        Body.setVelocity(core, initialVelocity);
+        const vx = initialVelocity.x || 0;
+        const vy = initialVelocity.y || 0;
         for (let i = 0; i < particles.length; i++) {
-            Body.setVelocity(particles[i], initialVelocity);
+            Body.setVelocity(particles[i], { x: vx, y: vy });
         }
     }
 
@@ -157,30 +154,76 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
 }
 
 /**
- * フロートバー上のゼリーを無重力状態から解除し、指定した初速で発射する
- * @param {Matter.Composite} jellyComposite - 発射するゼリーのコンポジット
- * @param {Object} velocity - 発射初速ベクトル {x, y}
+ * 中空ビーズリングの現在重心座標を安全に取得する
+ * @param {Matter.Composite} jellyComposite - 対象のゼリーコンポジット
+ * @returns {{ x: number, y: number } | null}
  */
-export function launchFloatingJelly(jellyComposite, velocity) {
+export function getSoftBodyCentroid(jellyComposite) {
+    if (!jellyComposite) return null;
+    const particles = jellyComposite.particles;
+    if (!particles || particles.length === 0) {
+        return jellyComposite.centroid || null;
+    }
+
+    let cx = 0;
+    let cy = 0;
+    const n = particles.length;
+    for (let i = 0; i < n; i++) {
+        cx += particles[i].position.x;
+        cy += particles[i].position.y;
+    }
+    cx /= n;
+    cy /= n;
+
+    if (!jellyComposite.centroid) {
+        jellyComposite.centroid = { x: cx, y: cy };
+    } else {
+        jellyComposite.centroid.x = cx;
+        jellyComposite.centroid.y = cy;
+    }
+    return jellyComposite.centroid;
+}
+
+/**
+ * フロートバー上のゼリーを無重力状態から解除し、現在の移動速度に加算（Additive Momentum）して発射する
+ * @param {Matter.Composite} jellyComposite - 発射するゼリーのコンポジット
+ * @param {Object} addVelocity - 加算する発射速度ベクトル {x, y}（そっと落とし時は {x: 0, y: 0}）
+ */
+export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }) {
     if (!jellyComposite) return;
     jellyComposite.isFloating = false;
 
-    if (jellyComposite.core) {
-        Body.setVelocity(jellyComposite.core, velocity);
-    }
-    if (jellyComposite.particles) {
-        for (let i = 0; i < jellyComposite.particles.length; i++) {
-            Body.setVelocity(jellyComposite.particles[i], velocity);
+    const particles = jellyComposite.particles;
+    if (!particles || particles.length === 0) return;
+
+    const addX = addVelocity ? (addVelocity.x || 0) : 0;
+    const addY = addVelocity ? (addVelocity.y || 0) : 0;
+    const maxSpeed = PHYSICS.MAX_PARTICLE_SPEED || 15;
+    const maxSpeedSq = maxSpeed * maxSpeed;
+
+    for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        // 本家v1.2準拠：バー上での横移動速度を保持したまま発射ベクトルを加算する
+        let vx = p.velocity.x + addX;
+        let vy = p.velocity.y + addY;
+
+        const speedSq = vx * vx + vy * vy;
+        if (speedSq > maxSpeedSq) {
+            const scale = maxSpeed / Math.sqrt(speedSq);
+            vx *= scale;
+            vy *= scale;
         }
+        Body.setVelocity(p, { x: vx, y: vy });
     }
 }
 
 /**
- * 毎フレーム呼び出されるソフトボディ物理更新関数
- * 1. 靴紐の公式による面積保存（内部圧力・気体膨張力）と裏返りフェイルセーフ
- * 2. 中心めり込みによる裏返り（三日月化）防止
- * 3. 上部フロートバー上での無重力浮遊＆中央横寄せ引力制御
- * 4. 全パーツの最大速度クランプ（すり抜け・物理爆発防止）
+ * 毎サブステップ呼び出されるソフトボディ物理更新関数
+ * 1. 靴紐の公式による重心・符号付き面積・周長・平均回転角の算出
+ * 2. アンチ裏返り自動修復（面積が極端に縮小・負転した際の即時形状復元）
+ * 3. PBD（位置ベース）面積保存補正 ＋ 補助内部圧力 ＋ 最小距離復元
+ * 4. 上部フロートバー上での無重力弾性フック＆低減衰横スライド制御
+ * 5. 全ビーズの最大速度クランプ（すり抜け・物理爆発防止）
  * @param {Matter.World} world - Matter.jsの物理世界
  * @param {Matter.Engine} engine - Matter.jsのエンジン
  */
@@ -190,27 +233,38 @@ export function updateSoftBodies(world, engine) {
     const composites = Composite.allComposites(world);
     const gravityY = engine.gravity.y;
     const gravityScale = engine.gravity.scale;
-    const maxSpeed = PHYSICS.MAX_PARTICLE_SPEED || 14;
-    const packForce = FLOAT_BAR.PACK_FORCE || 0.00012;
+    const substeps = Math.max(1, PHYSICS.SUBSTEPS || 4);
+    const maxSpeed = PHYSICS.MAX_PARTICLE_SPEED || 15;
+    const maxSpeedSq = maxSpeed * maxSpeed;
+    const pbdStiffnessPerStep = (PHYSICS.PBD_AREA_STIFFNESS || 0.65) / substeps;
+    const maxCorr = PHYSICS.PBD_MAX_CORRECTION || 2.5;
+    const inversionRatio = PHYSICS.INVERSION_AREA_RATIO || 0.25;
+    const minDistRatio = PHYSICS.SOFTBODY_MIN_DIST_RATIO || 0.45;
+    const packForce = FLOAT_BAR.PACK_FORCE || 0.00006;
+
+    // 1フレームあたりの減衰率をサブステップ回数に応じて等価変換
+    const stepDampX = Math.pow(FLOAT_BAR.X_DAMPING || 0.985, 1 / substeps);
+    const stepDampY = Math.pow(FLOAT_BAR.Y_DAMPING || 0.88, 1 / substeps);
 
     for (let i = 0; i < composites.length; i++) {
         const comp = composites[i];
         if (comp.label !== 'jelly_composite') continue;
 
-        const core = comp.core;
         const particles = comp.particles;
-        if (!core || !particles || particles.length < 3) continue;
+        if (!particles || particles.length < 3) continue;
 
         const n = particles.length;
-        const ringRadius = comp.ringRadius || 16;
+        const ringRadius = comp.ringRadius || 14;
+        const pRadius = comp.particleRadius || 4;
         const targetArea = comp.targetArea || (Math.PI * ringRadius * ringRadius);
 
         // ==========================================
-        // 1. 外周パーティクルの重心と現在の面積（靴紐の公式）を算出
+        // 1. 重心・符号付き面積（靴紐の公式）・周長を算出
         // ==========================================
         let cx = 0;
         let cy = 0;
         let signedArea = 0;
+        let perimeter = 0;
 
         for (let j = 0; j < n; j++) {
             const p1 = particles[j].position;
@@ -219,21 +273,88 @@ export function updateSoftBodies(world, engine) {
             cy += p1.y;
             // Canvas座標系（Y軸下向き）で時計回り配置のため、正常時は正の面積になる
             signedArea += (p1.x * p2.y - p2.x * p1.y);
+            const ex = p2.x - p1.x;
+            const ey = p2.y - p1.y;
+            perimeter += Math.sqrt(ex * ex + ey * ey);
         }
         cx /= n;
         cy /= n;
         signedArea *= 0.5;
 
-        // 面積が負または極小（裏返り・交差の兆候）かどうかを判定
-        const isInvertedOrCollapsed = signedArea < targetArea * 0.25;
+        // 重心をインプレース更新
+        if (!comp.centroid) {
+            comp.centroid = { x: cx, y: cy };
+        } else {
+            comp.centroid.x = cx;
+            comp.centroid.y = cy;
+        }
 
         // ==========================================
-        // 2. 内部圧力（気体膨張力）と裏返りフェイルセーフの適用
+        // 2. アンチ裏返り自動修復（ペシャンコ・8の字崩壊の即時復元）
         // ==========================================
-        // 目標面積との差分から内圧を算出（暴走しないようクランプ）
-        const areaRatio = (targetArea - signedArea) / targetArea;
-        const clampedRatio = Math.max(-1.0, Math.min(2.5, areaRatio));
-        const pressureStrength = clampedRatio * PHYSICS.SOFTBODY_PRESSURE * 6.0;
+        if (signedArea < targetArea * inversionRatio) {
+            const baseAngle = comp.avgAngle || 0;
+            const safeRadius = ringRadius * 0.88;
+            // 重心自体が壁・床にめり込まないよう安全範囲に収める
+            const safeCx = Math.max(pRadius + safeRadius, Math.min(GAME_WIDTH - pRadius - safeRadius, cx));
+            const safeCy = Math.max(pRadius + safeRadius, Math.min(GAME_HEIGHT - pRadius - safeRadius, cy));
+
+            for (let j = 0; j < n; j++) {
+                const pCurr = particles[j];
+                const idealAngle = baseAngle + (pCurr.initialAngle !== undefined ? pCurr.initialAngle : ((j / n) * Math.PI * 2));
+                const targetX = safeCx + Math.cos(idealAngle) * safeRadius;
+                const targetY = safeCy + Math.sin(idealAngle) * safeRadius;
+
+                // 現在位置から理想リング座標へ即座に55%引き戻して裏返りを解除
+                const nextX = pCurr.position.x + (targetX - pCurr.position.x) * 0.55;
+                const nextY = pCurr.position.y + (targetY - pCurr.position.y) * 0.55;
+
+                Body.setPosition(pCurr, {
+                    x: Math.max(pRadius, Math.min(GAME_WIDTH - pRadius, nextX)),
+                    y: Math.max(pRadius, Math.min(GAME_HEIGHT - pRadius, nextY))
+                });
+                // 崩壊時の暴走速度を抑えて安定着地させる
+                Body.setVelocity(pCurr, {
+                    x: pCurr.velocity.x * 0.5,
+                    y: pCurr.velocity.y * 0.5
+                });
+            }
+            continue;
+        }
+
+        // 正常形状時の平均回転角（循環平均）を算出（数字の自然な回転追従用）
+        let sumSin = 0;
+        let sumCos = 0;
+        for (let j = 0; j < n; j++) {
+            const pCurr = particles[j];
+            const dx = pCurr.position.x - cx;
+            const dy = pCurr.position.y - cy;
+            if (dx * dx + dy * dy > 0.01) {
+                const currAngle = Math.atan2(dy, dx);
+                const initAngle = pCurr.initialAngle !== undefined ? pCurr.initialAngle : ((j / n) * Math.PI * 2);
+                const diff = currAngle - initAngle;
+                sumSin += Math.sin(diff);
+                sumCos += Math.cos(diff);
+            }
+        }
+        if (sumSin * sumSin + sumCos * sumCos > 0.0001) {
+            comp.avgAngle = Math.atan2(sumSin, sumCos);
+        }
+
+        // ==========================================
+        // 3. PBD（位置ベース）面積保存補正 ＆ 補助内部圧力
+        // ==========================================
+        const areaDiff = targetArea - signedArea;
+        const safePerimeter = Math.max(perimeter, 1);
+        // 不足面積を外周全体へ均等に割り振るPBD法線変位量（膨張優先・過膨張は穏やかに収縮）
+        let pbdDelta = (areaDiff / safePerimeter) * pbdStiffnessPerStep;
+        if (pbdDelta > maxCorr) pbdDelta = maxCorr;
+        else if (pbdDelta < -maxCorr * 0.35) pbdDelta = -maxCorr * 0.35;
+
+        // 補助的な力ベース内部圧力（ボヨンとした弾性揺れを維持）
+        const areaRatio = Math.max(-0.8, Math.min(2.0, areaDiff / targetArea));
+        const pressureStrength = areaRatio * (PHYSICS.SOFTBODY_PRESSURE || 0.00055) * 4.0;
+        const minDist = ringRadius * minDistRatio;
 
         for (let j = 0; j < n; j++) {
             const pPrev = particles[(j - 1 + n) % n].position;
@@ -251,45 +372,46 @@ export function updateSoftBodies(world, engine) {
                 radialX = dx / dist;
                 radialY = dy / dist;
             } else {
-                const fallbackAngle = (j / n) * Math.PI * 2;
+                const fallbackAngle = (comp.avgAngle || 0) + (j / n) * Math.PI * 2;
                 radialX = Math.cos(fallbackAngle);
                 radialY = Math.sin(fallbackAngle);
             }
 
-            // 隣接パーティクル間の接線ベクトルから外向き法線を求める
+            // 隣接ビーズ間の接線ベクトルから外向き法線を求める
             const tx = pNext.x - pPrev.x;
             const ty = pNext.y - pPrev.y;
             const tLen = Math.sqrt(tx * tx + ty * ty);
 
             let nx = radialX;
             let ny = radialY;
-
-            // 裏返り・交差の兆候がない場合のみ接線法線を採用し、内向き反転時は放射状ベクトルへ切り替え
-            if (!isInvertedOrCollapsed && tLen > 0.0001) {
-                // 時計回り（Y下向き）の外向き法線は (ty, -tx)
+            if (tLen > 0.0001) {
                 const candNx = ty / tLen;
                 const candNy = -tx / tLen;
-                // 重心から見て外向き（内積が正）か検証
+                // 重心から見て外向き（内積が正）の場合のみ接線法線を採用
                 if ((candNx * radialX + candNy * radialY) > 0) {
                     nx = candNx;
                     ny = candNy;
                 }
             }
 
+            // (A) PBD位置ベース面積保存（壁・床を突き抜けない範囲で直接押し戻す）
+            if (Math.abs(pbdDelta) > 0.0005) {
+                const corrX = Math.max(pRadius, Math.min(GAME_WIDTH - pRadius, pCurr.position.x + nx * pbdDelta));
+                const corrY = Math.max(pRadius, Math.min(GAME_HEIGHT - pRadius, pCurr.position.y + ny * pbdDelta));
+                Body.setPosition(pCurr, { x: corrX, y: corrY });
+            }
+
+            // (B) 補助的な力ベース内圧
             const forceMag = pressureStrength * pCurr.mass;
             Body.applyForce(pCurr, pCurr.position, {
                 x: nx * forceMag,
                 y: ny * forceMag
             });
 
-            // ==========================================
-            // 3. 裏返り（三日月化）防止の最小距離復元力
-            // ==========================================
-            const minDist = ringRadius * PHYSICS.SOFTBODY_MIN_DIST_RATIO;
-
+            // (C) 最小距離復元（重心への過度なめり込みを防止）
             if (dist < minDist) {
                 const overlap = minDist - dist;
-                const restoreMag = overlap * 0.00035 * pCurr.mass;
+                const restoreMag = overlap * 0.0004 * pCurr.mass;
                 Body.applyForce(pCurr, pCurr.position, {
                     x: radialX * restoreMag,
                     y: radialY * restoreMag
@@ -297,16 +419,8 @@ export function updateSoftBodies(world, engine) {
             }
         }
 
-        // コア剛体が外周の重心から大きく外れないよう穏やかに中央へ戻す
-        const coreDx = cx - core.position.x;
-        const coreDy = cy - core.position.y;
-        Body.applyForce(core, core.position, {
-            x: coreDx * 0.00015 * core.mass,
-            y: coreDy * 0.00015 * core.mass
-        });
-
         // ==========================================
-        // 4. 上部フロートバー上での無重力浮遊＆中央横寄せ引力ロジック
+        // 4. 上部フロートバー上での無重力弾性フック ＆ 低減衰横スライド制御
         // ==========================================
         if (comp.isFloating) {
             const targetY = FLOAT_BAR.Y;
@@ -314,28 +428,26 @@ export function updateSoftBodies(world, engine) {
             const minX = FLOAT_BAR.PADDING_X + comp.targetRadius;
             const maxX = GAME_WIDTH - FLOAT_BAR.PADDING_X - comp.targetRadius;
 
-            // 中央方向への正規化横寄せ係数（隣り合う同数字同士が自然に触れ合って合体するように促す）
+            // 中央方向への微弱な寄せ力（左右端スポーナーからスルスル合流させる）
             const dxCenter = centerX - cx;
-            const packRatio = Math.max(-1, Math.min(1, dxCenter / 30));
+            const packRatio = Math.max(-1, Math.min(1, dxCenter / 40));
 
-            // コアと全パーティクルに対して重力を打ち消し、バーY座標および中央方向へ保持する
-            const allParts = [core, ...particles];
-            for (let j = 0; j < allParts.length; j++) {
-                const body = allParts[j];
+            for (let j = 0; j < n; j++) {
+                const body = particles[j];
 
                 // 重力打ち消し（無重力化）
                 const antiGravityY = -gravityY * gravityScale * body.mass;
 
-                // バーのY座標（FLOAT_BAR.Y）に留める復元力（重心基準）
+                // バーのY高度（FLOAT_BAR.Y）に柔らかく吊る弾性フック
                 const dyBar = targetY - cy;
-                const holdForceY = dyBar * FLOAT_BAR.SPRING_STIFFNESS * 0.0004 * body.mass;
+                const holdForceY = dyBar * FLOAT_BAR.SPRING_STIFFNESS * 0.00045 * body.mass;
 
-                // 左右の余白内に収める復元力 ＋ バー中央方向へ寄せる横引力
-                let holdForceX = packRatio * packForce * 1.5 * body.mass;
+                // 左右余白の保持 ＋ 穏やかな中央寄せ引力
+                let holdForceX = packRatio * packForce * body.mass;
                 if (cx < minX) {
-                    holdForceX += (minX - cx) * FLOAT_BAR.SPRING_STIFFNESS * 0.0005 * body.mass;
+                    holdForceX += (minX - cx) * FLOAT_BAR.SPRING_STIFFNESS * 0.0006 * body.mass;
                 } else if (cx > maxX) {
-                    holdForceX += (maxX - cx) * FLOAT_BAR.SPRING_STIFFNESS * 0.0005 * body.mass;
+                    holdForceX += (maxX - cx) * FLOAT_BAR.SPRING_STIFFNESS * 0.0006 * body.mass;
                 }
 
                 Body.applyForce(body, body.position, {
@@ -343,10 +455,10 @@ export function updateSoftBodies(world, engine) {
                     y: antiGravityY + holdForceY
                 });
 
-                // 浮遊中の揺れを抑える穏やかな速度ダンピング
+                // 横方向は極低ダンピング（スルスル滑る）、縦方向は揺れを抑える減衰を適用
                 Body.setVelocity(body, {
-                    x: body.velocity.x * 0.92,
-                    y: body.velocity.y * 0.88
+                    x: body.velocity.x * stepDampX,
+                    y: body.velocity.y * stepDampY
                 });
             }
         }
@@ -354,22 +466,18 @@ export function updateSoftBodies(world, engine) {
         // ==========================================
         // 5. すり抜け・物理爆発防止の最大速度クランプ
         // ==========================================
-        const clampVelocity = (body) => {
+        for (let j = 0; j < n; j++) {
+            const body = particles[j];
             const vx = body.velocity.x;
             const vy = body.velocity.y;
             const speedSq = vx * vx + vy * vy;
-            if (speedSq > maxSpeed * maxSpeed) {
+            if (speedSq > maxSpeedSq) {
                 const scale = maxSpeed / Math.sqrt(speedSq);
                 Body.setVelocity(body, {
                     x: vx * scale,
                     y: vy * scale
                 });
             }
-        };
-
-        clampVelocity(core);
-        for (let j = 0; j < n; j++) {
-            clampVelocity(particles[j]);
         }
     }
 }
