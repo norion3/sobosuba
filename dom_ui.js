@@ -1,10 +1,9 @@
 /**
  * dom_ui.js
- * @version v8.0 (Start Guide Card, Refined GameOver Dark Card & HUD Stacking - Phase 5)
+ * @version v8.2 (Safe Tap Handler Consolidation & Unused Cache Cleanup - Phase 3)
  * @changes
- *   - topHudHeader の z-index を 10 → 60 へ引き上げ、開始画面・ゲームオーバー画面表示中でも左上の音量 ON/OFF ボタンを常時操作可能にし、スコア表示ラッパー #topScoreWrapper を新設（showGameOverUI() で opacity: 0 非表示、hideGameOverUI() で opacity: 1 復帰）
- *   - 初回起動用の開始説明カードオーバーレイ（#startOverlay：タイトルなし・見出し「同じ数字をくっつけよう」・簡潔3行説明・#startBtn「TAP TO START」・オーバーレイ全体タップ開始可・全イベントバブリング遮断・350ms デバウンス）を追加し、showStartUI() / hideStartUI() をエクスポート、initUI() へ第3引数 onStartCallback を追加（省略時後方互換維持）
- *   - ゲームオーバー画面（#gameOverUI）から「両側のバンパーが押し込まれました」「FINAL」を削除し、backdrop-filter 不使用・下部 215px セーフエリア厳守のダークガラス調カード（GAME OVER ＋ 小さな SCORE ラベル ＋ 極太等幅ホワイト数字 ＋ 水滴アクア〜ブルーの「もう一度プレイ」<div> ボタン）へ刷新
+ *   - #startOverlay・#soundToggleBtn・#retryBtn の3箇所で重複していた安全タップ処理（全8イベントの stopPropagation()・24px移動許容・350ms二重発火防止・touchcancelリセット）を内部ヘルパー bindSafeTap(element, callback, { preventTouchMove }) へ共通化（既存イベント仕様・挙動は100%不変、#retryBtn の touchcancel 耐性を統一）
+ *   - 未使用だった elStartBtn キャッシュ変数および initUI() 内の取得行を削除し、#startOverlay への単一バインド構成へ整理
  * 
  * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、開始説明画面、および安全なUI制御を行うモジュール
  * 
@@ -24,7 +23,6 @@ let elSoundBtn;
 let elSoundIcon;
 let elSoundLabel;
 let elStartOverlay;
-let elStartBtn;
 let elGameOverUI;
 let elFinalScore;
 let elWarningOverlay;
@@ -67,6 +65,93 @@ function getOptimalTopHeaderPaddingPx() {
         return UI.SAFE_TOP_HEADER_PX;
     }
     return (UI.SAFE_TOP_HEADER_BROWSER_PX !== undefined) ? UI.SAFE_TOP_HEADER_BROWSER_PX : 8;
+}
+
+/**
+ * GRAVITY WebView / iOS Safari 準拠の安全タップハンドラを要素へバインドする内部ヘルパー
+ * 全8イベント（マウス系4＋タッチ系4）で stopPropagation() を徹底し、
+ * 24px 以内の指ズレ許容・350ms 二重発火防止・touchcancel リセットを統一管理する
+ * @param {HTMLElement|null} element - バインド対象の DOM 要素
+ * @param {Function} callback - タップ確定時に実行するコールバック
+ * @param {{ preventTouchMove?: boolean }} [options] - タッチ移動時のラバーバンド抑止オプション
+ */
+function bindSafeTap(element, callback, { preventTouchMove = false } = {}) {
+    if (!element || typeof callback !== 'function') return;
+
+    let lastTriggerTime = 0;
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let isTouchActive = false;
+
+    const trigger = () => {
+        const now = Date.now();
+        // touchend と直後の合成 click による二重発火を防止
+        if (now - lastTriggerTime < 350) return;
+        lastTriggerTime = now;
+        callback();
+    };
+
+    // マウス系4イベント（window監視の input.js へのバブリングを完全遮断）
+    element.addEventListener('mousedown', (e) => {
+        e.stopPropagation();
+    });
+    element.addEventListener('mousemove', (e) => {
+        e.stopPropagation();
+    });
+    element.addEventListener('mouseup', (e) => {
+        e.stopPropagation();
+    });
+    element.addEventListener('click', (e) => {
+        e.stopPropagation();
+        trigger();
+    });
+
+    // タッチ系4イベント（バブリング遮断・24px移動許容・350msデバウンス・touchcancelリセット）
+    element.addEventListener('touchstart', (e) => {
+        e.stopPropagation();
+        if (e.touches && e.touches.length > 0) {
+            touchStartX = e.touches[0].clientX;
+            touchStartY = e.touches[0].clientY;
+            isTouchActive = true;
+        }
+    }, { passive: true });
+
+    if (preventTouchMove) {
+        element.addEventListener('touchmove', (e) => {
+            e.stopPropagation();
+            if (e.cancelable) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+    } else {
+        element.addEventListener('touchmove', (e) => {
+            e.stopPropagation();
+        }, { passive: true });
+    }
+
+    element.addEventListener('touchend', (e) => {
+        e.stopPropagation();
+        if (!isTouchActive) return;
+        isTouchActive = false;
+
+        if (e.changedTouches && e.changedTouches.length > 0) {
+            const dx = e.changedTouches[0].clientX - touchStartX;
+            const dy = e.changedTouches[0].clientY - touchStartY;
+            const moveDist = Math.sqrt(dx * dx + dy * dy);
+            // 指のズレが24px以内ならタップとみなして発火
+            if (moveDist <= 24) {
+                if (e.cancelable) {
+                    e.preventDefault();
+                }
+                trigger();
+            }
+        }
+    }, { passive: false });
+
+    element.addEventListener('touchcancel', (e) => {
+        e.stopPropagation();
+        isTouchActive = false;
+    }, { passive: true });
 }
 
 /**
@@ -238,7 +323,6 @@ export function initUI(onRetryCallback, onToggleSoundCallback = null, onStartCal
     elSoundIcon = document.getElementById('soundToggleIcon');
     elSoundLabel = document.getElementById('soundToggleLabel');
     elStartOverlay = document.getElementById('startOverlay');
-    elStartBtn = document.getElementById('startBtn');
     elGameOverUI = document.getElementById('gameOverUI');
     elFinalScore = document.getElementById('finalScore');
     elWarningOverlay = document.getElementById('warningOverlay');
@@ -247,215 +331,31 @@ export function initUI(onRetryCallback, onToggleSoundCallback = null, onStartCal
     // 初期表示はデフォルト OFF を保証
     updateSoundUI(false);
 
-    // =========================================================
-    // 開始オーバーレイ（#startOverlay / #startBtn 全体タップ開始対応）のバインド
-    // 裏の Canvas エイム操作へ貫通しないよう全8イベントで stopPropagation() と 350ms デバウンスを徹底
-    // =========================================================
-    if (elStartOverlay) {
-        let lastStartTime = 0;
-        let startTouchStartX = 0;
-        let startTouchStartY = 0;
-        let isStartTouchActive = false;
+    // 3. 開始オーバーレイ（全体タップ開始・ラバーバンド遮断）の安全タップバインド
+    bindSafeTap(elStartOverlay, () => {
+        if (typeof onStartCallback === 'function') {
+            onStartCallback();
+        } else {
+            hideStartUI();
+        }
+    }, { preventTouchMove: true });
 
-        const triggerStart = () => {
-            const now = Date.now();
-            if (now - lastStartTime < 350) return;
-            lastStartTime = now;
-
-            if (typeof onStartCallback === 'function') {
-                onStartCallback();
-            } else {
-                hideStartUI();
+    // 4. 音量ON/OFFボタンの安全タップバインド（iOS同期ユーザージェスチャー内で即コールバック実行）
+    bindSafeTap(elSoundBtn, () => {
+        if (typeof onToggleSoundCallback === 'function') {
+            const nextState = onToggleSoundCallback();
+            if (typeof nextState === 'boolean') {
+                updateSoundUI(nextState);
             }
-        };
+        }
+    }, { preventTouchMove: false });
 
-        // マウス系4イベント（Canvas 操作へのバブリングを完全遮断）
-        elStartOverlay.addEventListener('mousedown', (e) => {
-            e.stopPropagation();
-        });
-        elStartOverlay.addEventListener('mousemove', (e) => {
-            e.stopPropagation();
-        });
-        elStartOverlay.addEventListener('mouseup', (e) => {
-            e.stopPropagation();
-        });
-        elStartOverlay.addEventListener('click', (e) => {
-            e.stopPropagation();
-            triggerStart();
-        });
-
-        // タッチ系4イベント（ラバーバンド現象 ＆ Canvas 操作への貫通を完全遮断）
-        elStartOverlay.addEventListener('touchstart', (e) => {
-            e.stopPropagation();
-            if (e.touches && e.touches.length > 0) {
-                startTouchStartX = e.touches[0].clientX;
-                startTouchStartY = e.touches[0].clientY;
-                isStartTouchActive = true;
-            }
-        }, { passive: true });
-
-        elStartOverlay.addEventListener('touchmove', (e) => {
-            e.stopPropagation();
-            if (e.cancelable) {
-                e.preventDefault();
-            }
-        }, { passive: false });
-
-        elStartOverlay.addEventListener('touchend', (e) => {
-            e.stopPropagation();
-            if (!isStartTouchActive) return;
-            isStartTouchActive = false;
-
-            if (e.changedTouches && e.changedTouches.length > 0) {
-                const dx = e.changedTouches[0].clientX - startTouchStartX;
-                const dy = e.changedTouches[0].clientY - startTouchStartY;
-                const moveDist = Math.sqrt(dx * dx + dy * dy);
-                if (moveDist <= 24) {
-                    if (e.cancelable) {
-                        e.preventDefault();
-                    }
-                    triggerStart();
-                }
-            }
-        }, { passive: false });
-
-        elStartOverlay.addEventListener('touchcancel', (e) => {
-            e.stopPropagation();
-            isStartTouchActive = false;
-        }, { passive: true });
-    }
-
-    // =========================================================
-    // 音量ON/OFFボタンのバインド
-    // input.js との干渉ゼロを保証するため全8イベントで stopPropagation() を徹底
-    // ＆ touchend/click の二重発火防止（iOS同期ユーザージェスチャー内で即コールバック実行）
-    // =========================================================
-    if (elSoundBtn) {
-        let lastSoundToggleTime = 0;
-        let soundTouchStartX = 0;
-        let soundTouchStartY = 0;
-        let isSoundTouchActive = false;
-
-        const triggerSoundToggle = () => {
-            const now = Date.now();
-            if (now - lastSoundToggleTime < 350) return;
-            lastSoundToggleTime = now;
-
-            if (typeof onToggleSoundCallback === 'function') {
-                const nextState = onToggleSoundCallback();
-                if (typeof nextState === 'boolean') {
-                    updateSoundUI(nextState);
-                }
-            }
-        };
-
-        // マウス系4イベント（window監視の input.js へのバブリングを完全遮断）
-        elSoundBtn.addEventListener('mousedown', (e) => {
-            e.stopPropagation();
-        });
-        elSoundBtn.addEventListener('mousemove', (e) => {
-            e.stopPropagation();
-        });
-        elSoundBtn.addEventListener('mouseup', (e) => {
-            e.stopPropagation();
-        });
-        elSoundBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            triggerSoundToggle();
-        });
-
-        // タッチ系4イベント（window監視の input.js へのバブリングを完全遮断）
-        elSoundBtn.addEventListener('touchstart', (e) => {
-            e.stopPropagation();
-            if (e.touches && e.touches.length > 0) {
-                soundTouchStartX = e.touches[0].clientX;
-                soundTouchStartY = e.touches[0].clientY;
-                isSoundTouchActive = true;
-            }
-        }, { passive: true });
-
-        elSoundBtn.addEventListener('touchmove', (e) => {
-            e.stopPropagation();
-        }, { passive: true });
-
-        elSoundBtn.addEventListener('touchend', (e) => {
-            e.stopPropagation();
-            if (!isSoundTouchActive) return;
-            isSoundTouchActive = false;
-
-            if (e.changedTouches && e.changedTouches.length > 0) {
-                const dx = e.changedTouches[0].clientX - soundTouchStartX;
-                const dy = e.changedTouches[0].clientY - soundTouchStartY;
-                const moveDist = Math.sqrt(dx * dx + dy * dy);
-                if (moveDist <= 24) {
-                    if (e.cancelable) {
-                        e.preventDefault();
-                    }
-                    triggerSoundToggle();
-                }
-            }
-        }, { passive: false });
-
-        elSoundBtn.addEventListener('touchcancel', (e) => {
-            e.stopPropagation();
-            isSoundTouchActive = false;
-        }, { passive: true });
-    }
-
-    // =========================================================
-    // GRAVITY規格: ボタンタグを避け、<div> + stopPropagation でリトライを実装
-    // iOS / GRAVITY WebView での1タップ確実反応（touchend）と二重発火防止を追加
-    // =========================================================
-    if (elRetryBtn) {
-        let lastRetryTime = 0;
-        let touchStartX = 0;
-        let touchStartY = 0;
-        let isTouchActive = false;
-
-        const triggerRetry = () => {
-            const now = Date.now();
-            // touchend と直後の合成 click による二重発火を防止
-            if (now - lastRetryTime < 350) return;
-            lastRetryTime = now;
+    // 5. リトライボタンの安全タップバインド（GRAVITY規格: <div> + stopPropagation + touchcancel保護）
+    bindSafeTap(elRetryBtn, () => {
+        if (typeof onRetryCallback === 'function') {
             onRetryCallback();
-        };
-
-        // PC向けクリックイベント
-        elRetryBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            triggerRetry();
-        });
-
-        // スマホ向けタッチ開始イベント（バブリング遮断と開始座標記録）
-        elRetryBtn.addEventListener('touchstart', (e) => {
-            e.stopPropagation();
-            if (e.touches && e.touches.length > 0) {
-                touchStartX = e.touches[0].clientX;
-                touchStartY = e.touches[0].clientY;
-                isTouchActive = true;
-            }
-        }, { passive: true });
-
-        // スマホ・iOS WebView向けタッチ終了イベント（わずかな指のズレを許容して確実に反応）
-        elRetryBtn.addEventListener('touchend', (e) => {
-            e.stopPropagation();
-            if (!isTouchActive) return;
-            isTouchActive = false;
-
-            if (e.changedTouches && e.changedTouches.length > 0) {
-                const dx = e.changedTouches[0].clientX - touchStartX;
-                const dy = e.changedTouches[0].clientY - touchStartY;
-                const moveDist = Math.sqrt(dx * dx + dy * dy);
-                // 指のズレが24px以内ならタップとみなして発火
-                if (moveDist <= 24) {
-                    if (e.cancelable) {
-                        e.preventDefault();
-                    }
-                    triggerRetry();
-                }
-            }
-        }, { passive: false });
-    }
+        }
+    }, { preventTouchMove: false });
 }
 
 /**
