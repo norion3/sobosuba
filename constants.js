@@ -1,9 +1,8 @@
 /**
  * constants.js
- * @version v7.4 (Vertical Restore Force, Water-Balloon Balance & Extended Merge Timing - Phase 1)
+ * @version v7.6 (Small Jelly Pressure & Shape Boost Constants - Phase 1)
  * @changes
- *   - 正常な角丸多角形の密着感を維持しつつ横潰れ時のみ的確に縦へ押し返すため、縦潰れ限定ガードおよび水風船・バンパー定数を微調整（SKIN_STIFFNESS: 0.325 / BEND_STIFFNESS: 0.17 / TARGET_AREA_RATIO: 1.015 / SOFTBODY_PRESSURE: 0.0040 / PRESSURE_NONLINEAR_THRESHOLD: 0.09 / PRESSURE_NONLINEAR_GAIN: 15.0 / PRESSURE_RATIO_MAX: 5.8 / BULK_DAMPING: 0.00080 / SOFTBODY_MIN_DIST_RATIO: 0.78 / MIN_DIST_RESTORE_FORCE: 0.00068 新設 / BUMPER_STIFFNESS: 0.0058）
- *   - くっつき→真っ白→ゆっくり色戻りの「間」を絶妙に延長するため、EFFECTS（MERGE_ANTICIPATION_MIN_MS: 80 / MERGE_ANTICIPATION_MAX_MS: 145 / MERGE_AREA_DELAY_FACTOR: 0.011 / MERGE_PROTECT_MIN_MS: 680 / MERGE_PROTECT_MAX_MS: 1200 / MERGE_PROTECT_AREA_FACTOR: 0.023 / MERGE_WHITE_HOLD_RATIO: 0.30）および SCORE.CHAIN_WINDOW_MS（2100）を更新
+ *   - 下段で大塊に挟まれて潰れやすい小塊（1〜16）のみを半径に応じた連続係数で耐圧補強し、32以上の大塊および上段フロートバーの現行バランスを完全保護するため、PHYSICS へ 6項目（SMALL_BOOST_REF_RADIUS: 41.5 / SMALL_SKIN_BOOST: 0.09 / SMALL_BEND_BOOST: 0.18 / SMALL_PRESSURE_MULT: 1.16 / SMALL_RESTORE_MULT: 3.5 / SMALL_MIN_DIST_RATIO_BOOST: 0.06）を追加
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -118,6 +117,14 @@ export const PHYSICS = {
     INVERSION_AREA_RATIO: 0.18,   // 極限裏返り時のみ作動する穏健な自動修復閾値
     SOFTBODY_MIN_DIST_RATIO: 0.78,// 角丸多角形密着を保護しつつ横潰れ時のみ縦へ押し返す最小距離比率
     MIN_DIST_RESTORE_FORCE: 0.00068, // 横潰れ限定ガードの縦方向復元力係数
+
+    // 小塊（1〜16）下段限定・連続耐圧補強定数（32以上および上段フロートバーは完全不変）
+    SMALL_BOOST_REF_RADIUS: 41.5,    // ブースト減衰の基準半径（32以上で係数0.0）
+    SMALL_SKIN_BOOST: 0.09,          // 最小塊（1）下段時の皮剛性加算量
+    SMALL_BEND_BOOST: 0.18,          // 最小塊（1）下段時の曲げ剛性加算量
+    SMALL_PRESSURE_MULT: 1.16,       // 最小塊（1）下段時の内圧・体積粘性倍率
+    SMALL_RESTORE_MULT: 3.5,         // 最小塊（1）下段時の最小距離復元力倍率
+    SMALL_MIN_DIST_RATIO_BOOST: 0.06,// 最小塊（1）下段時の最小距離比率加算量
 
     // 遅延適応的圧迫ダンピング（着地直後のボヨヨン揺れ保護 ＆ 下敷き静寂化）
     SETTLE_SPEED_THRESHOLD: 0.22, // 全体静止とみなす重心速度閾値（px/frame）

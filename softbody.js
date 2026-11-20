@@ -1,9 +1,10 @@
 /**
  * softbody.js
- * @version v7.4 (Vertical Restore Force & Continuous Min-Dist Blend - Phase 2)
+ * @version v7.6 (Small Jelly Continuous Field Boost & Morph Stiffness Sync - Phase 2)
  * @changes
- *   - applyVolumeAndShapeForces() 内の最小距離復元（横潰れ限定ガード）が PHYSICS.MIN_DIST_RESTORE_FORCE（0.00068）および新フォールバック（SOFTBODY_MIN_DIST_RATIO: 0.78）を参照するよう更新
- *   - 上段カプセル発射直後の過剰反発バグを防止するため、effectiveMinRadius の算出を isFloating 0/1 切替から comp.shapeBlend による連続補間へ変更（上段の液体感・発射モーフィングを完全保護）
+ *   - createSoftBodyJelly() で半径に応じた連続ブースト因子 smallBoostFactor（ゼロ除算防止ガード付き、1 で 1.0 〜 32 以上で 0.0）を算出して comp へ保持し、初期の skinConstraints / bendConstraints 剛性へ下段係数 fieldSmallFactor = smallBoostFactor * (1 - initialShapeBlend) を適用（上段スポーン時は加算 0 で液体感を 100% 保護）
+ *   - updateGrowAndMorphConstraints() でモーフィング進行（shapeBlend）に連動して skinConstraints / bendConstraints の stiffness も滑らかに補間更新（定常時 CPU 負荷ゼロ）
+ *   - applyVolumeAndShapeForces() で下段係数 fieldSmallFactor = smallBoostFactor * (1 - shapeBlend) を用い、下段にいる小塊（1〜16）のみ内圧・体積粘性・最小距離比率・最小距離復元力を連続ブースト（32 以上の大塊および上段フロートバーの現行バランスを完全保護）
  * 
  * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
@@ -292,6 +293,11 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     const densityExp = (PHYSICS.DENSITY_SCALE_EXP !== undefined) ? PHYSICS.DENSITY_SCALE_EXP : 0.65;
     const scaledDensity = (PHYSICS.DENSITY_PARTICLE || 0.0012) * Math.pow(baseRadius / Math.max(baseRadius, radius), densityExp);
 
+    // 小塊（1〜16）下段限定の連続耐圧補強因子を算出（32以上は 0.0、ゼロ除算防止ガード付き）
+    const refBoostRadius = (PHYSICS.SMALL_BOOST_REF_RADIUS !== undefined) ? PHYSICS.SMALL_BOOST_REF_RADIUS : 41.5;
+    const boostSpan = Math.max(1, refBoostRadius - baseRadius);
+    const smallBoostFactor = Math.max(0, Math.min(1, (refBoostRadius - radius) / boostSpan));
+
     // 上段横長カプセル用の外縁寸法とリング中心軌跡を事前算出
     const capExtents = getCapsuleHalfExtentsForValue(value);
     const capRingHalfH = Math.max(3.5, capExtents.halfHeight - particleRadius);
@@ -330,6 +336,13 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     const initialShapeBlend = isFloating ? 1.0 : 0.0;
     const initialCategory = isFloating ? COLLISION_CATEGORY.BAR_FLOATING : COLLISION_CATEGORY.FIELD_JELLY;
     const initialMask = getCollisionMaskForCategory(initialCategory);
+
+    // 上段スポーン時（initialShapeBlend = 1.0）は加算 0 で液体感を 100% 保護し、下段生成時のみ小塊剛性を適用
+    const initialFieldSmallFactor = smallBoostFactor * (1 - initialShapeBlend);
+    const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.09;
+    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.18;
+    const initialSkinStiffness = PHYSICS.SKIN_STIFFNESS + smallSkinBoost * initialFieldSmallFactor;
+    const initialBendStiffness = PHYSICS.BEND_STIFFNESS + smallBendBoost * initialFieldSmallFactor;
 
     // ソフトボディ全体をまとめるコンポジット（複合体）
     const jellyComposite = Composite.create({ label: 'jelly_composite' });
@@ -390,7 +403,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
             bodyA: p1,
             bodyB: p2,
             length: baseSegLen * clampedStartScale,
-            stiffness: PHYSICS.SKIN_STIFFNESS,
+            stiffness: initialSkinStiffness,
             damping: PHYSICS.SOFTBODY_DAMPING,
             render: { visible: false }
         });
@@ -411,7 +424,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
             bodyA: p1,
             bodyB: p2,
             length: baseBendLen * clampedStartScale,
-            stiffness: PHYSICS.BEND_STIFFNESS,
+            stiffness: initialBendStiffness,
             damping: PHYSICS.SOFTBODY_DAMPING,
             render: { visible: false }
         });
@@ -442,6 +455,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     jellyComposite.particles = particles;
     jellyComposite.skinConstraints = skinConstraints;
     jellyComposite.bendConstraints = bendConstraints;
+    jellyComposite.smallBoostFactor = smallBoostFactor;
 
     // 形状・サイズ関連メタデータ（円形 ⇔ 横長カプセル両対応）
     jellyComposite.targetRadius = radius;
@@ -744,6 +758,14 @@ function updateGrowAndMorphConstraints(comp, now) {
     const curScale = comp.currentGrowScale || 1.0;
     const blend = (comp.shapeBlend !== undefined) ? comp.shapeBlend : (comp.isFloating ? 1 : 0);
 
+    // モーフィング進行（shapeBlend）に連動して小塊下段限定のバネ剛性を滑らか補間（定常時CPU負荷ゼロ）
+    const smallBoostFactor = comp.smallBoostFactor || 0;
+    const fieldSmallFactor = smallBoostFactor * (1 - blend);
+    const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.09;
+    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.18;
+    const syncedSkinStiffness = PHYSICS.SKIN_STIFFNESS + smallSkinBoost * fieldSmallFactor;
+    const syncedBendStiffness = PHYSICS.BEND_STIFFNESS + smallBendBoost * fieldSmallFactor;
+
     const circleArea = comp.fullTargetArea || (Math.PI * (comp.fullRingRadius || 16) ** 2);
     const capsuleArea = comp.capsuleTargetArea || circleArea;
     const blendedArea = circleArea + (capsuleArea - circleArea) * blend;
@@ -757,6 +779,7 @@ function updateGrowAndMorphConstraints(comp, now) {
         for (let j = 0; j < skinCs.length; j++) {
             const capLen = capSegs ? capSegs[j] : circSeg;
             skinCs[j].length = (circSeg + (capLen - circSeg) * blend) * curScale;
+            skinCs[j].stiffness = syncedSkinStiffness;
         }
     }
 
@@ -767,6 +790,7 @@ function updateGrowAndMorphConstraints(comp, now) {
         for (let j = 0; j < bendCs.length; j++) {
             const capLen = capBends ? capBends[j] : circBend;
             bendCs[j].length = (circBend + (capLen - circBend) * blend) * curScale;
+            bendCs[j].stiffness = syncedBendStiffness;
         }
     }
 }
@@ -969,6 +993,24 @@ function applyVolumeAndShapeForces(comp, geom) {
     }
 
     // (C) 強化非線形バルク内圧（平常時はトロッと液体、極限圧迫時のみ強い非圧縮反発で13倍荷重に耐える）
+    // comp.shapeBlend による連続補間で発射直後の過剰反発を防ぎつつ、下段小塊（1〜16）のみ連続耐圧補強を適用
+    const capRingMinRadius = Math.min(ringRadius, (comp.capsuleRingHalfHeight || ringRadius) * curScale);
+    const shapeBlend = (comp.shapeBlend !== undefined)
+        ? comp.shapeBlend
+        : ((comp.isFloating || comp.isBarHopping) ? 1 : 0);
+    const fieldSmallFactor = (comp.smallBoostFactor || 0) * (1 - shapeBlend);
+
+    const smallPressureMult = (PHYSICS.SMALL_PRESSURE_MULT !== undefined) ? PHYSICS.SMALL_PRESSURE_MULT : 1.16;
+    const smallRestoreMult = (PHYSICS.SMALL_RESTORE_MULT !== undefined) ? PHYSICS.SMALL_RESTORE_MULT : 3.5;
+    const smallMinDistBoost = (PHYSICS.SMALL_MIN_DIST_RATIO_BOOST !== undefined) ? PHYSICS.SMALL_MIN_DIST_RATIO_BOOST : 0.06;
+
+    const effectivePressureMult = 1 + (smallPressureMult - 1) * fieldSmallFactor;
+    const effectiveRestoreMult = 1 + (smallRestoreMult - 1) * fieldSmallFactor;
+    const effectivePressureCoeff = pressureCoeff * effectivePressureMult;
+    const effectiveBulkDamping = bulkDamping * effectivePressureMult;
+    const effectiveMinDistRatio = minDistRatio + smallMinDistBoost * fieldSmallFactor;
+    const effectiveMinDistRestoreForce = minDistRestoreForce * effectiveRestoreMult;
+
     const compression = (targetArea - signedArea) / Math.max(1, targetArea);
     let effectiveRatio = compression;
     if (compression > nlThreshold) {
@@ -978,15 +1020,10 @@ function applyVolumeAndShapeForces(comp, geom) {
     if (effectiveRatio > pressureMax) effectiveRatio = pressureMax;
     else if (effectiveRatio < -0.8) effectiveRatio = -0.8;
 
-    const pressureStrength = effectiveRatio * pressureCoeff * 5.0;
+    const pressureStrength = effectiveRatio * effectivePressureCoeff * 5.0;
 
-    // comp.shapeBlend による連続補間で発射直後の過剰反発を防ぎつつ、上段液体感・横潰れ限定ガードを安全算出
-    const capRingMinRadius = Math.min(ringRadius, (comp.capsuleRingHalfHeight || ringRadius) * curScale);
-    const shapeBlend = (comp.shapeBlend !== undefined)
-        ? comp.shapeBlend
-        : ((comp.isFloating || comp.isBarHopping) ? 1 : 0);
     const effectiveMinRadius = ringRadius + (capRingMinRadius - ringRadius) * shapeBlend;
-    const minDist = effectiveMinRadius * minDistRatio;
+    const minDist = effectiveMinRadius * effectiveMinDistRatio;
 
     for (let j = 0; j < n; j++) {
         const pPrev = particles[(j - 1 + n) % n].position;
@@ -1025,11 +1062,11 @@ function applyVolumeAndShapeForces(comp, geom) {
         let forceY = ny * pressureStrength * pCurr.mass;
 
         // 2. 体積粘性（BULK_DAMPING）：重心速度（飛行・滑り）を阻害せず半径方向ビビリ振動のみ吸収
-        if (bulkDamping > 0) {
+        if (effectiveBulkDamping > 0) {
             const relVx = pCurr.velocity.x - centVx;
             const relVy = pCurr.velocity.y - centVy;
             const vn = relVx * nx + relVy * ny;
-            const dampForce = -vn * bulkDamping * pCurr.mass;
+            const dampForce = -vn * effectiveBulkDamping * pCurr.mass;
             forceX += nx * dampForce;
             forceY += ny * dampForce;
         }
@@ -1037,7 +1074,7 @@ function applyVolumeAndShapeForces(comp, geom) {
         // 3. 最小距離復元（横潰れ限定ガード：縦方向への踏ん張りと過度なめり込みを防止）
         if (dist < minDist) {
             const overlap = minDist - dist;
-            const restoreMag = overlap * minDistRestoreForce * pCurr.mass;
+            const restoreMag = overlap * effectiveMinDistRestoreForce * pCurr.mass;
             forceX += radialX * restoreMag;
             forceY += radialY * restoreMag;
         }

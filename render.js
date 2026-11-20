@@ -1,9 +1,10 @@
 /**
  * render.js
- * @version v7.4 (Merge Pre-Glow Continuity & Flash Fallback Sync - Phase 4)
+ * @version v7.6 (Two-Pass Foreground Text Rendering & Max-Inscribed Center Placement - Phase 3)
  * @changes
- *   - 合体前の「吸い付きの間」予兆発光の白み上昇を 0.12 + prog * 0.36 から 0.15 + prog * 0.43（最大 0.58）へ滑らか化し、完全真っ白フラッシュへの視覚的連続性を向上
- *   - 最終確定版 v7.4 の合体の間定数（吸い付き 80〜145ms / 保護 680〜1200ms / 白保持比率 0.30）に合わせ、drawSingleSoftBody() 内のフォールバック値（80 / 680 / 0.30）を同期
+ *   - 事前確保バッファ deferredTextBuffer（ゼロアロケーション）を新設し、drawSoftBodies() の通常レイヤーを「全本体描画パス → 全数字テキスト最前面パス」へ分離することで、大塊の黒枠・本体による小塊数字の上書き隠れを根絶（2.5Dホップ中ゼリーは従来通り最前面レイヤーで影→本体→数字を描画）
+ *   - 外縁ポリゴン全辺までの最短距離二乗を算出する共通ヘルパー computeMinEdgeDistSq() を新設し、下段ゼリー限定（!comp.isFloating && !comp.isBarHopping）で重心がポリゴン外または狭い場合（centroidClearance < equivalentRadius * 0.58）に重複排除済みの最大内接円中心探索（1.18倍ヒステリシス＋重心近傍優先）を実行するよう改善
+ *   - 最大内接円探索でより広い移動先を採用した場合は effectiveThickness を移動先の真のクリアランス（bestClearance）で上書き更新し、広い空間に見合った見やすいフォントサイズを適用（既存デッドゾーン＋ローパス補間維持）
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -23,6 +24,20 @@ const outerPointsBuffer = Array.from({ length: INITIAL_OUTER_POINTS_CAPACITY }, 
 const smoothedPointsBuffer = Array.from({ length: INITIAL_OUTER_POINTS_CAPACITY }, () => ({ x: 0, y: 0 }));
 const hoppingCompositesBuffer = [];
 
+// 通常レイヤー「全本体描画 → 全数字最前面描画」2パス分離用の事前確保テキストバッファ
+const INITIAL_DEFERRED_TEXT_CAPACITY = 48;
+const deferredTextBuffer = Array.from({ length: INITIAL_DEFERRED_TEXT_CAPACITY }, () => ({
+    x: 0,
+    y: 0,
+    angle: 0,
+    scale: 1,
+    valueText: '',
+    fillStyle: '#000000',
+    alpha: 1,
+    font: ''
+}));
+let deferredTextCount = 0;
+
 /**
  * 事前確保した外縁座標バッファおよびスムージングバッファの容量が不足する場合のみ拡張する
  * @param {number} requiredCount
@@ -34,6 +49,86 @@ function ensureOuterPointsCapacity(requiredCount) {
     while (smoothedPointsBuffer.length < requiredCount) {
         smoothedPointsBuffer.push({ x: 0, y: 0 });
     }
+}
+
+/**
+ * 遅延テキスト描画バッファへ描画パラメータをゼロアロケーションで追加する
+ */
+function pushDeferredText(x, y, angle, scale, valueText, fillStyle, alpha, font) {
+    if (deferredTextCount >= deferredTextBuffer.length) {
+        deferredTextBuffer.push({
+            x: 0,
+            y: 0,
+            angle: 0,
+            scale: 1,
+            valueText: '',
+            fillStyle: '#000000',
+            alpha: 1,
+            font: ''
+        });
+    }
+    const item = deferredTextBuffer[deferredTextCount++];
+    item.x = x;
+    item.y = y;
+    item.angle = angle;
+    item.scale = scale;
+    item.valueText = valueText;
+    item.fillStyle = fillStyle;
+    item.alpha = alpha;
+    item.font = font;
+}
+
+/**
+ * 1件分のゼリー数字テキストを描画する共通ヘルパー
+ */
+function drawJellyTextItem(ctx, x, y, angle, scale, valueText, fillStyle, alpha, font) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = fillStyle;
+    ctx.globalAlpha = alpha;
+    ctx.font = font;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(valueText, 0, 0);
+    ctx.restore();
+}
+
+/**
+ * 点 (px, py) から外縁ポリゴン全辺（線分）までの最短距離の二乗を算出する軽量ヘルパー
+ * @param {number} px
+ * @param {number} py
+ * @param {Array<{x: number, y: number}>} pts
+ * @param {number} n
+ * @returns {number}
+ */
+function computeMinEdgeDistSq(px, py, pts, n) {
+    let minDistSq = Infinity;
+    for (let j = 0; j < n; j++) {
+        const p1 = pts[j];
+        const p2 = pts[(j + 1) % n];
+        const ex = p2.x - p1.x;
+        const ey = p2.y - p1.y;
+        const lenSq = ex * ex + ey * ey;
+
+        let t = 0;
+        if (lenSq > 1e-8) {
+            t = ((px - p1.x) * ex + (py - p1.y) * ey) / lenSq;
+            if (t < 0) t = 0;
+            else if (t > 1) t = 1;
+        }
+
+        const qx = p1.x + ex * t;
+        const qy = p1.y + ey * t;
+        const dx = px - qx;
+        const dy = py - qy;
+        const dSq = dx * dx + dy * dy;
+        if (dSq < minDistSq) {
+            minDistSq = dSq;
+        }
+    }
+    return minDistSq;
 }
 
 /**
@@ -299,7 +394,7 @@ function drawBumpersAndLedBars(ctx, bumperState) {
 // ==========================================
 // サブ関数 3：ソフトボディ（幾何外向き法線・収縮補正密着スムージング・ホップ最前面ポップアップ・合体真っ白フラッシュ）
 // ==========================================
-function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
+function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false) {
     let particles = comp.particles || null;
     if (!particles) {
         particles = [];
@@ -494,7 +589,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
 
     ctx.restore();
 
-    // 7. 数字の描画（面積等価半径ブレンド視認性改善 ＋ 位置・角度・サイズのデッドゾーン＆ローパス補間でブルブル振動根絶）
+    // 7. 数字の位置・サイズ算出（下段限定最大内接円探索 ＋ 位置・角度・サイズのデッドゾーン＆ローパス補間）
     // 真っ白フラッシュ中も太字黒文字（コントラスト比 21:1）をそのまま維持して描画
     let targetTextX = cx;
     let targetTextY = cy;
@@ -510,52 +605,90 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
     const outerArea = Math.abs(signedOuterArea) * 0.5;
     const equivalentRadius = Math.sqrt(Math.max(1, outerArea) / Math.PI);
 
-    if (!isPointInsidePolygon(targetTextX, targetTextY, smoothedPointsBuffer, n)) {
-        let bestDistSq = Infinity;
-        const halfN = Math.floor(n / 2);
-        let foundInside = false;
+    // 上段待機・ホップ中は横長カプセルでの誤移動を防ぐため探索をスキップし重心中央を維持
+    // 下段ゼリー限定で重心がポリゴン外、または重心付近が狭い（< 0.58 * equivalentRadius）場合に最大内接円中心を探索
+    if (!comp.isFloating && !isHopping) {
+        const centroidInside = isPointInsidePolygon(cx, cy, smoothedPointsBuffer, n);
+        const centroidClearanceSq = centroidInside
+            ? computeMinEdgeDistSq(cx, cy, smoothedPointsBuffer, n)
+            : 0;
+        const narrowThresh = equivalentRadius * 0.58;
 
-        for (let j = 0; j < n; j++) {
-            const pA = particles[j].position;
-            const pB = particles[(j + halfN) % n].position;
-            const mx = (pA.x + pB.x) * 0.5;
-            const my = (pA.y + pB.y) * 0.5;
-            if (isPointInsidePolygon(mx, my, smoothedPointsBuffer, n)) {
+        if (!centroidInside || centroidClearanceSq < narrowThresh * narrowThresh) {
+            const halfN = Math.floor(n / 2);
+            let bestX = cx;
+            let bestY = cy;
+            let bestClearSq = -1;
+            let bestCentDistSq = Infinity;
+            let foundInside = false;
+
+            // 候補(a)：重複排除済みの対角中点（0 〜 halfN - 1）
+            for (let j = 0; j < halfN; j++) {
+                const pA = particles[j].position;
+                const pB = particles[j + halfN].position;
+                const mx = (pA.x + pB.x) * 0.5;
+                const my = (pA.y + pB.y) * 0.5;
+                if (!isPointInsidePolygon(mx, my, smoothedPointsBuffer, n)) continue;
+
+                const clearSq = computeMinEdgeDistSq(mx, my, smoothedPointsBuffer, n);
                 const ddx = mx - cx;
                 const ddy = my - cy;
-                const dSq = ddx * ddx + ddy * ddy;
-                if (dSq < bestDistSq) {
-                    bestDistSq = dSq;
-                    targetTextX = mx;
-                    targetTextY = my;
+                const centDistSq = ddx * ddx + ddy * ddy;
+
+                if (clearSq > bestClearSq + 0.25 ||
+                    (Math.abs(clearSq - bestClearSq) <= 0.25 && centDistSq < bestCentDistSq)) {
+                    bestClearSq = clearSq;
+                    bestCentDistSq = centDistSq;
+                    bestX = mx;
+                    bestY = my;
                     foundInside = true;
                 }
             }
-        }
 
-        if (!foundInside) {
-            let nearestSq = Infinity;
-            for (let j = 0; j < n; j++) {
+            // 候補(b)：間引き頂点（step = 2）と重心の中点
+            for (let j = 0; j < n; j += 2) {
                 const p = particles[j].position;
-                const ddx = p.x - cx;
-                const ddy = p.y - cy;
-                const dSq = ddx * ddx + ddy * ddy;
-                if (dSq < nearestSq) {
-                    nearestSq = dSq;
-                    targetTextX = p.x;
-                    targetTextY = p.y;
+                const mx = (p.x + cx) * 0.5;
+                const my = (p.y + cy) * 0.5;
+                if (!isPointInsidePolygon(mx, my, smoothedPointsBuffer, n)) continue;
+
+                const clearSq = computeMinEdgeDistSq(mx, my, smoothedPointsBuffer, n);
+                const ddx = mx - cx;
+                const ddy = my - cy;
+                const centDistSq = ddx * ddx + ddy * ddy;
+
+                if (clearSq > bestClearSq + 0.25 ||
+                    (Math.abs(clearSq - bestClearSq) <= 0.25 && centDistSq < bestCentDistSq)) {
+                    bestClearSq = clearSq;
+                    bestCentDistSq = centDistSq;
+                    bestX = mx;
+                    bestY = my;
+                    foundInside = true;
                 }
             }
-            effectiveThickness = Math.min(effectiveThickness, pRadius * 1.4);
-        } else {
-            let correctedMin = Infinity;
-            for (let j = 0; j < n; j++) {
-                const ox = smoothedPointsBuffer[j].x - targetTextX;
-                const oy = smoothedPointsBuffer[j].y - targetTextY;
-                const d = Math.sqrt(ox * ox + oy * oy);
-                if (d < correctedMin) correctedMin = d;
+
+            if (foundInside) {
+                // 重心がポリゴン内の場合は 1.18 倍（二乗 1.3924 倍）ヒステリシスを満たす場合のみ移動し振り子振動を防止
+                if (!centroidInside || bestClearSq > centroidClearanceSq * 1.3924) {
+                    targetTextX = bestX;
+                    targetTextY = bestY;
+                    effectiveThickness = Math.sqrt(bestClearSq);
+                }
+            } else if (!centroidInside) {
+                let nearestSq = Infinity;
+                for (let j = 0; j < n; j++) {
+                    const p = particles[j].position;
+                    const ddx = p.x - cx;
+                    const ddy = p.y - cy;
+                    const dSq = ddx * ddx + ddy * ddy;
+                    if (dSq < nearestSq) {
+                        nearestSq = dSq;
+                        targetTextX = p.x;
+                        targetTextY = p.y;
+                    }
+                }
+                effectiveThickness = Math.min(effectiveThickness, pRadius * 1.4);
             }
-            effectiveThickness = Math.min(effectiveThickness, correctedMin);
         }
     }
 
@@ -611,21 +744,17 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
     }
     const fontSize = comp._renderFontSize;
 
-    ctx.save();
-    ctx.translate(textX, textY);
-    ctx.rotate(displayAngle);
-    ctx.scale(scale, scale);
-
     const isMerged = Boolean(comp.hasMerged);
+    const fillStyle = config.text || ACTIVE_THEME.text || '#000000';
+    const textAlpha = isMerged ? 1.0 : renderMeta.unmergedAlpha;
+    const fontStr = `${isMerged ? '900' : '600'} ${fontSize.toFixed(1)}px "Courier New", Courier, monospace`;
 
-    // 本家準拠＋視認性強化：未合体は中太（600）・透明度0.72（スコア未加算）、合体済みは極太（900）・不透明（スコア加算済み）
-    ctx.fillStyle = config.text || ACTIVE_THEME.text || '#000000';
-    ctx.globalAlpha = isMerged ? 1.0 : renderMeta.unmergedAlpha;
-    ctx.font = `${isMerged ? '900' : '600'} ${fontSize.toFixed(1)}px "Courier New", Courier, monospace`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(valueText, 0, 0);
-    ctx.restore();
+    // 通常レイヤーは全本体描画後に最前面へまとめて描画し、ホップ飛行中ゼリーはそのまま最前面で即時描画
+    if (deferText) {
+        pushDeferredText(textX, textY, displayAngle, scale, valueText, fillStyle, textAlpha, fontStr);
+    } else {
+        drawJellyTextItem(ctx, textX, textY, displayAngle, scale, valueText, fillStyle, textAlpha, fontStr);
+    }
 }
 
 function drawSoftBodies(ctx, composites, gameState) {
@@ -644,8 +773,9 @@ function drawSoftBodies(ctx, composites, gameState) {
         resonanceLineWidth: 8.5 + pulseWave * 2.5
     };
 
-    // 1パス目：通常レイヤー（下段フィールド内 ＋ 上段待機中ゼリー）を描画し、ホップ中を後回しへ退避
+    // 1パス目：通常レイヤー（下段フィールド内 ＋ 上段待機中ゼリー）の全本体を描画し、数字はバッファへ退避
     hoppingCompositesBuffer.length = 0;
+    deferredTextCount = 0;
     for (let i = 0; i < composites.length; i++) {
         const comp = composites[i];
         if (!comp || comp.label !== 'jelly_composite') continue;
@@ -654,12 +784,19 @@ function drawSoftBodies(ctx, composites, gameState) {
             hoppingCompositesBuffer.push(comp);
             continue;
         }
-        drawSingleSoftBody(ctx, comp, gameState, renderMeta);
+        drawSingleSoftBody(ctx, comp, gameState, renderMeta, true);
     }
 
-    // 2パス目：2.5D上段飛び越えホップ飛行中のゼリーを最前面レイヤーとして描画
+    // 2パス目：通常レイヤーの全数字テキストを最前面へまとめて描画（大塊の黒枠・本体による小塊数字の上書き隠れを根絶）
+    for (let i = 0; i < deferredTextCount; i++) {
+        const item = deferredTextBuffer[i];
+        drawJellyTextItem(ctx, item.x, item.y, item.angle, item.scale, item.valueText, item.fillStyle, item.alpha, item.font);
+    }
+    deferredTextCount = 0;
+
+    // 3パス目：2.5D上段飛び越えホップ飛行中のゼリーを最前面レイヤーとして描画（影 → 本体 → 数字）
     for (let i = 0; i < hoppingCompositesBuffer.length; i++) {
-        drawSingleSoftBody(ctx, hoppingCompositesBuffer[i], gameState, renderMeta);
+        drawSingleSoftBody(ctx, hoppingCompositesBuffer[i], gameState, renderMeta, false);
     }
     hoppingCompositesBuffer.length = 0;
 }
@@ -876,7 +1013,7 @@ export function renderGame(ctx, world, gameState, bumperState) {
     // 2. 内壁厳密クリップ半円バンパー ＆ フレーム内「幅 5px 角丸赤点灯サイドバー」
     drawBumpersAndLedBars(ctx, bumperState);
 
-    // 3. ソフトボディ本体（通常レイヤー ＋ ホップ最前面レイヤー）
+    // 3. ソフトボディ本体（通常レイヤー全本体 → 通常レイヤー全数字最前面 → ホップ最前面レイヤー）
     drawSoftBodies(ctx, composites, gameState);
 
     // 4. 順方向ダイレクトエイム矢印・ホップ予測ドット・オフセットガイド
