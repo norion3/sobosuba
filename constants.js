@@ -1,12 +1,13 @@
 /**
  * constants.js
- * @version v7.9 (Size Curve Enlargement, Multi-Layer Pressure & Anti-Overlap Tuning - Phase 1)
+ * @version v8.0 (Air Super-Fluid & Settled Large-Jelly Pressure Constants - Phase 1)
  * @changes
- *   - 序〜中盤の積み上がり感と視認性を向上しつつ全15段階の空間回収率（34.4%〜36.5%）を維持するため、JELLY_CONFIG の全16段階半径を確定カーブ（1: 24.0 〜 64: 51.5 〜 16384: 148.0 〜 32768: 166.0）へ更新し、上段カプセル帯半高 FLOAT_BAR.CHANNEL_HALF_HEIGHT を 22 → 25 へ同期
- *   - 多層積層時の潰れ耐性および1〜64の連続耐圧補強を強化するため、PHYSICS（DENSITY_SCALE_EXP: 0.85 / SOFTBODY_PRESSURE: 0.00415 / PRESSURE_NONLINEAR_GAIN: 16.0 / PRESSURE_RATIO_MAX: 6.4 / BULK_DAMPING: 0.00086 / SMALL_BOOST_REF_RADIUS: 58.5 / SMALL_SKIN_BOOST: 0.10 / SMALL_BEND_BOOST: 0.20 / SMALL_RESTORE_MULT: 3.6 / ANTI_OVERLAP_STIFFNESS: 0.68 / ANTI_OVERLAP_MAX_PUSH: 3.8 / OVERLAP_SLOP: 0.35）を更新（SMALL_PRESSURE_MULT / BUMPER_DENSITY / BUMPER_STIFFNESS は現行維持）
+ *   - 下段定着後の大塊（128〜1024+）を含む全サイズ耐圧底上げのため、PHYSICS の既存3項目（TARGET_AREA_RATIO: 1.02 / PRESSURE_NONLINEAR_THRESHOLD: 0.08 / PRESSURE_RATIO_MAX: 7.0）を更新し、下段定着基準定数6項目（SETTLED_SKIN_STIFFNESS: 0.350 / SETTLED_BEND_STIFFNESS: 0.205 / SETTLED_PRESSURE: 0.00450 / SETTLED_BULK_DAMPING: 0.00090 / SETTLED_MIN_DIST_RATIO: 0.800 / SETTLED_RESTORE_FORCE: 0.00092）を追加
+ *   - 上段発射から着地インパクト直後までの本家風・超液体挙動を解放するため、PHYSICS へ空中超液体定数9項目（AIR_SKIN_STIFFNESS: 0.26 / AIR_BEND_STIFFNESS: 0.115 / AIR_PRESSURE: 0.0033 / AIR_BULK_DAMPING: 0.00048 / AIR_MIN_DIST_RATIO: 0.65 / AIR_RESTORE_FORCE: 0.00032 / LAND_SOFT_HOLD_MS: 120 / LAND_FIRM_RAMP_MS: 320 / LAND_FAILSAFE_MS: 1800）を追加
+ *   - 下段定着基準の引き上げに合わせて、PHYSICS の小〜中塊（1〜64）加算定数5項目（SMALL_SKIN_BOOST: 0.085 / SMALL_BEND_BOOST: 0.170 / SMALL_PRESSURE_MULT: 1.02 / SMALL_RESTORE_MULT: 2.8 / SMALL_MIN_DIST_RATIO_BOOST: 0.050）を再正規化（上段待機・ホップ基準値およびその他定数は完全現行維持）
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
- * v7.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
+ * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
  */
 
 // ==========================================
@@ -101,31 +102,50 @@ export const PHYSICS = {
     DENSITY_SCALE_EXP: 0.85,      // 圧潰荷重比を抑え多層積層時の小〜中塊圧壊を防ぐ密度スケーリング指数
     BEAD_RADIUS_RATIO: 0.18,      // 全体半径に対する細密外周ビーズ半径の基準比率
     BEAD_MIN_OVERLAP_RATIO: 1.35, // 隣接ビーズ直径 >= 1.35 * 辺長 を保証する隙間ゼロ比率
-    SKIN_STIFFNESS: 0.325,        // 水風船の流動感とくびれ・奇形防止を両立する皮の張り剛性
-    BEND_STIFFNESS: 0.17,         // 液体的な密着変形とフック・くびれ奇形根絶を両立する1つ飛ばし曲げ拘束
+    SKIN_STIFFNESS: 0.325,        // 上段待機・ホップ基準：水風船の流動感とくびれ・奇形防止を両立する皮の張り剛性
+    BEND_STIFFNESS: 0.17,         // 上段待機・ホップ基準：液体的な密着変形とフック・くびれ奇形根絶を両立する1つ飛ばし曲げ拘束
     SOFTBODY_DAMPING: 0.02,       // SUBSTEPS=4 正規化済みの低バネ減衰
 
     // PBD位置ワープ・真円形状保持の完全撤廃 ＋ 強化非線形バルク内圧 ＋ 体積粘性
-    TARGET_AREA_RATIO: 1.015,     // 水風船の非圧縮体積をしっかり保つ目標面積比
+    TARGET_AREA_RATIO: 1.02,      // 水風船の非圧縮体積をしっかり保つ目標面積比
     PBD_AREA_STIFFNESS: 0,        // 永久微振動の原因となるPBD位置ワープを完全撤廃
     PBD_MAX_CORRECTION: 0,        // PBD位置ワープ上限0（純粋な力ベース内圧へ完全移行）
-    SOFTBODY_PRESSURE: 0.00415,   // 主軸となる力ベース内部圧力係数（水風船の張りと多層積層時の積み上がりを確保）
+    SOFTBODY_PRESSURE: 0.00415,   // 上段待機・ホップ基準の力ベース内部圧力係数
     PRESSURE_NONLINEAR_GAIN: 16.0,// 面積圧縮時に水らしい非圧縮性を発揮する非線形バルク反発係数
-    PRESSURE_NONLINEAR_THRESHOLD: 0.09, // 面積9%圧縮から非線形バルク反発が立ち上がる圧縮率閾値
-    PRESSURE_RATIO_MAX: 6.4,      // 陽的積分安定性を守りつつ多層底層圧壊を防ぐ圧力比上限クランプ
-    BULK_DAMPING: 0.00086,        // 内圧強化に合わせて半径方向ビビリ振動のみ吸収する体積粘性
+    PRESSURE_NONLINEAR_THRESHOLD: 0.08, // 面積8%圧縮から非線形バルク反発が立ち上がる圧縮率閾値
+    PRESSURE_RATIO_MAX: 7.0,      // 陽的積分安定性を守りつつ多層底層圧壊を防ぐ圧力比上限クランプ
+    BULK_DAMPING: 0.00086,        // 上段待機・ホップ基準の半径方向ビビリ振動吸収用体積粘性
     SHAPE_MATCH_STIFFNESS: 0,     // 液体感を阻害する真円への記憶（Shape Matching）を完全撤廃
     INVERSION_AREA_RATIO: 0.18,   // 極限裏返り時のみ作動する穏健な自動修復閾値
-    SOFTBODY_MIN_DIST_RATIO: 0.78,// 角丸多角形密着を保護しつつ横潰れ時のみ縦へ押し返す最小距離比率
-    MIN_DIST_RESTORE_FORCE: 0.00068, // 横潰れ限定ガードの縦方向復元力係数
+    SOFTBODY_MIN_DIST_RATIO: 0.78,// 上段待機・ホップ基準の最小距離比率
+    MIN_DIST_RESTORE_FORCE: 0.00068, // 上段待機・ホップ基準の横潰れ限定ガード復元力係数
 
-    // 小〜中塊（1〜64）下段限定・連続耐圧補強定数（128以上および上段フロートバーは完全不変）
+    // 空中落下 〜 着地インパクト直後の超液体モード定数（上段発射ゼリー限定・本家風の液体たわみ解放）
+    AIR_SKIN_STIFFNESS: 0.26,     // 空中・着地インパクト時の柔らかい皮の張り剛性
+    AIR_BEND_STIFFNESS: 0.115,    // 空中・着地インパクト時の大胆な液体たわみを許容する曲げ拘束
+    AIR_PRESSURE: 0.0033,         // 空中・着地インパクト時の柔軟な内部圧力係数
+    AIR_BULK_DAMPING: 0.00048,    // 着地瞬間の「ぶよよ〜ん」を殺さない控えめな体積粘性
+    AIR_MIN_DIST_RATIO: 0.65,     // 着地時のスクウォッシュ＆ストレッチを解放する最小距離比率
+    AIR_RESTORE_FORCE: 0.00032,   // 空中・着地インパクト時の穏やかな最小距離復元力係数
+    LAND_SOFT_HOLD_MS: 120,       // 初着地後に超液体インパクトを保持する時間（ms）
+    LAND_FIRM_RAMP_MS: 320,       // ホールド後に下段定着耐圧へ Smoothstep 移行する時間（ms）
+    LAND_FAILSAFE_MS: 1800,       // 万が一未接触が続いた場合の安全着地フェイルセーフ時間（ms）
+
+    // 下段定着・大塊（128〜1024+）耐圧底上げ基準定数（真円記憶なし・角丸密着維持で潰れにくく調整）
+    SETTLED_SKIN_STIFFNESS: 0.350,// 下段定着時の皮の張り基準剛性（128+ 基準）
+    SETTLED_BEND_STIFFNESS: 0.205,// 下段定着時の曲げ基準剛性（128+ 基準・くびれ防止と角丸密着の両立）
+    SETTLED_PRESSURE: 0.00450,    // 下段定着時の力ベース内部圧力基準係数（128+ 基準）
+    SETTLED_BULK_DAMPING: 0.00090,// 下段定着時の半径方向ビビリ振動吸収用体積粘性（128+ 基準）
+    SETTLED_MIN_DIST_RATIO: 0.800,// 下段定着時の横潰れ限定ガード最小距離比率（128+ 基準）
+    SETTLED_RESTORE_FORCE: 0.00092,// 下段定着時の横潰れ限定ガード復元力係数（128+ 基準）
+
+    // 小〜中塊（1〜64）下段定着限定・連続耐圧補強定数（128以上および上段フロートバーは加算0）
     SMALL_BOOST_REF_RADIUS: 58.5,    // ブースト減衰の基準半径（128以上で係数0.0）
-    SMALL_SKIN_BOOST: 0.10,          // 最小塊（1）下段時の皮剛性加算量
-    SMALL_BEND_BOOST: 0.20,          // 最小塊（1）下段時の曲げ剛性加算量
-    SMALL_PRESSURE_MULT: 1.16,       // 最小塊（1）下段時の内圧・体積粘性倍率
-    SMALL_RESTORE_MULT: 3.6,         // 最小塊（1）下段時の最小距離復元力倍率
-    SMALL_MIN_DIST_RATIO_BOOST: 0.06,// 最小塊（1）下段時の最小距離比率加算量
+    SMALL_SKIN_BOOST: 0.085,         // 最小塊（1）下段定着時の皮剛性加算量
+    SMALL_BEND_BOOST: 0.170,         // 最小塊（1）下段定着時の曲げ剛性加算量
+    SMALL_PRESSURE_MULT: 1.02,       // 最小塊（1）下段定着時の内圧・体積粘性倍率
+    SMALL_RESTORE_MULT: 2.8,         // 最小塊（1）下段定着時の最小距離復元力倍率
+    SMALL_MIN_DIST_RATIO_BOOST: 0.050,// 最小塊（1）下段定着時の最小距離比率加算量
 
     // 遅延適応的圧迫ダンピング（着地直後のボヨヨン揺れ保護 ＆ 下敷き静寂化）
     SETTLE_SPEED_THRESHOLD: 0.22, // 全体静止とみなす重心速度閾値（px/frame）

@@ -1,8 +1,8 @@
 /**
  * input.js
- * @version v7.2 (Focus Loss & Visibility Interruption Touch Reset - Phase 6)
+ * @version v8.0 (Start Overlay & Sound Button Canvas Input Exclusion - Phase 4)
  * @changes
- *   - ドラッグ中のOS通知・アプリ切替・タブ非表示によって touchend / touchcancel が欠落しても操作不能にならないよう、window.blur および document.visibilitychange リスナーを追加し activeTouchId とドラッグ状態を安全リセットするよう修正
+ *   - isIgnoredUITarget(target) の除外対象セレクタに #startOverlay と #soundToggleBtn を追加し、開始画面および音量ボタン上のタップ／クリック操作が Canvas エイム操作へ貫通するのを遮断
  * 
  * タッチ/マウス操作の追従、順方向ダイレクトエイムの座標・ベクトル計算、
  * およびWebKit特有の余白ドラッグ(ラバーバンド)の物理遮断を管理する入力モジュール
@@ -61,10 +61,14 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
     }
 
     /**
-     * ゲームオーバーUIなど、Canvas操作を除外すべきUI要素上のイベントか判定
+     * 開始画面・ゲームオーバーUI・音量ボタンなど、Canvas操作を除外すべきUI要素上のイベントか判定
      */
     function isIgnoredUITarget(target) {
-        return Boolean(target && typeof target.closest === 'function' && target.closest('#gameOverUI'));
+        return Boolean(
+            target &&
+            typeof target.closest === 'function' &&
+            target.closest('#gameOverUI, #startOverlay, #soundToggleBtn')
+        );
     }
 
     /**

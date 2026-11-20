@@ -1,9 +1,8 @@
 /**
  * jelly.js
- * @version v7.9 (Merge Spawn Containment Prevention & Wall-Escape Clearance - Phase 4)
+ * @version v8.0 (Falling Jelly First-Landing Detection for Air Super-Fluid Transition - Phase 3)
  * @changes
- *   - physics.js（/sobosuba/physics.js?v=7）から clampPointToContainer を追加インポート
- *   - handleMerges() の下段新ゼリー生成直前に、縮小スポーン輪郭内へ飲み込まれる恐れのある非合体中小〜中塊（otherRadius < spawnRadius * 0.85 かつ dist < spawnRadius + otherRadius * 0.45）のみを容器内壁クランプおよび壁際逃げ道フォールバック（中央上方向退避）付きで安全に押し分ける「合体時内包予防クリアランス処理（clearMergeSpawnOverlap / shiftCompositeClamped）」を追加
+ *   - handleCollisions() の if (allowCollideSound) の外側へ、落下中ゼリー（!comp.isFloating && !comp.isBarHopping && !comp.hasLanded）の厳密初着地検知（①着地済み下段ゼリー otherComp.hasLanded === true との接触、②天井以外の静的壁・床・45度スロープとの接触かつ落下ゼリー重心 cy > GAME_HEIGHT * 0.45）を追加し、条件成立時に comp.hasLanded = true; comp.landedAt = now; を刻印（collisionStart / collisionActive 双方で漏れゼロ、空中2連射接触や上空バンパー擦りによる誤爆ゼロ）
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
@@ -308,8 +307,8 @@ export function resetMergeQueues() {
 }
 
 /**
- * 衝突イベントを処理し、同数字ソフトボディの合体キュー登録（吸い付き音含む）および
- * 重心法線接近速度ベースの衝突音・静的壁バウンド音判定を行う
+ * 衝突イベントを処理し、落下中ゼリーの初着地検知、同数字ソフトボディの合体キュー登録（吸い付き音含む）、
+ * および重心法線接近速度ベースの衝突音・静的壁バウンド音判定を行う
  * @param {Object} event - Matter.js の collisionStart / collisionActive イベントオブジェクト
  * @param {boolean} allowCollideSound - 衝突音を鳴らすかどうか（collisionActive 呼び出し時は false 指定可）
  * @returns {number} このフレームで獲得した本家準拠スコア（未合体Soboの初参加分のみ）
@@ -323,12 +322,56 @@ export function handleCollisions(event, allowCollideSound = true) {
     const pairCooldownMs = PHYSICS.COLLIDE_SOUND_PAIR_COOLDOWN_MS || 450;
     const maxBarMergeValue = FLOAT_BAR.BAR_MERGE_MAX_VALUE || 512;
     const barAttachMaxY = (FLOAT_BAR.HOP_RECATCH_Y_MAX || (FLOAT_BAR.Y + 30)) + 16;
+    const wallLandingMinY = GAME_HEIGHT * 0.45;
 
     for (let i = 0; i < pairs.length; i++) {
         const pair = pairs[i];
         const bodyA = pair.bodyA;
         const bodyB = pair.bodyB;
         let mergeTriggered = false;
+
+        // --- 0. 落下中ゼリーの厳密初着地検知（collisionStart / collisionActive 双方で漏れなく判定） ---
+        // ①着地済み下段ゼリー（otherComp.hasLanded === true）との接触
+        // ②天井以外の静的壁・床・45度スロープ（isStatic === true && label !== 'ceiling'）との接触 かつ 重心 cy > GAME_HEIGHT * 0.45
+        if (bodyA.label === 'jelly_particle' &&
+            bodyB.label === 'jelly_particle' &&
+            bodyA.jellyId !== bodyB.jellyId) {
+            const compA = bodyA.parentComposite;
+            const compB = bodyB.parentComposite;
+            if (compA && compB) {
+                const aLanded = Boolean(compA.hasLanded);
+                const bLanded = Boolean(compB.hasLanded);
+                if (!aLanded && bLanded && !compA.isFloating && !compA.isBarHopping) {
+                    compA.hasLanded = true;
+                    compA.landedAt = now;
+                }
+                if (!bLanded && aLanded && !compB.isFloating && !compB.isBarHopping) {
+                    compB.hasLanded = true;
+                    compB.landedAt = now;
+                }
+            }
+        } else {
+            let fallingBody = null;
+            let staticBody = null;
+            if (bodyA.label === 'jelly_particle' && bodyB.isStatic === true) {
+                fallingBody = bodyA;
+                staticBody = bodyB;
+            } else if (bodyB.label === 'jelly_particle' && bodyA.isStatic === true) {
+                fallingBody = bodyB;
+                staticBody = bodyA;
+            }
+
+            if (fallingBody && staticBody && staticBody.label !== 'ceiling') {
+                const comp = fallingBody.parentComposite;
+                if (comp && !comp.isFloating && !comp.isBarHopping && !comp.hasLanded) {
+                    const pos = comp.centroid || getSoftBodyCentroid(comp) || fallingBody.position;
+                    if (pos && pos.y > wallLandingMinY) {
+                        comp.hasLanded = true;
+                        comp.landedAt = now;
+                    }
+                }
+            }
+        }
 
         // --- 1. 合体判定（先に評価し、合体成立ペアでは通常衝突音をスキップして吸い付き音へ一本化） ---
         // 双方ともにゼリーの構成要素であるか確認

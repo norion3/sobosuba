@@ -1,16 +1,16 @@
 /**
  * dom_ui.js
- * @version v7.5 (Remove Best Score HUD & GameOver Display - Phase 1)
+ * @version v8.0 (Start Guide Card, Refined GameOver Dark Card & HUD Stacking - Phase 5)
  * @changes
- *   - プレイ画面上部ヘッダー（topHudHeader）右端の BEST 表示ブロック（#bestScoreDisplay）を削除
- *   - ゲームオーバー画面（#gameOverUI）内の Best Score 行（#finalBestScore）を削除し、Final Score のみの表示構成へ整理
- *   - 不要となった elBestScoreDisplay / elFinalBestScore の参照および showGameOverUI() の第2引数処理を削除し、updateBestScoreUI() は旧キャッシュ版 main.js とのインポート互換維持用の空関数へ変更
+ *   - topHudHeader の z-index を 10 → 60 へ引き上げ、開始画面・ゲームオーバー画面表示中でも左上の音量 ON/OFF ボタンを常時操作可能にし、スコア表示ラッパー #topScoreWrapper を新設（showGameOverUI() で opacity: 0 非表示、hideGameOverUI() で opacity: 1 復帰）
+ *   - 初回起動用の開始説明カードオーバーレイ（#startOverlay：タイトルなし・見出し「同じ数字をくっつけよう」・簡潔3行説明・#startBtn「TAP TO START」・オーバーレイ全体タップ開始可・全イベントバブリング遮断・350ms デバウンス）を追加し、showStartUI() / hideStartUI() をエクスポート、initUI() へ第3引数 onStartCallback を追加（省略時後方互換維持）
+ *   - ゲームオーバー画面（#gameOverUI）から「両側のバンパーが押し込まれました」「FINAL」を削除し、backdrop-filter 不使用・下部 215px セーフエリア厳守のダークガラス調カード（GAME OVER ＋ 小さな SCORE ラベル ＋ 極太等幅ホワイト数字 ＋ 水滴アクア〜ブルーの「もう一度プレイ」<div> ボタン）へ刷新
  * 
- * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、および安全なUI制御を行うモジュール
+ * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、開始説明画面、および安全なUI制御を行うモジュール
  * 
  * くねくねバトル方式に則り、HTMLファイルにタグを直書きせず、
  * JS側から動的にCanvasやHUD要素を生成（マウント）します。
- * ※スイカゲーム風のNEXTプレビューUIおよびベストスコアUIは撤廃し、スコア表示・音量ON/OFFボタン・ゲームオーバーUIを管理します。
+ * ※スイカゲーム風のNEXTプレビューUIおよびベストスコアUIは撤廃し、スコア表示・音量ON/OFFボタン・開始説明UI・ゲームオーバーUIを管理します。
  */
 
 import { UI } from '/sobosuba/constants.js?v=7';
@@ -18,10 +18,13 @@ import { UI } from '/sobosuba/constants.js?v=7';
 // DOM要素のキャッシュ
 let elGameContainer;
 let elCanvasStage;
+let elTopScoreWrapper;
 let elScoreDisplay;
 let elSoundBtn;
 let elSoundIcon;
 let elSoundLabel;
+let elStartOverlay;
+let elStartBtn;
 let elGameOverUI;
 let elFinalScore;
 let elWarningOverlay;
@@ -94,10 +97,11 @@ export function mountDOM() {
     `;
     document.body.appendChild(gameContainer);
 
-    // 2. 上部HUDヘッダー（GRAVITY上部ネイティブボタン帯回避 ＆ パディング非干渉ラッパー行）
+    // 2. 上部HUDヘッダー（GRAVITY上部ネイティブボタン帯回避 ＆ z-index: 60 により開始・終了画面でも音量操作可）
     const topHudHeader = document.createElement('div');
     topHudHeader.id = 'topHudHeader';
     topHudHeader.style.cssText = `
+        position: relative;
         width: 100%;
         flex: 0 0 auto;
         display: flex;
@@ -109,7 +113,7 @@ export function mountDOM() {
         padding-right: 16px;
         box-sizing: border-box;
         pointer-events: none;
-        z-index: 10;
+        z-index: 60;
     `;
     topHudHeader.innerHTML = `
         <div id="topHudInnerRow" style="position: relative; width: 100%; max-width: 420px; min-height: 30px; display: flex; justify-content: center; align-items: center; pointer-events: none;">
@@ -119,8 +123,8 @@ export function mountDOM() {
                 <span id="soundToggleLabel" style="pointer-events: none;">OFF</span>
             </div>
 
-            <!-- 絶対中央維持スコア表示 -->
-            <div style="display: inline-flex; flex-direction: row; align-items: baseline; justify-content: center; gap: 8px; padding: 2px 14px; color: white; font-weight: bold; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); pointer-events: none;">
+            <!-- 絶対中央維持スコア表示（ゲームオーバー表示時は非表示にして中央カードスコアを主役化） -->
+            <div id="topScoreWrapper" style="display: inline-flex; flex-direction: row; align-items: baseline; justify-content: center; gap: 8px; padding: 2px 14px; color: white; font-weight: bold; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); pointer-events: none; transition: opacity 160ms ease;">
                 <span style="font-size: 0.7rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.1em; line-height: 1;">Score</span>
                 <span id="scoreDisplay" style="font-feature-settings: 'tnum'; font-size: 1.4rem; line-height: 1.1; color: #60a5fa;">0</span>
             </div>
@@ -155,7 +159,7 @@ export function mountDOM() {
     `;
     canvasStage.appendChild(canvas);
 
-    // 5. オーバーレイUIレイヤーの生成（警告エフェクト・ゲームオーバー画面）
+    // 5. オーバーレイUIレイヤーの生成（警告エフェクト・開始説明カード・ゲームオーバー画面）
     const uiLayer = document.createElement('div');
     uiLayer.id = 'ui-layer';
     uiLayer.style.cssText = `
@@ -170,28 +174,42 @@ export function mountDOM() {
         z-index: 20;
     `;
 
-    // Tailwindを使わず、インラインスタイルで安全にUIを構築
-    // 小画面でも Final Score とリトライボタンが絶対に重ならない安全なFlexリザルト構造
+    // Tailwindを使わず、GRAVITY WebKit 規格準拠（backdrop-filter不使用・<div>ボタン・下部215pxセーフエリア）で安全にUIを構築
     uiLayer.innerHTML = `
         <!-- 警告表示用オーバーレイ -->
         <div id="warningOverlay" style="position: absolute; inset: 0; background-color: #ef4444; opacity: 0; pointer-events: none; transition: opacity 100ms; mix-blend-mode: screen; z-index: 0;"></div>
 
-        <!-- Game Over UI (GRAVITY規格準拠: backdrop-filter不使用・215pxセーフエリア確保のFlexレイアウト) -->
-        <div id="gameOverUI" style="display: none; pointer-events: auto; background-color: rgba(0, 0, 0, 0.85); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx}px); padding-right: 16px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + min(${UI.SAFE_BOTTOM_PX}px, 32vh)); padding-left: 16px; box-sizing: border-box; overflow-y: auto; z-index: 50;">
-            <div style="width: 100%; max-width: 380px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: clamp(0.75rem, 2.5vh, 1.75rem); margin: auto 0;">
-                <div style="text-align: center;">
-                    <h1 style="font-size: clamp(2rem, 8vw, 3rem); font-weight: 900; color: #ef4444; margin: 0 0 0.4rem 0; line-height: 1.1; text-shadow: 0 0 15px rgba(239, 68, 68, 1); letter-spacing: 0.1em;">GAME OVER</h1>
-                    <p style="color: #fca5a5; font-size: clamp(0.75rem, 3.2vw, 0.875rem); margin: 0;">両側のバンパーが押し込まれました</p>
+        <!-- Start Guide Overlay (初回起動時のみ表示・タイトルなし・簡潔3行説明・オーバーレイ全体タップ開始可) -->
+        <div id="startOverlay" style="display: none; pointer-events: auto; background-color: rgba(4, 7, 15, 0.68); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx}px); padding-right: 20px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + min(${UI.SAFE_BOTTOM_PX}px, 32vh)); padding-left: 20px; box-sizing: border-box; overflow-y: auto; touch-action: none; overscroll-behavior: none; z-index: 45;">
+            <div style="width: 100%; max-width: 340px; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.65), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.5rem, 3.8vh, 2.1rem) clamp(1.25rem, 5vw, 1.75rem); display: flex; flex-direction: column; align-items: center; text-align: center; margin: auto 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
+                <p style="color: #38bdf8; font-size: clamp(1.15rem, 4.8vw, 1.4rem); font-weight: 800; letter-spacing: 0.05em; line-height: 1.3; margin: 0 0 clamp(0.95rem, 2.6vh, 1.35rem) 0;">同じ数字をくっつけよう</p>
+
+                <div style="display: flex; flex-direction: column; gap: clamp(0.45rem, 1.4vh, 0.68rem); color: #e2e8f0; font-size: clamp(0.84rem, 3.5vw, 0.96rem); font-weight: 500; line-height: 1.5; letter-spacing: 0.02em; margin: 0 0 clamp(1.25rem, 3.2vh, 1.7rem) 0;">
+                    <p style="margin: 0;">引いて発射・タップでそっと落とす</p>
+                    <p style="margin: 0;">上へ引くと となりの塊を飛びこえ</p>
+                    <p style="margin: 0;">左右の赤いボタンが押されると終了</p>
                 </div>
 
+                <!-- GRAVITY規格: <div> タグによる開始ボタン -->
+                <div id="startBtn" role="button" aria-label="ゲーム開始" style="pointer-events: auto; min-width: 210px; padding: clamp(0.75rem, 2vh, 0.95rem) clamp(1.6rem, 6vw, 2.2rem); border-radius: 9999px; border: 1.5px solid rgba(56, 189, 248, 0.58); background-color: rgba(56, 189, 248, 0.10); color: #38bdf8; font-size: clamp(0.95rem, 3.9vw, 1.08rem); font-weight: 800; letter-spacing: 0.16em; line-height: 1.1; box-shadow: 0 0 18px rgba(56, 189, 248, 0.24), inset 0 0 12px rgba(56, 189, 248, 0.10); display: inline-flex; justify-content: center; align-items: center; cursor: pointer; box-sizing: border-box;">
+                    TAP TO START
+                </div>
+            </div>
+        </div>
+
+        <!-- Game Over UI (GRAVITY規格準拠: backdrop-filter不使用・ダークガラス調カード・下部215pxセーフエリア確保) -->
+        <div id="gameOverUI" style="display: none; pointer-events: auto; background-color: rgba(4, 7, 15, 0.78); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx}px); padding-right: 20px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + min(${UI.SAFE_BOTTOM_PX}px, 32vh)); padding-left: 20px; box-sizing: border-box; overflow-y: auto; touch-action: none; overscroll-behavior: none; z-index: 50;">
+            <div style="width: 100%; max-width: 340px; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.7), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.6rem, 4vh, 2.2rem) clamp(1.25rem, 5vw, 1.75rem); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: clamp(1rem, 2.8vh, 1.55rem); margin: auto 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
+                <h1 style="font-size: clamp(0.95rem, 3.8vw, 1.15rem); font-weight: 800; color: #fb7185; margin: 0; line-height: 1.2; letter-spacing: 0.22em;">GAME OVER</h1>
+
                 <div style="text-align: center;">
-                    <p style="color: #9ca3af; font-size: clamp(0.875rem, 3.5vw, 1.125rem); text-transform: uppercase; letter-spacing: 0.05em; margin: 0;">Final Score</p>
-                    <p id="finalScore" style="color: #60a5fa; font-size: clamp(2.75rem, 12vw, 4.5rem); font-weight: bold; font-feature-settings: 'tnum'; line-height: 1.1; margin: 0.35rem 0 0 0; text-shadow: 0 4px 6px rgba(0,0,0,0.1);">0</p>
+                    <p style="color: #94a3b8; font-size: clamp(0.7rem, 2.8vw, 0.8rem); font-weight: 700; text-transform: uppercase; letter-spacing: 0.16em; margin: 0;">SCORE</p>
+                    <p id="finalScore" style="color: #ffffff; font-size: clamp(2.75rem, 12vw, 4rem); font-weight: 800; font-feature-settings: 'tnum'; line-height: 1.05; margin: 0.25rem 0 0 0;">0</p>
                 </div>
 
                 <!-- GRAVITY規格: セーフエリア上に非干渉配置する <div> タグボタン -->
-                <div style="flex-shrink: 0; margin-top: clamp(0.25rem, 1.5vh, 0.75rem);">
-                    <div id="retryBtn" style="pointer-events: auto; background: linear-gradient(135deg, #3b82f6, #8b5cf6); color: white; font-weight: bold; font-size: clamp(1rem, 4.2vw, 1.25rem); padding: clamp(0.75rem, 2vh, 1rem) clamp(1.75rem, 7vw, 2.5rem); border-radius: 9999px; box-shadow: 0 0 20px rgba(59, 130, 246, 0.6); display: inline-flex; justify-content: center; align-items: center; cursor: pointer; transition: transform 0.1s;">
+                <div style="width: 100%; flex-shrink: 0; margin-top: clamp(0.15rem, 0.8vh, 0.4rem); display: flex; justify-content: center;">
+                    <div id="retryBtn" role="button" aria-label="もう一度プレイ" style="pointer-events: auto; width: 100%; max-width: 260px; background: linear-gradient(135deg, #38bdf8, #2563eb); color: #ffffff; font-weight: 800; font-size: clamp(0.98rem, 4vw, 1.12rem); letter-spacing: 0.08em; padding: clamp(0.8rem, 2.1vh, 1rem) clamp(1.5rem, 6vw, 2rem); border-radius: 14px; box-shadow: 0 8px 22px rgba(56, 189, 248, 0.35); display: inline-flex; justify-content: center; align-items: center; cursor: pointer; transition: transform 0.1s; box-sizing: border-box;">
                         もう一度プレイ
                     </div>
                 </div>
@@ -205,18 +223,22 @@ export function mountDOM() {
  * UI制御モジュールの初期化
  * @param {Function} onRetryCallback - リトライボタンが押された時に実行されるコールバック関数
  * @param {Function|null} [onToggleSoundCallback] - 音量ON/OFFボタンが押された時に実行されるコールバック関数
+ * @param {Function|null} [onStartCallback] - 開始オーバーレイ／開始ボタンが押された時に実行されるコールバック関数
  */
-export function initUI(onRetryCallback, onToggleSoundCallback = null) {
+export function initUI(onRetryCallback, onToggleSoundCallback = null, onStartCallback = null) {
     // 1. DOMを動的に生成してマウント
     mountDOM();
 
     // 2. DOM要素のキャッシュを取得
     elGameContainer = document.getElementById('game-container');
     elCanvasStage = document.getElementById('canvasStage');
+    elTopScoreWrapper = document.getElementById('topScoreWrapper');
     elScoreDisplay = document.getElementById('scoreDisplay');
     elSoundBtn = document.getElementById('soundToggleBtn');
     elSoundIcon = document.getElementById('soundToggleIcon');
     elSoundLabel = document.getElementById('soundToggleLabel');
+    elStartOverlay = document.getElementById('startOverlay');
+    elStartBtn = document.getElementById('startBtn');
     elGameOverUI = document.getElementById('gameOverUI');
     elFinalScore = document.getElementById('finalScore');
     elWarningOverlay = document.getElementById('warningOverlay');
@@ -226,8 +248,86 @@ export function initUI(onRetryCallback, onToggleSoundCallback = null) {
     updateSoundUI(false);
 
     // =========================================================
+    // 開始オーバーレイ（#startOverlay / #startBtn 全体タップ開始対応）のバインド
+    // 裏の Canvas エイム操作へ貫通しないよう全8イベントで stopPropagation() と 350ms デバウンスを徹底
+    // =========================================================
+    if (elStartOverlay) {
+        let lastStartTime = 0;
+        let startTouchStartX = 0;
+        let startTouchStartY = 0;
+        let isStartTouchActive = false;
+
+        const triggerStart = () => {
+            const now = Date.now();
+            if (now - lastStartTime < 350) return;
+            lastStartTime = now;
+
+            if (typeof onStartCallback === 'function') {
+                onStartCallback();
+            } else {
+                hideStartUI();
+            }
+        };
+
+        // マウス系4イベント（Canvas 操作へのバブリングを完全遮断）
+        elStartOverlay.addEventListener('mousedown', (e) => {
+            e.stopPropagation();
+        });
+        elStartOverlay.addEventListener('mousemove', (e) => {
+            e.stopPropagation();
+        });
+        elStartOverlay.addEventListener('mouseup', (e) => {
+            e.stopPropagation();
+        });
+        elStartOverlay.addEventListener('click', (e) => {
+            e.stopPropagation();
+            triggerStart();
+        });
+
+        // タッチ系4イベント（ラバーバンド現象 ＆ Canvas 操作への貫通を完全遮断）
+        elStartOverlay.addEventListener('touchstart', (e) => {
+            e.stopPropagation();
+            if (e.touches && e.touches.length > 0) {
+                startTouchStartX = e.touches[0].clientX;
+                startTouchStartY = e.touches[0].clientY;
+                isStartTouchActive = true;
+            }
+        }, { passive: true });
+
+        elStartOverlay.addEventListener('touchmove', (e) => {
+            e.stopPropagation();
+            if (e.cancelable) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+        elStartOverlay.addEventListener('touchend', (e) => {
+            e.stopPropagation();
+            if (!isStartTouchActive) return;
+            isStartTouchActive = false;
+
+            if (e.changedTouches && e.changedTouches.length > 0) {
+                const dx = e.changedTouches[0].clientX - startTouchStartX;
+                const dy = e.changedTouches[0].clientY - startTouchStartY;
+                const moveDist = Math.sqrt(dx * dx + dy * dy);
+                if (moveDist <= 24) {
+                    if (e.cancelable) {
+                        e.preventDefault();
+                    }
+                    triggerStart();
+                }
+            }
+        }, { passive: false });
+
+        elStartOverlay.addEventListener('touchcancel', (e) => {
+            e.stopPropagation();
+            isStartTouchActive = false;
+        }, { passive: true });
+    }
+
+    // =========================================================
     // 音量ON/OFFボタンのバインド
-    // input.js 無変更のまま干渉ゼロを保証するため全8イベントで stopPropagation() を徹底
+    // input.js との干渉ゼロを保証するため全8イベントで stopPropagation() を徹底
     // ＆ touchend/click の二重発火防止（iOS同期ユーザージェスチャー内で即コールバック実行）
     // =========================================================
     if (elSoundBtn) {
@@ -325,7 +425,7 @@ export function initUI(onRetryCallback, onToggleSoundCallback = null) {
             e.stopPropagation();
             triggerRetry();
         });
-        
+
         // スマホ向けタッチ開始イベント（バブリング遮断と開始座標記録）
         elRetryBtn.addEventListener('touchstart', (e) => {
             e.stopPropagation();
@@ -443,12 +543,39 @@ export function updateNextPreviewUI() {
 }
 
 /**
- * ゲームオーバー画面の表示
+ * 開始説明カードオーバーレイの表示（初回起動時）
+ */
+export function showStartUI() {
+    if (!elStartOverlay) {
+        elStartOverlay = document.getElementById('startOverlay');
+    }
+    if (elStartOverlay) {
+        elStartOverlay.style.display = 'flex';
+    }
+}
+
+/**
+ * 開始説明カードオーバーレイの非表示（ゲーム開始・リトライ時）
+ */
+export function hideStartUI() {
+    if (!elStartOverlay) {
+        elStartOverlay = document.getElementById('startOverlay');
+    }
+    if (elStartOverlay) {
+        elStartOverlay.style.display = 'none';
+    }
+}
+
+/**
+ * ゲームオーバー画面の表示（上部ヘッダースコアは非表示にして中央カードスコアを主役化）
  * @param {number} finalScore - 最終スコア
  */
 export function showGameOverUI(finalScore) {
     if (elFinalScore) {
         elFinalScore.innerText = finalScore;
+    }
+    if (elTopScoreWrapper) {
+        elTopScoreWrapper.style.opacity = '0';
     }
     if (elGameOverUI) {
         elGameOverUI.style.display = 'flex';
@@ -456,9 +583,12 @@ export function showGameOverUI(finalScore) {
 }
 
 /**
- * ゲームオーバー画面の非表示（リトライ時）
+ * ゲームオーバー画面の非表示（リトライ時・上部ヘッダースコアを復帰）
  */
 export function hideGameOverUI() {
+    if (elTopScoreWrapper) {
+        elTopScoreWrapper.style.opacity = '1';
+    }
     if (elGameOverUI) {
         elGameOverUI.style.display = 'none';
     }
