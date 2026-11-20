@@ -1,9 +1,9 @@
 /**
  * softbody.js
- * @version v7.2 (Upper Bar Fluidity & Posture Guide Relaxation - Phase 2)
+ * @version v7.4 (Vertical Restore Force & Continuous Min-Dist Blend - Phase 2)
  * @changes
- *   - 上段フロートバー上の塊にぷるんとした液体感とたわみを取り戻すため、applyFloatBarControl() の理想カプセル座標へのX方向強制力を撤廃し、Y方向姿勢ガイドを極弱（0.00032 → 0.00006）へ緩和
- *   - 上下レール圧縮（CHANNEL_COMPRESSION_STIFFNESS: 0.055）および縦方向減衰（FLOAT_BAR.Y_DAMPING: 0.945）のフォールバック値を v7.2 新定数へ同期
+ *   - applyVolumeAndShapeForces() 内の最小距離復元（横潰れ限定ガード）が PHYSICS.MIN_DIST_RESTORE_FORCE（0.00068）および新フォールバック（SOFTBODY_MIN_DIST_RATIO: 0.78）を参照するよう更新
+ *   - 上段カプセル発射直後の過剰反発バグを防止するため、effectiveMinRadius の算出を isFloating 0/1 切替から comp.shapeBlend による連続補間へ変更（上段の液体感・発射モーフィングを完全保護）
  * 
  * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
@@ -898,7 +898,8 @@ function applyVolumeAndShapeForces(comp, geom) {
     const nlThreshold = (PHYSICS.PRESSURE_NONLINEAR_THRESHOLD !== undefined) ? PHYSICS.PRESSURE_NONLINEAR_THRESHOLD : 0.28;
     const pressureMax = PHYSICS.PRESSURE_RATIO_MAX || 3.8;
     const bulkDamping = (PHYSICS.BULK_DAMPING !== undefined) ? PHYSICS.BULK_DAMPING : 0.00055;
-    const minDistRatio = PHYSICS.SOFTBODY_MIN_DIST_RATIO || 0.48;
+    const minDistRatio = PHYSICS.SOFTBODY_MIN_DIST_RATIO || 0.78;
+    const minDistRestoreForce = (PHYSICS.MIN_DIST_RESTORE_FORCE !== undefined) ? PHYSICS.MIN_DIST_RESTORE_FORCE : 0.00068;
     const curScale = comp.currentGrowScale || 1.0;
 
     // (A) 穏健なアンチ裏返り自動修復（面積比0.18未満の極限裏返り時のみ作動）
@@ -979,10 +980,12 @@ function applyVolumeAndShapeForces(comp, geom) {
 
     const pressureStrength = effectiveRatio * pressureCoeff * 5.0;
 
-    // 上段横長カプセル・ホップ半カプセル時は縦半高を基準に最小距離を安全算出
-    const effectiveMinRadius = (comp.isFloating || comp.isBarHopping)
-        ? Math.min(ringRadius, comp.capsuleRingHalfHeight || ringRadius)
-        : ringRadius;
+    // comp.shapeBlend による連続補間で発射直後の過剰反発を防ぎつつ、上段液体感・横潰れ限定ガードを安全算出
+    const capRingMinRadius = Math.min(ringRadius, (comp.capsuleRingHalfHeight || ringRadius) * curScale);
+    const shapeBlend = (comp.shapeBlend !== undefined)
+        ? comp.shapeBlend
+        : ((comp.isFloating || comp.isBarHopping) ? 1 : 0);
+    const effectiveMinRadius = ringRadius + (capRingMinRadius - ringRadius) * shapeBlend;
     const minDist = effectiveMinRadius * minDistRatio;
 
     for (let j = 0; j < n; j++) {
@@ -1031,10 +1034,10 @@ function applyVolumeAndShapeForces(comp, geom) {
             forceY += ny * dampForce;
         }
 
-        // 3. 最小距離復元（重心への過度なめり込みを防止）
+        // 3. 最小距離復元（横潰れ限定ガード：縦方向への踏ん張りと過度なめり込みを防止）
         if (dist < minDist) {
             const overlap = minDist - dist;
-            const restoreMag = overlap * 0.00045 * pCurr.mass;
+            const restoreMag = overlap * minDistRestoreForce * pCurr.mass;
             forceX += radialX * restoreMag;
             forceY += radialY * restoreMag;
         }

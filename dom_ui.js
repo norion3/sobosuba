@@ -1,16 +1,16 @@
 /**
  * dom_ui.js
- * @version v7.0 (Best Score HUD & GameOver Display - Phase 10)
+ * @version v7.5 (Remove Best Score HUD & GameOver Display - Phase 1)
  * @changes
- *   - 既存の上部ヘッダー（左端音量ボタン・絶対中央 SCORE）と非干渉な右端領域、およびゲームオーバー画面内へ Best Score（BEST）表示を追加し、updateBestScoreUI(bestScore) を提供
- *   - showGameOverUI(finalScore, bestScore) で最終スコアとあわせて Best Score 表示も同期可能に拡張（1引数呼び出し互換維持）
- *   - GRAVITYキャッシュ不整合対策として constants.js の絶対パスを /sobosuba/constants.js?v=7 へ統一
+ *   - プレイ画面上部ヘッダー（topHudHeader）右端の BEST 表示ブロック（#bestScoreDisplay）を削除
+ *   - ゲームオーバー画面（#gameOverUI）内の Best Score 行（#finalBestScore）を削除し、Final Score のみの表示構成へ整理
+ *   - 不要となった elBestScoreDisplay / elFinalBestScore の参照および showGameOverUI() の第2引数処理を削除し、updateBestScoreUI() は旧キャッシュ版 main.js とのインポート互換維持用の空関数へ変更
  * 
- * 動的DOMマウント、HTML要素の更新、スコア／ベストスコア表示、音量トグルUI、および安全なUI制御を行うモジュール
+ * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、および安全なUI制御を行うモジュール
  * 
  * くねくねバトル方式に則り、HTMLファイルにタグを直書きせず、
  * JS側から動的にCanvasやHUD要素を生成（マウント）します。
- * ※スイカゲーム風のNEXTプレビューUIは撤廃し、スコア／ベストスコア表示・音量ON/OFFボタン・ゲームオーバーUIを管理します。
+ * ※スイカゲーム風のNEXTプレビューUIおよびベストスコアUIは撤廃し、スコア表示・音量ON/OFFボタン・ゲームオーバーUIを管理します。
  */
 
 import { UI } from '/sobosuba/constants.js?v=7';
@@ -19,13 +19,11 @@ import { UI } from '/sobosuba/constants.js?v=7';
 let elGameContainer;
 let elCanvasStage;
 let elScoreDisplay;
-let elBestScoreDisplay;
 let elSoundBtn;
 let elSoundIcon;
 let elSoundLabel;
 let elGameOverUI;
 let elFinalScore;
-let elFinalBestScore;
 let elWarningOverlay;
 let elRetryBtn;
 
@@ -126,12 +124,6 @@ export function mountDOM() {
                 <span style="font-size: 0.7rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.1em; line-height: 1;">Score</span>
                 <span id="scoreDisplay" style="font-feature-settings: 'tnum'; font-size: 1.4rem; line-height: 1.1; color: #60a5fa;">0</span>
             </div>
-
-            <!-- 右端非干渉ベストスコア表示 -->
-            <div style="position: absolute; right: 0; top: 50%; transform: translateY(-50%); display: inline-flex; flex-direction: row; align-items: baseline; justify-content: flex-end; gap: 4px; color: white; font-weight: bold; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); pointer-events: none;">
-                <span style="font-size: 0.6rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.08em; line-height: 1;">Best</span>
-                <span id="bestScoreDisplay" style="font-feature-settings: 'tnum'; font-size: 0.95rem; line-height: 1.1; color: #fbbf24;">0</span>
-            </div>
         </div>
     `;
     gameContainer.appendChild(topHudHeader);
@@ -195,7 +187,6 @@ export function mountDOM() {
                 <div style="text-align: center;">
                     <p style="color: #9ca3af; font-size: clamp(0.875rem, 3.5vw, 1.125rem); text-transform: uppercase; letter-spacing: 0.05em; margin: 0;">Final Score</p>
                     <p id="finalScore" style="color: #60a5fa; font-size: clamp(2.75rem, 12vw, 4.5rem); font-weight: bold; font-feature-settings: 'tnum'; line-height: 1.1; margin: 0.35rem 0 0 0; text-shadow: 0 4px 6px rgba(0,0,0,0.1);">0</p>
-                    <p style="color: #9ca3af; font-size: clamp(0.8rem, 3.2vw, 1rem); text-transform: uppercase; letter-spacing: 0.08em; margin: 0.45rem 0 0 0;">Best Score <span id="finalBestScore" style="color: #fbbf24; font-weight: bold; font-feature-settings: 'tnum'; margin-left: 6px;">0</span></p>
                 </div>
 
                 <!-- GRAVITY規格: セーフエリア上に非干渉配置する <div> タグボタン -->
@@ -223,13 +214,11 @@ export function initUI(onRetryCallback, onToggleSoundCallback = null) {
     elGameContainer = document.getElementById('game-container');
     elCanvasStage = document.getElementById('canvasStage');
     elScoreDisplay = document.getElementById('scoreDisplay');
-    elBestScoreDisplay = document.getElementById('bestScoreDisplay');
     elSoundBtn = document.getElementById('soundToggleBtn');
     elSoundIcon = document.getElementById('soundToggleIcon');
     elSoundLabel = document.getElementById('soundToggleLabel');
     elGameOverUI = document.getElementById('gameOverUI');
     elFinalScore = document.getElementById('finalScore');
-    elFinalBestScore = document.getElementById('finalBestScore');
     elWarningOverlay = document.getElementById('warningOverlay');
     elRetryBtn = document.getElementById('retryBtn');
 
@@ -440,25 +429,10 @@ export function updateScoreUI(score) {
 }
 
 /**
- * ベストスコアを上部ヘッダーおよびゲームオーバー画面へ反映する
- * @param {number} bestScore - ベストスコア
+ * 互換維持用（ベストスコア表示の撤去に伴い処理なし・旧キャッシュ版 main.js とのインポート互換維持）
  */
-export function updateBestScoreUI(bestScore) {
-    const safeBest = Math.max(0, Math.floor(Number(bestScore) || 0));
-
-    if (!elBestScoreDisplay) {
-        elBestScoreDisplay = document.getElementById('bestScoreDisplay');
-    }
-    if (!elFinalBestScore) {
-        elFinalBestScore = document.getElementById('finalBestScore');
-    }
-
-    if (elBestScoreDisplay) {
-        elBestScoreDisplay.innerText = safeBest;
-    }
-    if (elFinalBestScore) {
-        elFinalBestScore.innerText = safeBest;
-    }
+export function updateBestScoreUI() {
+    // 互換維持用（処理なし）
 }
 
 /**
@@ -471,14 +445,10 @@ export function updateNextPreviewUI() {
 /**
  * ゲームオーバー画面の表示
  * @param {number} finalScore - 最終スコア
- * @param {number} [bestScore] - ベストスコア（指定時はリザルト内のBest Score表示も同期）
  */
-export function showGameOverUI(finalScore, bestScore) {
+export function showGameOverUI(finalScore) {
     if (elFinalScore) {
         elFinalScore.innerText = finalScore;
-    }
-    if (bestScore !== undefined && bestScore !== null) {
-        updateBestScoreUI(bestScore);
     }
     if (elGameOverUI) {
         elGameOverUI.style.display = 'flex';

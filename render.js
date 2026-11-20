@@ -1,9 +1,9 @@
 /**
  * render.js
- * @version v7.3 (Cosine Merge Flash Fade & Fallback Sync - Phase 3)
+ * @version v7.4 (Merge Pre-Glow Continuity & Flash Fallback Sync - Phase 4)
  * @changes
- *   - 合体真っ白フラッシュの後半色戻りフェードを Smoothstep 反転カーブから、白の余韻がじんわり粘りながら滑らかに本色へ溶け戻るコサイン減衰（Math.cos(fadeT * Math.PI * 0.5)）へ変更
- *   - v7.3 延長済み合体保護時間（520〜960ms）および白保持比率（0.34）に合わせて、drawSingleSoftBody() 内のフォールバック値（520 / 0.34）を同期
+ *   - 合体前の「吸い付きの間」予兆発光の白み上昇を 0.12 + prog * 0.36 から 0.15 + prog * 0.43（最大 0.58）へ滑らか化し、完全真っ白フラッシュへの視覚的連続性を向上
+ *   - 最終確定版 v7.4 の合体の間定数（吸い付き 80〜145ms / 保護 680〜1200ms / 白保持比率 0.30）に合わせ、drawSingleSoftBody() 内のフォールバック値（80 / 680 / 0.30）を同期
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -461,23 +461,23 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
     ctx.fillStyle = config.color;
     ctx.fill();
 
-    // (A) 合体前の「吸い付きの間」予兆発光（mergePreGlowUntil 中にふわっと白く輝く）
+    // (A) 合体前の「吸い付きの間」予兆発光（mergePreGlowUntil 中にふわっと白く輝き、完全白へ滑らかに繋ぐ）
     if (comp.mergePreGlowUntil && now < comp.mergePreGlowUntil) {
-        const startT = comp.mergePreGlowStart || (comp.mergePreGlowUntil - 65);
+        const startT = comp.mergePreGlowStart || (comp.mergePreGlowUntil - 80);
         const span = Math.max(1, comp.mergePreGlowUntil - startT);
         const prog = Math.max(0, Math.min(1, (now - startT) / span));
-        const glowAlpha = 0.12 + prog * 0.36;
+        const glowAlpha = 0.15 + prog * 0.43;
         ctx.fillStyle = `rgba(255, 255, 255, ${glowAlpha.toFixed(3)})`;
         ctx.fill();
     }
 
-    // (B) 本家準拠「合体瞬間の真っ白フラッシュ」（保護時間 520〜960ms と 1対1 完全同期）
-    // 前半 34% は完全白（#ffffff）を保持し、後半 66% でコサイン減衰によりゆっくり本色へ溶け戻る
+    // (B) 本家準拠「合体瞬間の真っ白フラッシュ」（保護時間 680〜1200ms と 1対1 完全同期）
+    // 前半 30% は完全白（#ffffff）を保持し、後半 70% でコサイン減衰によりゆっくり本色へ溶け戻る
     if (comp.mergeFlashUntil && now < comp.mergeFlashUntil) {
-        const flashStart = comp.mergeFlashStart || comp.createdAt || (comp.mergeFlashUntil - 520);
+        const flashStart = comp.mergeFlashStart || comp.createdAt || (comp.mergeFlashUntil - 680);
         const totalFlash = Math.max(1, comp.mergeFlashUntil - flashStart);
         const progress = Math.max(0, Math.min(1, (now - flashStart) / totalFlash));
-        const whiteHoldRatio = (EFFECTS.MERGE_WHITE_HOLD_RATIO !== undefined) ? EFFECTS.MERGE_WHITE_HOLD_RATIO : 0.34;
+        const whiteHoldRatio = (EFFECTS.MERGE_WHITE_HOLD_RATIO !== undefined) ? EFFECTS.MERGE_WHITE_HOLD_RATIO : 0.30;
 
         if (progress <= whiteHoldRatio) {
             ctx.fillStyle = '#ffffff';

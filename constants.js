@@ -1,9 +1,9 @@
 /**
  * constants.js
- * @version v7.3 (Incompressible Water-Balloon Balance & Extended Merge Flash Timing - Phase 1)
+ * @version v7.4 (Vertical Restore Force, Water-Balloon Balance & Extended Merge Timing - Phase 1)
  * @changes
- *   - 潰れすぎ・ひょうたん型くびれ・深い食い込みを抑えつつ自然な積み上がりバランスを回復するため、水風船の非圧縮性および排斥定数を黄金比へ微調整（TARGET_AREA_RATIO: 1.01 / SOFTBODY_PRESSURE: 0.0038 / PRESSURE_NONLINEAR_THRESHOLD: 0.10 / PRESSURE_NONLINEAR_GAIN: 14.0 / PRESSURE_RATIO_MAX: 5.5 / BULK_DAMPING: 0.00075 / SKIN_STIFFNESS: 0.31 / BEND_STIFFNESS: 0.155 / ANTI_OVERLAP_STIFFNESS: 0.62 / ANTI_OVERLAP_MAX_PUSH: 3.2）
- *   - 合体後の真っ白からゆっくり色へ戻る「間」を本家準拠の余韻へ延長するため、EFFECTS（MERGE_PROTECT_MIN_MS: 520 / MERGE_PROTECT_MAX_MS: 960 / MERGE_WHITE_HOLD_RATIO: 0.34 / MERGE_PROTECT_AREA_FACTOR: 0.018 新設）および SCORE.CHAIN_WINDOW_MS（1850）を更新
+ *   - 正常な角丸多角形の密着感を維持しつつ横潰れ時のみ的確に縦へ押し返すため、縦潰れ限定ガードおよび水風船・バンパー定数を微調整（SKIN_STIFFNESS: 0.325 / BEND_STIFFNESS: 0.17 / TARGET_AREA_RATIO: 1.015 / SOFTBODY_PRESSURE: 0.0040 / PRESSURE_NONLINEAR_THRESHOLD: 0.09 / PRESSURE_NONLINEAR_GAIN: 15.0 / PRESSURE_RATIO_MAX: 5.8 / BULK_DAMPING: 0.00080 / SOFTBODY_MIN_DIST_RATIO: 0.78 / MIN_DIST_RESTORE_FORCE: 0.00068 新設 / BUMPER_STIFFNESS: 0.0058）
+ *   - くっつき→真っ白→ゆっくり色戻りの「間」を絶妙に延長するため、EFFECTS（MERGE_ANTICIPATION_MIN_MS: 80 / MERGE_ANTICIPATION_MAX_MS: 145 / MERGE_AREA_DELAY_FACTOR: 0.011 / MERGE_PROTECT_MIN_MS: 680 / MERGE_PROTECT_MAX_MS: 1200 / MERGE_PROTECT_AREA_FACTOR: 0.023 / MERGE_WHITE_HOLD_RATIO: 0.30）および SCORE.CHAIN_WINDOW_MS（2100）を更新
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -101,22 +101,23 @@ export const PHYSICS = {
     DENSITY_SCALE_EXP: 0.65,      // 質量比を r^1.35 へ抑え下敷き圧壊を防ぐ密度スケーリング指数
     BEAD_RADIUS_RATIO: 0.18,      // 全体半径に対する細密外周ビーズ半径の基準比率
     BEAD_MIN_OVERLAP_RATIO: 1.35, // 隣接ビーズ直径 >= 1.35 * 辺長 を保証する隙間ゼロ比率
-    SKIN_STIFFNESS: 0.31,         // 水風船の流動感とくびれ・奇形防止を両立する皮の張り剛性
-    BEND_STIFFNESS: 0.155,        // 液体的な密着変形とフック・くびれ奇形根絶を両立する1つ飛ばし曲げ拘束
+    SKIN_STIFFNESS: 0.325,        // 水風船の流動感とくびれ・奇形防止を両立する皮の張り剛性
+    BEND_STIFFNESS: 0.17,         // 液体的な密着変形とフック・くびれ奇形根絶を両立する1つ飛ばし曲げ拘束
     SOFTBODY_DAMPING: 0.02,       // SUBSTEPS=4 正規化済みの低バネ減衰
 
     // PBD位置ワープ・真円形状保持の完全撤廃 ＋ 強化非線形バルク内圧 ＋ 体積粘性
-    TARGET_AREA_RATIO: 1.01,      // 水風船の非圧縮体積をしっかり保つ目標面積比
+    TARGET_AREA_RATIO: 1.015,     // 水風船の非圧縮体積をしっかり保つ目標面積比
     PBD_AREA_STIFFNESS: 0,        // 永久微振動の原因となるPBD位置ワープを完全撤廃
     PBD_MAX_CORRECTION: 0,        // PBD位置ワープ上限0（純粋な力ベース内圧へ完全移行）
-    SOFTBODY_PRESSURE: 0.0038,    // 主軸となる力ベース内部圧力係数（水風船の張りと自然な積み上がりを確保）
-    PRESSURE_NONLINEAR_GAIN: 14.0,// 面積圧縮時に水らしい非圧縮性を発揮する非線形バルク反発係数
-    PRESSURE_NONLINEAR_THRESHOLD: 0.10, // 面積10%圧縮から非線形バルク反発が立ち上がる圧縮率閾値
-    PRESSURE_RATIO_MAX: 5.5,      // 陽的積分安定性を守りつつ底層圧壊を防ぐ圧力比上限クランプ
-    BULK_DAMPING: 0.00075,        // 内圧強化に合わせて半径方向ビビリ振動のみ吸収する体積粘性
+    SOFTBODY_PRESSURE: 0.0040,    // 主軸となる力ベース内部圧力係数（水風船の張りと自然な積み上がりを確保）
+    PRESSURE_NONLINEAR_GAIN: 15.0,// 面積圧縮時に水らしい非圧縮性を発揮する非線形バルク反発係数
+    PRESSURE_NONLINEAR_THRESHOLD: 0.09, // 面積9%圧縮から非線形バルク反発が立ち上がる圧縮率閾値
+    PRESSURE_RATIO_MAX: 5.8,      // 陽的積分安定性を守りつつ底層圧壊を防ぐ圧力比上限クランプ
+    BULK_DAMPING: 0.00080,        // 内圧強化に合わせて半径方向ビビリ振動のみ吸収する体積粘性
     SHAPE_MATCH_STIFFNESS: 0,     // 液体感を阻害する真円への記憶（Shape Matching）を完全撤廃
     INVERSION_AREA_RATIO: 0.18,   // 極限裏返り時のみ作動する穏健な自動修復閾値
-    SOFTBODY_MIN_DIST_RATIO: 0.48,// 重心からの最小距離比率（ペシャンコ防止）
+    SOFTBODY_MIN_DIST_RATIO: 0.78,// 角丸多角形密着を保護しつつ横潰れ時のみ縦へ押し返す最小距離比率
+    MIN_DIST_RESTORE_FORCE: 0.00068, // 横潰れ限定ガードの縦方向復元力係数
 
     // 遅延適応的圧迫ダンピング（着地直後のボヨヨン揺れ保護 ＆ 下敷き静寂化）
     SETTLE_SPEED_THRESHOLD: 0.22, // 全体静止とみなす重心速度閾値（px/frame）
@@ -138,7 +139,7 @@ export const PHYSICS = {
     SOFTBODY_PERIMETER_STIFFNESS: 0.15,
 
     // バンパー関連（ゼリー総質量 1.2〜11.1 に合わせた再正規化）
-    BUMPER_STIFFNESS: 0.0065,     // 積み上げ圧力で自然に押し込めるバネ剛性
+    BUMPER_STIFFNESS: 0.0058,     // 積み上げ圧力で自然に押し込めるバネ剛性
     BUMPER_DAMPING: 0.08,         // バンパーのバネ減衰
     BUMPER_DENSITY: 0.0035,       // バンパー質量を約6.83へ適正化しゼリーとの釣り合いを確保
 
@@ -236,22 +237,22 @@ export const BUMPER = {
 export const EFFECTS = {
     MERGE_EXPAND_FRAMES: 10,      // 合体時にぷるんと膨張させるフレーム数
     MERGE_EXPAND_SCALE: 1.12,     // 膨張時の最大スケール倍率
-    MERGE_ANTICIPATION_MIN_MS: 65,// 合体直前の吸い付き溜め最小時間（ms）
-    MERGE_ANTICIPATION_MAX_MS: 130,// 合体直前の吸い付き溜め最大時間（ms）
+    MERGE_ANTICIPATION_MIN_MS: 80,// 合体直前の吸い付き溜め最小時間（ms）
+    MERGE_ANTICIPATION_MAX_MS: 145,// 合体直前の吸い付き溜め最大時間（ms）
     MERGE_GROW_START_SCALE: 0.78, // 合体時の縮小スポーン開始倍率（重なり・絡み合い根絶）
     MERGE_GROW_DURATION_MS: 150,  // 縮小スポーンから Ease-Out-Back で定着する時間（ms）
     MERGE_GROW_OVERSHOOT: 1.08,   // 成長完了直前にわずかにボヨンと弾むオーバーシュート倍率
-    MERGE_PROTECT_MIN_MS: 520,    // 合体後の真っ白フラッシュ＆連鎖保護時間下限（ms）
-    MERGE_PROTECT_MAX_MS: 960,    // 合体後の真っ白フラッシュ＆連鎖保護時間上限（ms）
-    MERGE_WHITE_HOLD_RATIO: 0.34, // 保護時間のうち完全真っ白（#ffffff）を保つ前半比率（後半66%でゆっくり本色へフェード）
+    MERGE_PROTECT_MIN_MS: 680,    // 合体後の真っ白フラッシュ＆連鎖保護時間下限（ms）
+    MERGE_PROTECT_MAX_MS: 1200,   // 合体後の真っ白フラッシュ＆連鎖保護時間上限（ms）
+    MERGE_WHITE_HOLD_RATIO: 0.30, // 保護時間のうち完全真っ白（#ffffff）を保つ前半比率（後半70%でゆっくり本色へフェード）
     MERGE_BASE_DELAY_MS: 40,      // 最小ゼリーの合体保護ディレイ基準（ms）
-    MERGE_AREA_DELAY_FACTOR: 0.010, // 面積に応じて吸い付き時間を延ばす係数
-    MERGE_PROTECT_AREA_FACTOR: 0.018 // 面積に応じて保護＆色戻り時間を延ばす専用係数（吸い付きのキレと分離）
+    MERGE_AREA_DELAY_FACTOR: 0.011, // 面積に応じて吸い付き時間を延ばす係数
+    MERGE_PROTECT_AREA_FACTOR: 0.023 // 面積に応じて保護＆色戻り時間を延ばす専用係数（吸い付きのキレと分離）
 };
 
 export const SCORE = {
     COMBO_MULTIPLIER: 1.5,        // 互換維持用（本家仕様では盤面有効値総和スコアを使用）
-    CHAIN_WINDOW_MS: 1850         // 連鎖合体（音程上昇演出用）の判定ウィンドウ（ms）
+    CHAIN_WINDOW_MS: 2100         // 連鎖合体（音程上昇演出用）の判定ウィンドウ（ms）
 };
 
 // ==========================================
