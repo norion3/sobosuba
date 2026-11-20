@@ -1,10 +1,9 @@
 /**
  * render.js
- * @version v7.2 (Text Visibility, Anti-Jitter Deadzone & Smoothstep Merge Flash - Phase 5)
+ * @version v7.3 (Cosine Merge Flash Fade & Fallback Sync - Phase 3)
  * @changes
- *   - 潰された塊の数字視認性を改善するため、フォントサイズ算出に多角形の面積等価半径をブレンドして過度な縮小を防止し、最小フォントサイズを 11.5px へ引き上げ、未合体文字ウェイトを 600（合体済みは 900）・透明度フォールバックを 0.72 へ改善
- *   - 圧迫下での数字ブルブル振動を完全根絶するため、描画専用の文字位置・角度・フォントサイズに対して微小変化デッドゾーン（位置 0.45px / 角度 0.025rad / サイズ 0.35px）＋ローパス補間（lerp）を導入（高速移動時は遅延ゼロ追従）
- *   - 本家準拠の「白く変わりゆっくり結合後の色へ戻る間」を演出するため、合体真っ白フラッシュの保持比率フォールバックを 0.35 へ同期し、色戻りフェードを滑らかな Smoothstep 反転カーブ（1 - t * t * (3 - 2 * t)）へ更新
+ *   - 合体真っ白フラッシュの後半色戻りフェードを Smoothstep 反転カーブから、白の余韻がじんわり粘りながら滑らかに本色へ溶け戻るコサイン減衰（Math.cos(fadeT * Math.PI * 0.5)）へ変更
+ *   - v7.3 延長済み合体保護時間（520〜960ms）および白保持比率（0.34）に合わせて、drawSingleSoftBody() 内のフォールバック値（520 / 0.34）を同期
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -472,20 +471,20 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta) {
         ctx.fill();
     }
 
-    // (B) 本家準拠「合体瞬間の真っ白フラッシュ」（保護時間 340〜660ms と 1対1 完全同期）
-    // 前半 35% は完全白（#ffffff）を保持し、後半 65% で Smoothstep 反転カーブによりゆっくり本色へ溶け戻る
+    // (B) 本家準拠「合体瞬間の真っ白フラッシュ」（保護時間 520〜960ms と 1対1 完全同期）
+    // 前半 34% は完全白（#ffffff）を保持し、後半 66% でコサイン減衰によりゆっくり本色へ溶け戻る
     if (comp.mergeFlashUntil && now < comp.mergeFlashUntil) {
-        const flashStart = comp.mergeFlashStart || comp.createdAt || (comp.mergeFlashUntil - 340);
+        const flashStart = comp.mergeFlashStart || comp.createdAt || (comp.mergeFlashUntil - 520);
         const totalFlash = Math.max(1, comp.mergeFlashUntil - flashStart);
         const progress = Math.max(0, Math.min(1, (now - flashStart) / totalFlash));
-        const whiteHoldRatio = (EFFECTS.MERGE_WHITE_HOLD_RATIO !== undefined) ? EFFECTS.MERGE_WHITE_HOLD_RATIO : 0.35;
+        const whiteHoldRatio = (EFFECTS.MERGE_WHITE_HOLD_RATIO !== undefined) ? EFFECTS.MERGE_WHITE_HOLD_RATIO : 0.34;
 
         if (progress <= whiteHoldRatio) {
             ctx.fillStyle = '#ffffff';
             ctx.fill();
         } else {
             const fadeT = Math.max(0, Math.min(1, (progress - whiteHoldRatio) / Math.max(0.01, 1 - whiteHoldRatio)));
-            const whiteAlpha = 1 - fadeT * fadeT * (3 - 2 * fadeT);
+            const whiteAlpha = Math.cos(fadeT * Math.PI * 0.5);
             if (whiteAlpha > 0.005) {
                 ctx.fillStyle = `rgba(255, 255, 255, ${whiteAlpha.toFixed(3)})`;
                 ctx.fill();

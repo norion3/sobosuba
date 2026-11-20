@@ -1,9 +1,9 @@
 /**
  * jelly.js
- * @version v7.2 (Impulse X/Y Independent Clamp & Merge Timing Fallback Sync - Phase 3)
+ * @version v7.3 (Extended Merge Protect Timing & Chain Window Sync - Phase 2)
  * @changes
- *   - 高速落下中のゼリーが合体衝撃波で急ブレーキする不整合を解消するため、フィールド内合体インパルスの速度クランプを MAX_PARTICLE_VX（10.5）/ MAX_PARTICLE_VY（11.0）のX/Y独立クランプへ統一
- *   - 本家準拠の合体の間・真っ白→ゆっくり色戻り演出に合わせ、吸い付き時間・保護時間・連鎖ウィンドウのフォールバック値を v7.2 新定数（65 / 130 / 340 / 660 / 0.010 / 1400）へ同期
+ *   - 合体後の保護時間（真っ白フラッシュ＆連鎖の間）を本家準拠の余韻へ延長するため、calcAreaMergeProtectMs() が新設の EFFECTS.MERGE_PROTECT_AREA_FACTOR（0.018）および新フォールバック（520 / 960ms）を参照するよう更新（吸い付きディレイ 65〜130ms は無変更でキレを維持）
+ *   - 延長された合体の間でも連鎖ピッチ上昇が途切れないよう、SCORE.CHAIN_WINDOW_MS のフォールバック値を 1850 へ同期
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
@@ -57,7 +57,7 @@ function calcAreaAnticipationDelayMs(value) {
 }
 
 /**
- * ゼリーの面積に応じた合体後の保護時間（340〜660ms：真っ白フラッシュ＆連鎖の間と1対1同期）を算出する
+ * ゼリーの面積に応じた合体後の保護時間（520〜960ms：真っ白フラッシュ＆連鎖の間と1対1同期）を算出する
  * @param {number} value - 合体後に生成されたゼリー数値
  * @returns {number} 合体保護時間（ミリ秒）
  */
@@ -65,9 +65,9 @@ function calcAreaMergeProtectMs(value) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384] || JELLY_CONFIG[8192];
     const radius = config ? config.radius : 21.5;
     const area = Math.PI * radius * radius;
-    const minMs = EFFECTS.MERGE_PROTECT_MIN_MS || 340;
-    const maxMs = EFFECTS.MERGE_PROTECT_MAX_MS || 660;
-    const areaFactor = EFFECTS.MERGE_AREA_DELAY_FACTOR || 0.010;
+    const minMs = EFFECTS.MERGE_PROTECT_MIN_MS || 520;
+    const maxMs = EFFECTS.MERGE_PROTECT_MAX_MS || 960;
+    const areaFactor = EFFECTS.MERGE_PROTECT_AREA_FACTOR || 0.018;
     return Math.max(minMs, Math.min(maxMs, Math.round(minMs + area * areaFactor)));
 }
 
@@ -386,7 +386,7 @@ export function handleMerges(world) {
 
     // 3. 追加（合体後の成長）処理
     if (compositesToAdd.length > 0) {
-        const chainWindowMs = SCORE.CHAIN_WINDOW_MS || 1400;
+        const chainWindowMs = SCORE.CHAIN_WINDOW_MS || 1850;
         const growStartScale = EFFECTS.MERGE_GROW_START_SCALE || 0.78;
         const baseImpulse = PHYSICS.MERGE_RADIAL_IMPULSE || 1.45;
 
@@ -433,7 +433,7 @@ export function handleMerges(world) {
                 growStartScale
             );
 
-            // 本家準拠：合体保護時間（340〜660ms）と真っ白フラッシュ（mergeFlashStart / mergeFlashUntil）を1対1完全同期
+            // 本家準拠：合体保護時間（520〜960ms）と真っ白フラッシュ（mergeFlashStart / mergeFlashUntil）を1対1完全同期
             // 真っ白から本色へ戻りきった瞬間に次の連鎖合体が解禁される
             const protectionMs = calcAreaMergeProtectMs(val);
             newJellyComposite.mergeProtectedUntil = now + protectionMs;
