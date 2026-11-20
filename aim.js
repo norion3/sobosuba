@@ -1,8 +1,10 @@
 /**
  * aim.js
- * @version v7.2 (Hop Preview Air Friction Exact Sync - Phase 4)
+ * @version v7.7 (Water-Bubble Select & Shoot Power Audio Integration - Phase 3)
  * @changes
- *   - updateHopPreviewPoints() の空気抵抗計算から * timeScale を除去し、Matter.js 0.20 実物理と同じ airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012) へ修正することで、大ホップ時の予測ドットと実着地点の 15〜22px ズレを 1〜2px 以内へ解消
+ *   - sound.js のインポートを /sobosuba/sound.js?v=7 へ更新し、上段タップ選択音 playSoundSelect を追加インポート
+ *   - startAimDrag() で上段ゼリー選択成功時に playSoundSelect(closest.jellyValue) を呼び出すよう追加
+ *   - endAimDrag() で通常発射／そっと落とし時のドラッグ強度比率 powerRatio（0.0〜1.0）を算出し、playSoundShoot(powerRatio) へ渡すよう拡張
  * 
  * 上段フロートバーのゼリー選択、360度順方向ダイレクトエイム、
  * 天井非激突2.5D上段飛び越えホップ自動切替および放物線軌道プレビュー計算を担う操作モジュール
@@ -16,7 +18,7 @@ import {
     launchBarHop
 } from '/sobosuba/softbody.js?v=7';
 import { getFloatingJellies } from '/sobosuba/floatbar.js?v=7';
-import { ensureAudioRunning, playSoundShoot, playSoundHop } from '/sobosuba/sound.js?v=6';
+import { ensureAudioRunning, playSoundSelect, playSoundShoot, playSoundHop } from '/sobosuba/sound.js?v=7';
 
 // ==========================================
 // ホップ軌道プレビュー計算用の事前確保スクラッチバッファ（GC負荷削減）
@@ -414,6 +416,9 @@ export function startAimDrag(world, gameState, startX, startY) {
     gameState.dragVectorX = 0;
     gameState.dragVectorY = 0;
 
+    // 上段ゼリー選択時の極小水球タッチ音（「ぷにっ」）を再生
+    playSoundSelect(closest.jellyValue);
+
     return true;
 }
 
@@ -473,16 +478,20 @@ export function endAimDrag(gameState, onLaunchedCallback = null, world = null) {
         // 4. 水平〜下方向へ伸ばして離した場合 → 「通常ショット（端狙い・斜め下すり抜け保護付き加算速度発射）」
         let addVelocity = { x: 0, y: 0 };
         let useBarGrace = false;
+        let powerRatio = 0;
         if (dist >= cancelRadius) {
             const safeAim = clampAimVector(vecX, vecY);
             const forceMult = (PHYSICS.AIM_FORCE_MULTIPLIER !== undefined) ? PHYSICS.AIM_FORCE_MULTIPLIER : 0.056;
+            const maxDrag = Math.max(cancelRadius + 1, PHYSICS.AIM_MAX_DRAG || 120);
+            const safeDist = Math.sqrt(safeAim.x * safeAim.x + safeAim.y * safeAim.y);
+            powerRatio = Math.max(0, Math.min(1, (safeDist - cancelRadius) / (maxDrag - cancelRadius)));
             addVelocity = {
                 x: safeAim.x * forceMult,
                 y: safeAim.y * forceMult
             };
             useBarGrace = shouldEnableBarLaunchGrace(selected, safeAim, world);
         }
-        playSoundShoot();
+        playSoundShoot(powerRatio);
         launchFloatingJelly(selected, addVelocity, useBarGrace);
     }
 

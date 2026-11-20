@@ -1,8 +1,11 @@
 /**
  * jelly.js
- * @version v7.4 (Merge Anticipation, Protect Timing & Chain Window Fallback Sync - Phase 3)
+ * @version v7.7 (Water-Bubble Sound Integration, Merge Anticipate & Wall Bounce Audio - Phase 2)
  * @changes
- *   - 最終確定版 v7.4 の合体の間定数に合わせ、calcAreaAnticipationDelayMs()（80 / 145 / 0.011）、calcAreaMergeProtectMs()（680 / 1200 / 0.023）、および SCORE.CHAIN_WINDOW_MS（2100）のフォールバック値を同期
+ *   - sound.js のインポートを /sobosuba/sound.js?v=7 へ更新し、吸い付き開始音 playSoundMergeAnticipate を追加インポート
+ *   - handleCollisions() で合体成立判定を先に評価し、合体が成立する同数字ペアでは通常衝突音（playSoundCollide）をスキップして playSoundMergeAnticipate(bodyA.jellyValue) へ一本化（0ms 二重濁りを根絶、保護中同数字接触は通常衝突音を維持）
+ *   - handleCollisions() へ静的壁・床・スロープ（isStatic === true）との法線方向接近速度（> 1.8 px/frame・ペアキー ${jellyId}|WALL 450ms クールダウン）による控えめな水球バウンド音を追加（壁沿い縦滑落の誤爆ゼロ）
+ *   - handleMerges() の合体音呼び出しを playSoundMerge(currentChainCount, val) へ拡張し、合体後のサイズ数値を連携
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
@@ -16,7 +19,7 @@
 import Matter from 'https://esm.sh/matter-js';
 import { GAME_WIDTH, GAME_HEIGHT, CONTAINER, JELLY_CONFIG, PHYSICS, FLOAT_BAR, EFFECTS, SCORE } from '/sobosuba/constants.js?v=7';
 import { createSoftBodyJelly, getSoftBodyCentroid, getCapsuleHalfExtentsForValue } from '/sobosuba/softbody.js?v=7';
-import { playSoundCollide, playSoundMerge } from '/sobosuba/sound.js?v=6';
+import { playSoundCollide, playSoundMerge, playSoundMergeAnticipate } from '/sobosuba/sound.js?v=7';
 
 const Composite = Matter.Composite;
 const Body = Matter.Body;
@@ -172,7 +175,8 @@ export function resetMergeQueues() {
 }
 
 /**
- * 衝突イベントを処理し、重心法線接近速度ベースの衝突音判定および同数字ソフトボディの合体キュー登録を行う
+ * 衝突イベントを処理し、同数字ソフトボディの合体キュー登録（吸い付き音含む）および
+ * 重心法線接近速度ベースの衝突音・静的壁バウンド音判定を行う
  * @param {Object} event - Matter.js の collisionStart / collisionActive イベントオブジェクト
  * @param {boolean} allowCollideSound - 衝突音を鳴らすかどうか（collisionActive 呼び出し時は false 指定可）
  * @returns {number} このフレームで獲得した本家準拠スコア（未合体Soboの初参加分のみ）
@@ -188,58 +192,12 @@ export function handleCollisions(event, allowCollideSound = true) {
     const barAttachMaxY = (FLOAT_BAR.HOP_RECATCH_Y_MAX || (FLOAT_BAR.Y + 30)) + 16;
 
     for (let i = 0; i < pairs.length; i++) {
-        const bodyA = pairs[i].bodyA;
-        const bodyB = pairs[i].bodyB;
+        const pair = pairs[i];
+        const bodyA = pair.bodyA;
+        const bodyB = pair.bodyB;
+        let mergeTriggered = false;
 
-        // --- 衝突音の判定と再生（重心法線接近速度判定 ＋ 同一ゼリーペア別 450ms クールダウン） ---
-        if (allowCollideSound &&
-            bodyA.label === 'jelly_particle' &&
-            bodyB.label === 'jelly_particle' &&
-            bodyA.jellyId !== bodyB.jellyId) {
-
-            const compA = bodyA.parentComposite;
-            const compB = bodyB.parentComposite;
-
-            if (compA && compB && !compA.isMerging && !compB.isMerging) {
-                const posA = compA.centroid || getSoftBodyCentroid(compA) || bodyA.position;
-                const posB = compB.centroid || getSoftBodyCentroid(compB) || bodyB.position;
-                const velA = compA.centroidVel;
-                const velB = compB.centroidVel;
-
-                if (posA && posB && velA && velB) {
-                    const dx = posB.x - posA.x;
-                    const dy = posB.y - posA.y;
-                    const dist = Math.sqrt(dx * dx + dy * dy);
-
-                    if (dist > 0.001) {
-                        // A→B の単位法線方向への重心接近速度のみを評価（離反・すれ違い・下敷き微振動は無音）
-                        const ux = dx / dist;
-                        const uy = dy / dist;
-                        const approachSpeed = (velA.x - velB.x) * ux + (velA.y - velB.y) * uy;
-
-                        if (approachSpeed > minCollideSpeed) {
-                            const idA = bodyA.jellyId;
-                            const idB = bodyB.jellyId;
-                            const pairKey = (idA < idB) ? `${idA}|${idB}` : `${idB}|${idA}`;
-                            const lastPairTime = pairCollideSoundTimestamps.get(pairKey);
-
-                            if (lastPairTime === undefined || (now - lastPairTime) >= pairCooldownMs) {
-                                pairCollideSoundTimestamps.set(pairKey, now);
-                                purgeExpiredPairCooldowns(now, pairCooldownMs);
-
-                                const intensity = Math.min(1.0, approachSpeed / maxCollideSpeed);
-                                const valA = bodyA.jellyValue || 1;
-                                const valB = bodyB.jellyValue || 1;
-                                const combinedSizeValue = Math.sqrt(valA * valB);
-                                playSoundCollide(intensity, combinedSizeValue);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- 合体判定 ---
+        // --- 1. 合体判定（先に評価し、合体成立ペアでは通常衝突音をスキップして吸い付き音へ一本化） ---
         // 双方ともにゼリーの構成要素であるか確認
         if (bodyA.jellyId && bodyB.jellyId) {
             // 異なるゼリー同士であり、かつ数字が同じである場合
@@ -249,66 +207,153 @@ export function handleCollisions(event, allowCollideSound = true) {
 
                 // 双方のソフトボディが有効かつ合体処理中(isMerging)ではない場合
                 if (compA && compB && !compA.isMerging && !compB.isMerging) {
-                    // 合体直後の真っ白フラッシュ＆面積比例保護期間中であれば合体を見送る（本家準拠の階段連鎖の間）
-                    if ((compA.mergeProtectedUntil && now < compA.mergeProtectedUntil) ||
-                        (compB.mergeProtectedUntil && now < compB.mergeProtectedUntil)) {
-                        continue;
-                    }
-
-                    // GRAVITY規格: 同一フレーム内での多重発火の即時遮断（排他ロック）
-                    compA.isMerging = true;
-                    compB.isMerging = true;
-
-                    // 合体前の「吸い付きの間（80〜145ms）」用メタデータを相互付与
-                    // overlap_solver.js がこのペア同士の排斥を除外し、render.js が予兆発光を描画する
-                    const delayMs = calcAreaAnticipationDelayMs(bodyA.jellyValue);
-                    const executeTime = now + delayMs;
-                    compA.mergePartnerId = compB.jellyId;
-                    compB.mergePartnerId = compA.jellyId;
-                    compA.mergePreGlowStart = now;
-                    compB.mergePreGlowStart = now;
-                    compA.mergePreGlowUntil = executeTime;
-                    compB.mergePreGlowUntil = executeTime;
-
-                    // 中空ビーズリングの現在重心を基準に中間点を算出
-                    const posA = getSoftBodyCentroid(compA) || bodyA.position;
-                    const posB = getSoftBodyCentroid(compB) || bodyB.position;
-                    const midX = (posA.x + posB.x) / 2;
-                    const rawMidY = (posA.y + posB.y) / 2;
-                    const newValue = bodyA.jellyValue * 2;
-
-                    // バー上合体の安全条件化（下段巨大ゼリーの吸い上げグリッチ防止 ＆ 上段ホップ着地合体対応）
-                    // 1. 双方とも上段（浮遊中またはホップ中）かつ上限サイズ以下 → 確実に上段バーへ留める
-                    // 2. 片方が上段かつ上限サイズ以下で、接触位置がバー高度付近にある場合のみ上段バーへ留める
-                    const aOnBar = Boolean(compA.isFloating || compA.isBarHopping);
-                    const bOnBar = Boolean(compB.isFloating || compB.isBarHopping);
-                    const isWithinBarLimit = newValue <= maxBarMergeValue;
-                    const isFloatingMerge = isWithinBarLimit && (
-                        (aOnBar && bOnBar) ||
-                        ((aOnBar || bOnBar) && rawMidY <= barAttachMaxY)
+                    // 合体直後の真っ白フラッシュ＆面積比例保護期間中でない場合のみ合体成立（保護中は通常衝突音へフォールスルー）
+                    const isProtected = Boolean(
+                        (compA.mergeProtectedUntil && now < compA.mergeProtectedUntil) ||
+                        (compB.mergeProtectedUntil && now < compB.mergeProtectedUntil)
                     );
 
-                    const midY = isFloatingMerge ? FLOAT_BAR.Y : rawMidY;
+                    if (!isProtected) {
+                        mergeTriggered = true;
 
-                    // 即時合体させず、面積に応じた「吸い付きの間」ディレイキューに保留する
-                    pendingMerges.push({
-                        compA: compA,
-                        compB: compB,
-                        x: midX,
-                        y: midY,
-                        value: newValue,
-                        isFloating: isFloatingMerge,
-                        executeTime: executeTime
-                    });
+                        // GRAVITY規格: 同一フレーム内での多重発火の即時遮断（排他ロック）
+                        compA.isMerging = true;
+                        compB.isMerging = true;
 
-                    // 【本家完全準拠スコア計算】
-                    // 未合体（hasMerged === false）のSoboが初めて合体に参加した分のみを加算する
-                    // 既に合体済み（hasMerged === true）のSobo同士の合体は盤面総和が変わらないため +0 点
-                    if (!compA.hasMerged) {
-                        earnedScore += compA.jellyValue;
+                        // 合体前の「吸い付きの間（80〜145ms）」用メタデータを相互付与
+                        // overlap_solver.js がこのペア同士の排斥を除外し、render.js が予兆発光を描画する
+                        const delayMs = calcAreaAnticipationDelayMs(bodyA.jellyValue);
+                        const executeTime = now + delayMs;
+                        compA.mergePartnerId = compB.jellyId;
+                        compB.mergePartnerId = compA.jellyId;
+                        compA.mergePreGlowStart = now;
+                        compB.mergePreGlowStart = now;
+                        compA.mergePreGlowUntil = executeTime;
+                        compB.mergePreGlowUntil = executeTime;
+
+                        // 合体成立ペア専用の極小水膜結合音（「ちゅぷっ」）を再生
+                        playSoundMergeAnticipate(bodyA.jellyValue);
+
+                        // 中空ビーズリングの現在重心を基準に中間点を算出
+                        const posA = getSoftBodyCentroid(compA) || bodyA.position;
+                        const posB = getSoftBodyCentroid(compB) || bodyB.position;
+                        const midX = (posA.x + posB.x) / 2;
+                        const rawMidY = (posA.y + posB.y) / 2;
+                        const newValue = bodyA.jellyValue * 2;
+
+                        // バー上合体の安全条件化（下段巨大ゼリーの吸い上げグリッチ防止 ＆ 上段ホップ着地合体対応）
+                        // 1. 双方とも上段（浮遊中またはホップ中）かつ上限サイズ以下 → 確実に上段バーへ留める
+                        // 2. 片方が上段かつ上限サイズ以下で、接触位置がバー高度付近にある場合のみ上段バーへ留める
+                        const aOnBar = Boolean(compA.isFloating || compA.isBarHopping);
+                        const bOnBar = Boolean(compB.isFloating || compB.isBarHopping);
+                        const isWithinBarLimit = newValue <= maxBarMergeValue;
+                        const isFloatingMerge = isWithinBarLimit && (
+                            (aOnBar && bOnBar) ||
+                            ((aOnBar || bOnBar) && rawMidY <= barAttachMaxY)
+                        );
+
+                        const midY = isFloatingMerge ? FLOAT_BAR.Y : rawMidY;
+
+                        // 即時合体させず、面積に応じた「吸い付きの間」ディレイキューに保留する
+                        pendingMerges.push({
+                            compA: compA,
+                            compB: compB,
+                            x: midX,
+                            y: midY,
+                            value: newValue,
+                            isFloating: isFloatingMerge,
+                            executeTime: executeTime
+                        });
+
+                        // 【本家完全準拠スコア計算】
+                        // 未合体（hasMerged === false）のSoboが初めて合体に参加した分のみを加算する
+                        // 既に合体済み（hasMerged === true）のSobo同士の合体は盤面総和が変わらないため +0 点
+                        if (!compA.hasMerged) {
+                            earnedScore += compA.jellyValue;
+                        }
+                        if (!compB.hasMerged) {
+                            earnedScore += compB.jellyValue;
+                        }
                     }
-                    if (!compB.hasMerged) {
-                        earnedScore += compB.jellyValue;
+                }
+            }
+        }
+
+        // --- 2. 衝突音の判定と再生（合体成立ペアではスキップして 0ms 二重濁りを根絶） ---
+        if (allowCollideSound && !mergeTriggered) {
+            if (bodyA.label === 'jelly_particle' &&
+                bodyB.label === 'jelly_particle' &&
+                bodyA.jellyId !== bodyB.jellyId) {
+                // (A) ゼリー同士の衝突音（重心法線接近速度判定 ＋ 同一ゼリーペア別 450ms クールダウン）
+                const compA = bodyA.parentComposite;
+                const compB = bodyB.parentComposite;
+
+                if (compA && compB && !compA.isMerging && !compB.isMerging) {
+                    const posA = compA.centroid || getSoftBodyCentroid(compA) || bodyA.position;
+                    const posB = compB.centroid || getSoftBodyCentroid(compB) || bodyB.position;
+                    const velA = compA.centroidVel;
+                    const velB = compB.centroidVel;
+
+                    if (posA && posB && velA && velB) {
+                        const dx = posB.x - posA.x;
+                        const dy = posB.y - posA.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+
+                        if (dist > 0.001) {
+                            // A→B の単位法線方向への重心接近速度のみを評価（離反・すれ違い・下敷き微振動は無音）
+                            const ux = dx / dist;
+                            const uy = dy / dist;
+                            const approachSpeed = (velA.x - velB.x) * ux + (velA.y - velB.y) * uy;
+
+                            if (approachSpeed > minCollideSpeed) {
+                                const idA = bodyA.jellyId;
+                                const idB = bodyB.jellyId;
+                                const pairKey = (idA < idB) ? `${idA}|${idB}` : `${idB}|${idA}`;
+                                const lastPairTime = pairCollideSoundTimestamps.get(pairKey);
+
+                                if (lastPairTime === undefined || (now - lastPairTime) >= pairCooldownMs) {
+                                    pairCollideSoundTimestamps.set(pairKey, now);
+                                    purgeExpiredPairCooldowns(now, pairCooldownMs);
+
+                                    const intensity = Math.min(1.0, approachSpeed / maxCollideSpeed);
+                                    const valA = bodyA.jellyValue || 1;
+                                    const valB = bodyB.jellyValue || 1;
+                                    const combinedSizeValue = Math.sqrt(valA * valB);
+                                    playSoundCollide(intensity, combinedSizeValue);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // (B) 静的壁・床・スロープとの高速衝突時バウンド音（法線接近速度 > 1.8 px/frame・壁沿い縦滑落の誤爆ゼロ）
+                let jellyBody = null;
+                if (bodyA.label === 'jelly_particle' && bodyB.isStatic === true) {
+                    jellyBody = bodyA;
+                } else if (bodyB.label === 'jelly_particle' && bodyA.isStatic === true) {
+                    jellyBody = bodyB;
+                }
+
+                if (jellyBody && jellyBody.jellyId) {
+                    const comp = jellyBody.parentComposite;
+                    if (comp && !comp.isFloating && !comp.isMerging) {
+                        const normal = pair.collision ? pair.collision.normal : null;
+                        const vel = comp.centroidVel || jellyBody.velocity;
+                        if (normal && vel) {
+                            const vn = Math.abs(vel.x * normal.x + vel.y * normal.y);
+                            if (vn > 1.8) {
+                                const intensity = Math.min(1.0, (vn - 1.4) / 6.0) * 0.60;
+                                if (intensity >= 0.1) {
+                                    const pairKey = `${jellyBody.jellyId}|WALL`;
+                                    const lastPairTime = pairCollideSoundTimestamps.get(pairKey);
+                                    if (lastPairTime === undefined || (now - lastPairTime) >= pairCooldownMs) {
+                                        pairCollideSoundTimestamps.set(pairKey, now);
+                                        purgeExpiredPairCooldowns(now, pairCooldownMs);
+                                        playSoundCollide(intensity, jellyBody.jellyValue || 1);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -441,14 +486,14 @@ export function handleMerges(world) {
 
             Composite.add(world, newJellyComposite);
 
-            // サウンド連携: 連鎖ウィンドウ内であれば連鎖カウントを進めて半音ずつピッチ上昇
+            // サウンド連携: 連鎖ウィンドウ内であれば連鎖カウントを進めて純正ペンタトニック上昇＋サイズ連動ボディを再生
             if (now - lastMergeSoundTime <= chainWindowMs) {
                 currentChainCount++;
             } else {
                 currentChainCount = 0;
             }
             lastMergeSoundTime = now;
-            playSoundMerge(currentChainCount);
+            playSoundMerge(currentChainCount, val);
 
             // ==========================================
             // フィールド内合体時の連鎖膨張インパルス（X/Y独立最大速度上限 MAX_PARTICLE_VX / MAX_PARTICLE_VY 統一）

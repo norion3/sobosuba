@@ -1,10 +1,8 @@
 /**
  * main.js
- * @version v7.5 (Remove Best Score Persistence & UI Sync - Phase 2)
+ * @version v7.7 (Water-Bubble Sound Module Cache Query Sync - Phase 4)
  * @changes
- *   - dom_ui.js からの updateBestScoreUI インポートを削除
- *   - 不要となった BEST_SCORE_STORAGE_KEY、loadBestScore()、saveBestScore()、および gameState.bestScore を削除
- *   - bootGame()・startGame()・applyCollisionScore()・gameLoop() 内のベストスコア比較・localStorage 保存・updateBestScoreUI() 呼び出しを削除し、showGameOverUI(finalScoreSnapshot) の1引数呼び出しへ整理
+ *   - GRAVITY WebView キャッシュ不整合を防止するため、sound.js の絶対パスインポートを /sobosuba/sound.js?v=6 から /sobosuba/sound.js?v=7 へ統一（ロジック変更なし）
  * 
  * sobosuba風パズル（中空ビーズリング・ソフトボディ版）のマスター統合モジュール
  * 
@@ -23,7 +21,7 @@ import { resetAimState, syncAimToPointer, startAimDrag, updateAimDrag, endAimDra
 import { renderGame } from '/sobosuba/render.js?v=7';
 import { initUI, updateSoundUI, applyViewportSize, getCanvasStageElement, updateScoreUI, showGameOverUI, hideGameOverUI, setWarningEffect } from '/sobosuba/dom_ui.js?v=7';
 import { initInput, getPointerState, updateScale } from '/sobosuba/input.js?v=7';
-import { isSoundEnabled, toggleSound, playSoundGameOverZap } from '/sobosuba/sound.js?v=6';
+import { isSoundEnabled, toggleSound, playSoundGameOverZap } from '/sobosuba/sound.js?v=7';
 
 // ==========================================
 // グローバル変数・ゲームステート
