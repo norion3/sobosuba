@@ -1,9 +1,9 @@
 /**
  * overlap_solver.js
- * @version v7.9 (Composite Ejection with Wall-Clearance Avoidance & One-Pass Intrusion Cache - Phase 3)
+ * @version v8.1 (Relaxed Normal Velocity Absorption for Wedge Entry & Wave Propagation - Phase 3)
  * @changes
- *   - 事前確保バッファ insideFlagsBuffer（Uint8Array(64)）と tempWallCheckPoint を追加し、resolvePolygonIntrusion() の1パス内包判定キャッシュ化および壁・床・45度スロープ塞がり回避ペナルティ（clampPointToContainer 基準 rB + rA * 2.2）付きの統一方向脱出（Composite Ejection：!bothFloating 限定・上限 maxPush * 1.35・脱出後 centroid / aabb 即同期・法線接近速度吸収）を実装
- *   - 通常部分侵入時の sepPad を (rA + rB) * 0.48 へ調整し、solveAntiOverlap() のフォールバック値を v7.9 新定数（0.68 / 3.8 / 0.35）へ同期
+ *   - 塊と塊の隙間へ打ち込んだときの押し分け・隙間進入エネルギーと周囲への連動波及を滑らかに伝えるため、resolvePolygonIntrusion() の通常部分侵入時における衝突法線速度吸収率を緩和（侵入ビーズ側: 0.72 → 0.56 / 相手エッジ主ビーズ: 0.55 → 0.40 / 相手エッジ隣接ビーズ: 0.25 → 0.18）
+ *   - 内包時の統一方向脱出（Composite Ejection）における速度吸収率（0.72 / 0.55 / 0.25）およびその他ロジックは飛び出し防止のため現行維持
  * 
  * ソフトボディ間の「非侵入（Anti-Overlap）排斥ソルバー」および共通幾何判定を提供するモジュール
  * 
@@ -473,17 +473,17 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
         applyClampedPush(pPrevA, ux * sidePushA, uy * sidePushA, rA);
         applyClampedPush(pNextA, ux * sidePushA, uy * sidePushA, rA);
 
-        // 双方衝突法線速度吸収（侵入ビーズ側：相手内部へ潜り込み続ける速度成分を吸収）
+        // 双方衝突法線速度吸収（侵入ビーズ側：隙間進入と連動波及を活かすため吸収率を 0.56 へ緩和）
         const velDotA = p.velocity.x * ux + p.velocity.y * uy;
         if (velDotA < 0) {
             Body.setVelocity(p, {
-                x: p.velocity.x - ux * velDotA * 0.72,
-                y: p.velocity.y - uy * velDotA * 0.72
+                x: p.velocity.x - ux * velDotA * 0.56,
+                y: p.velocity.y - uy * velDotA * 0.56
             });
         }
 
         // (B) 相手エッジへの反作用を隣接ビーズへも滑らかに分散（局所的なえぐれ・引きつり防止）
-        // あわせて相手エッジ側ビーズの衝突法線接近速度も吸収しジッターを遮断
+        // あわせて相手エッジ側ビーズの衝突法線接近速度も吸収しジッターを遮断しつつ周囲連動を滑らかに伝達
         const w1 = 1 - bestT;
         const w2 = bestT;
         const b1Body = ptsB[bestIdx1];
@@ -504,25 +504,25 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
                 const s1 = pushB * sideScale * w1;
                 applyClampedPush(b1Body, -ux * m1, -uy * m1, rB);
                 applyClampedPush(bPrevBody, -ux * s1, -uy * s1, rB);
-                absorbEdgeApproachVelocity(b1Body, ux, uy, 0.55 * w1);
-                absorbEdgeApproachVelocity(bPrevBody, ux, uy, 0.25 * w1);
+                absorbEdgeApproachVelocity(b1Body, ux, uy, 0.40 * w1);
+                absorbEdgeApproachVelocity(bPrevBody, ux, uy, 0.18 * w1);
             }
             if (w2 > 0.001) {
                 const m2 = pushB * mainScale * w2;
                 const s2 = pushB * sideScale * w2;
                 applyClampedPush(b2Body, -ux * m2, -uy * m2, rB);
                 applyClampedPush(bNextBody, -ux * s2, -uy * s2, rB);
-                absorbEdgeApproachVelocity(b2Body, ux, uy, 0.55 * w2);
-                absorbEdgeApproachVelocity(bNextBody, ux, uy, 0.25 * w2);
+                absorbEdgeApproachVelocity(b2Body, ux, uy, 0.40 * w2);
+                absorbEdgeApproachVelocity(bNextBody, ux, uy, 0.18 * w2);
             }
         } else {
             if (w1 > 0.001) {
                 applyClampedPush(b1Body, -ux * pushB * w1, -uy * pushB * w1, rB);
-                absorbEdgeApproachVelocity(b1Body, ux, uy, 0.55 * w1);
+                absorbEdgeApproachVelocity(b1Body, ux, uy, 0.40 * w1);
             }
             if (w2 > 0.001) {
                 applyClampedPush(b2Body, -ux * pushB * w2, -uy * pushB * w2, rB);
-                absorbEdgeApproachVelocity(b2Body, ux, uy, 0.55 * w2);
+                absorbEdgeApproachVelocity(b2Body, ux, uy, 0.40 * w2);
             }
         }
     }

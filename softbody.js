@@ -1,17 +1,17 @@
 /**
  * softbody.js
- * @version v8.0 (Air Super-Fluid & Settled Large-Jelly Pressure Two-Stage Interpolation - Phase 2)
+ * @version v8.1 (Anisotropic Vertical-Rise Guard, Wave-Reset Settle Damping & Fallback Sync - Phase 2)
  * @changes
- *   - createSoftBodyJelly() で下段合体生成（!isFloating）時は hasLanded = true / landedFirmness = 1.0 / _lastAppliedFirmness = 1.0 かつ下段定着バネ剛性で初期化し、上段スポーン（isFloating）時は hasLanded = false / landedFirmness = 0.0 / _lastAppliedFirmness = 0.0 かつ現行上段剛性で初期化するよう拡張
- *   - launchFloatingJelly() で hasLanded = false / landedAt = 0 / launchedAt = now / landedFirmness = 0.0 / _lastAppliedFirmness = -1 を設定して空中超液体モードへ移行し、launchBarHop() およびホップ着地復帰時は上段完全保護状態を維持するよう更新
- *   - updateGrowAndMorphConstraints() で landedFirmness 更新（120ms ホールド → 320ms Smoothstep ランプ・1800ms フェイルセーフ）を早期リターンより前に実行し、effectiveBarBlend = (comp.isFloating || comp.isBarHopping) ? 1.0 : shapeBlend による2段連続補間でバネ剛性を同期（定着完了後は再代入スキップ）
- *   - applyVolumeAndShapeForces() へ同一の2段連続補間を適用し、applyAdaptiveSettleDamping() へ未着地・定着遷移中ガード（!comp.hasLanded || landedFirmness < 0.999）を追加
+ *   - applyVolumeAndShapeForces() の最小距離ガードへ、anisoBlend = 1 - effectiveBarBlend と wy = radialY^2 による完全連続・異方性（縦保護・横自由：HORIZ_MIN_DIST_SCALE: 0.78 / HORIZ_RESTORE_SCALE: 0.40）補間を実装（上段待機・ホップ中は等方 100% 不変）
+ *   - applyAdaptiveSettleDamping() の面積歪み保護閾値を 0.12 → 0.20 へ適正化し、外周ビーズの重心相対速度の二乗平均による衝撃波打ち検知（avgRelSpeedSq >= SETTLE_REL_WAVE_THRESHOLD^2 で lowSpeedMs = 0 リセット）を追加
+ *   - v8.1 最終確定定数（SETTLED_* / AIR_* / SMALL_* / LAND_* / HOP_GRAVITY_SCALE / PRESSURE_* / SETTLE_*）のフォールバック値を同期
  * 
  * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
  * 中心に剛体コアを持たず、外周の隙間ゼロ細密ビーズリングと柔らかな表面張力・曲げ拘束・
  * 強化非線形バルク内圧・体積粘性・分散非侵入排斥により、上段では横長カプセルとして並び、
- * 落下〜着地インパクト直後は超液体のようにたわみ、下段定着後は全サイズでしっかり支え合う本家sobosuba風の挙動を実現します。
+ * 落下〜着地インパクト直後は超液体のようにたわみ、下段定着後は軽気体バルーンのように
+ * 縦に立ち上がって体積を保ちつつ周囲へ心地よく波紋を伝える本家sobosuba風の挙動を実現します。
  * ESM経由でMatter.jsを直接読み込み、起動エラーを防ぎます。
  */
 
@@ -339,10 +339,10 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     const initialMask = getCollisionMaskForCategory(initialCategory);
 
     // 上段スポーン時は現行上段剛性を完全保護、下段合体生成（!isFloating）時は最初から下段定着耐圧で初期化
-    const settledSkinBase = (PHYSICS.SETTLED_SKIN_STIFFNESS !== undefined) ? PHYSICS.SETTLED_SKIN_STIFFNESS : 0.350;
-    const settledBendBase = (PHYSICS.SETTLED_BEND_STIFFNESS !== undefined) ? PHYSICS.SETTLED_BEND_STIFFNESS : 0.205;
-    const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.085;
-    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.170;
+    const settledSkinBase = (PHYSICS.SETTLED_SKIN_STIFFNESS !== undefined) ? PHYSICS.SETTLED_SKIN_STIFFNESS : 0.335;
+    const settledBendBase = (PHYSICS.SETTLED_BEND_STIFFNESS !== undefined) ? PHYSICS.SETTLED_BEND_STIFFNESS : 0.135;
+    const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.065;
+    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.135;
     const initialSkinStiffness = isFloating
         ? PHYSICS.SKIN_STIFFNESS
         : (settledSkinBase + smallSkinBoost * smallBoostFactor);
@@ -785,11 +785,11 @@ function updateGrowAndMorphConstraints(comp, now) {
         needsStiffnessSync = true;
     }
 
-    // (C) 空中超液体 → 着地後 120ms ホールド → 320ms Smoothstep ランプによる landedFirmness 更新
+    // (C) 空中超液体 → 着地後 180ms ホールド → 420ms Smoothstep ランプによる landedFirmness 更新
     // モーフィング完了後に着地した場合も確実に移行させるため、早期リターンより前に評価する
     if (!isBarState) {
         if (!comp.hasLanded) {
-            const failsafeMs = (PHYSICS.LAND_FAILSAFE_MS !== undefined) ? PHYSICS.LAND_FAILSAFE_MS : 1800;
+            const failsafeMs = (PHYSICS.LAND_FAILSAFE_MS !== undefined) ? PHYSICS.LAND_FAILSAFE_MS : 2200;
             if (comp.launchedAt > 0 && (now - comp.launchedAt) >= failsafeMs) {
                 comp.hasLanded = true;
                 comp.landedAt = now;
@@ -798,8 +798,8 @@ function updateGrowAndMorphConstraints(comp, now) {
 
         if (comp.hasLanded) {
             if (comp.landedFirmness === undefined || comp.landedFirmness < 0.999) {
-                const holdMs = (PHYSICS.LAND_SOFT_HOLD_MS !== undefined) ? PHYSICS.LAND_SOFT_HOLD_MS : 120;
-                const rampMs = Math.max(1, PHYSICS.LAND_FIRM_RAMP_MS || 320);
+                const holdMs = (PHYSICS.LAND_SOFT_HOLD_MS !== undefined) ? PHYSICS.LAND_SOFT_HOLD_MS : 180;
+                const rampMs = Math.max(1, PHYSICS.LAND_FIRM_RAMP_MS || 420);
                 const elapsedLand = Math.max(0, now - (comp.landedAt || now));
                 if (elapsedLand <= holdMs) {
                     comp.landedFirmness = 0.0;
@@ -832,12 +832,12 @@ function updateGrowAndMorphConstraints(comp, now) {
     const firmness = isBarState ? 0.0 : ((comp.landedFirmness !== undefined) ? comp.landedFirmness : 1.0);
     const smallBoostFactor = comp.smallBoostFactor || 0;
 
-    const airSkin = (PHYSICS.AIR_SKIN_STIFFNESS !== undefined) ? PHYSICS.AIR_SKIN_STIFFNESS : 0.26;
-    const airBend = (PHYSICS.AIR_BEND_STIFFNESS !== undefined) ? PHYSICS.AIR_BEND_STIFFNESS : 0.115;
-    const settledSkinBase = (PHYSICS.SETTLED_SKIN_STIFFNESS !== undefined) ? PHYSICS.SETTLED_SKIN_STIFFNESS : 0.350;
-    const settledBendBase = (PHYSICS.SETTLED_BEND_STIFFNESS !== undefined) ? PHYSICS.SETTLED_BEND_STIFFNESS : 0.205;
-    const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.085;
-    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.170;
+    const airSkin = (PHYSICS.AIR_SKIN_STIFFNESS !== undefined) ? PHYSICS.AIR_SKIN_STIFFNESS : 0.25;
+    const airBend = (PHYSICS.AIR_BEND_STIFFNESS !== undefined) ? PHYSICS.AIR_BEND_STIFFNESS : 0.105;
+    const settledSkinBase = (PHYSICS.SETTLED_SKIN_STIFFNESS !== undefined) ? PHYSICS.SETTLED_SKIN_STIFFNESS : 0.335;
+    const settledBendBase = (PHYSICS.SETTLED_BEND_STIFFNESS !== undefined) ? PHYSICS.SETTLED_BEND_STIFFNESS : 0.135;
+    const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.065;
+    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.135;
 
     const settledSkin = settledSkinBase + smallSkinBoost * smallBoostFactor;
     const settledBend = settledBendBase + smallBendBoost * smallBoostFactor;
@@ -999,7 +999,7 @@ function updateBarGraceState(comp, composites, now) {
 }
 
 /**
- * サブ関数3：穏健なアンチ裏返り自動修復 OR 完全液体物理（強化非線形バルク内圧＋体積粘性＋最小距離復元）
+ * サブ関数3：穏健なアンチ裏返り自動修復 OR 軽気体バルーン物理（強化非線形バルク内圧＋体積粘性＋異方性最小距離復元）
  * ※PBD位置ワープおよび真円形状保持（SHAPE_MATCH）は完全撤廃
  */
 function applyVolumeAndShapeForces(comp, geom) {
@@ -1012,9 +1012,9 @@ function applyVolumeAndShapeForces(comp, geom) {
 
     const inversionRatio = (PHYSICS.INVERSION_AREA_RATIO !== undefined) ? PHYSICS.INVERSION_AREA_RATIO : 0.18;
     const barPressure = PHYSICS.SOFTBODY_PRESSURE || 0.00415;
-    const nlGain = (PHYSICS.PRESSURE_NONLINEAR_GAIN !== undefined) ? PHYSICS.PRESSURE_NONLINEAR_GAIN : 16.0;
-    const nlThreshold = (PHYSICS.PRESSURE_NONLINEAR_THRESHOLD !== undefined) ? PHYSICS.PRESSURE_NONLINEAR_THRESHOLD : 0.08;
-    const pressureMax = PHYSICS.PRESSURE_RATIO_MAX || 7.0;
+    const nlGain = (PHYSICS.PRESSURE_NONLINEAR_GAIN !== undefined) ? PHYSICS.PRESSURE_NONLINEAR_GAIN : 14.5;
+    const nlThreshold = (PHYSICS.PRESSURE_NONLINEAR_THRESHOLD !== undefined) ? PHYSICS.PRESSURE_NONLINEAR_THRESHOLD : 0.055;
+    const pressureMax = PHYSICS.PRESSURE_RATIO_MAX || 7.5;
     const barBulkDamping = (PHYSICS.BULK_DAMPING !== undefined) ? PHYSICS.BULK_DAMPING : 0.00086;
     const barMinDistRatio = PHYSICS.SOFTBODY_MIN_DIST_RATIO || 0.78;
     const barRestoreForce = (PHYSICS.MIN_DIST_RESTORE_FORCE !== undefined) ? PHYSICS.MIN_DIST_RESTORE_FORCE : 0.00068;
@@ -1086,7 +1086,7 @@ function applyVolumeAndShapeForces(comp, geom) {
         }
     }
 
-    // (C) 強化非線形バルク内圧・体積粘性・最小距離復元（空中超液体 ⇔ 下段定着耐圧 ⇔ 上段保護の2段連続補間）
+    // (C) 強化非線形バルク内圧・体積粘性・異方性最小距離復元（空中超液体 ⇔ 下段定着耐圧 ⇔ 上段保護の2段連続補間）
     const isBarState = Boolean(comp.isFloating || comp.isBarHopping);
     const capRingMinRadius = Math.min(ringRadius, (comp.capsuleRingHalfHeight || ringRadius) * curScale);
     const shapeBlend = (comp.shapeBlend !== undefined)
@@ -1096,19 +1096,23 @@ function applyVolumeAndShapeForces(comp, geom) {
     const firmness = isBarState ? 0.0 : ((comp.landedFirmness !== undefined) ? comp.landedFirmness : 1.0);
     const smallBoostFactor = comp.smallBoostFactor || 0;
 
-    const airPressure = (PHYSICS.AIR_PRESSURE !== undefined) ? PHYSICS.AIR_PRESSURE : 0.0033;
-    const airBulkDamping = (PHYSICS.AIR_BULK_DAMPING !== undefined) ? PHYSICS.AIR_BULK_DAMPING : 0.00048;
-    const airMinDistRatio = (PHYSICS.AIR_MIN_DIST_RATIO !== undefined) ? PHYSICS.AIR_MIN_DIST_RATIO : 0.65;
-    const airRestoreForce = (PHYSICS.AIR_RESTORE_FORCE !== undefined) ? PHYSICS.AIR_RESTORE_FORCE : 0.00032;
+    const airPressure = (PHYSICS.AIR_PRESSURE !== undefined) ? PHYSICS.AIR_PRESSURE : 0.0037;
+    const airBulkDamping = (PHYSICS.AIR_BULK_DAMPING !== undefined) ? PHYSICS.AIR_BULK_DAMPING : 0.00040;
+    const airMinDistRatio = (PHYSICS.AIR_MIN_DIST_RATIO !== undefined) ? PHYSICS.AIR_MIN_DIST_RATIO : 0.64;
+    const airRestoreForce = (PHYSICS.AIR_RESTORE_FORCE !== undefined) ? PHYSICS.AIR_RESTORE_FORCE : 0.00028;
 
-    const settledPressureBase = (PHYSICS.SETTLED_PRESSURE !== undefined) ? PHYSICS.SETTLED_PRESSURE : 0.00450;
-    const settledBulkDampingBase = (PHYSICS.SETTLED_BULK_DAMPING !== undefined) ? PHYSICS.SETTLED_BULK_DAMPING : 0.00090;
+    const settledPressureBase = (PHYSICS.SETTLED_PRESSURE !== undefined) ? PHYSICS.SETTLED_PRESSURE : 0.00455;
+    const settledBulkDampingBase = (PHYSICS.SETTLED_BULK_DAMPING !== undefined) ? PHYSICS.SETTLED_BULK_DAMPING : 0.00056;
     const settledMinDistBase = (PHYSICS.SETTLED_MIN_DIST_RATIO !== undefined) ? PHYSICS.SETTLED_MIN_DIST_RATIO : 0.800;
-    const settledRestoreBase = (PHYSICS.SETTLED_RESTORE_FORCE !== undefined) ? PHYSICS.SETTLED_RESTORE_FORCE : 0.00092;
+    const settledRestoreBase = (PHYSICS.SETTLED_RESTORE_FORCE !== undefined) ? PHYSICS.SETTLED_RESTORE_FORCE : 0.00072;
 
     const smallPressureMult = (PHYSICS.SMALL_PRESSURE_MULT !== undefined) ? PHYSICS.SMALL_PRESSURE_MULT : 1.02;
-    const smallRestoreMult = (PHYSICS.SMALL_RESTORE_MULT !== undefined) ? PHYSICS.SMALL_RESTORE_MULT : 2.8;
+    const smallRestoreMult = (PHYSICS.SMALL_RESTORE_MULT !== undefined) ? PHYSICS.SMALL_RESTORE_MULT : 2.5;
     const smallMinDistBoost = (PHYSICS.SMALL_MIN_DIST_RATIO_BOOST !== undefined) ? PHYSICS.SMALL_MIN_DIST_RATIO_BOOST : 0.050;
+
+    const horizMinScale = (PHYSICS.HORIZ_MIN_DIST_SCALE !== undefined) ? PHYSICS.HORIZ_MIN_DIST_SCALE : 0.78;
+    const horizRestoreScale = (PHYSICS.HORIZ_RESTORE_SCALE !== undefined) ? PHYSICS.HORIZ_RESTORE_SCALE : 0.40;
+    const anisoBlend = 1 - effectiveBarBlend;
 
     const settledPressureMult = 1 + (smallPressureMult - 1) * smallBoostFactor;
     const settledRestoreMult = 1 + (smallRestoreMult - 1) * smallBoostFactor;
@@ -1187,10 +1191,14 @@ function applyVolumeAndShapeForces(comp, geom) {
             forceY += ny * dampForce;
         }
 
-        // 3. 最小距離復元（横潰れ限定ガード：縦方向への踏ん張りと過度なめり込みを防止）
-        if (dist < minDist) {
-            const overlap = minDist - dist;
-            const restoreMag = overlap * effectiveMinDistRestoreForce * pCurr.mass;
+        // 3. 異方性最小距離復元（上段待機・ホップ中は anisoBlend=0 で等方維持、下段は縦保護・横自由で縦立ち上がりを解放）
+        const wy = radialY * radialY;
+        const dirMinScale = 1 + ((horizMinScale + (1 - horizMinScale) * wy) - 1) * anisoBlend;
+        const dirMinDist = minDist * dirMinScale;
+        if (dist < dirMinDist) {
+            const dirRestoreScale = 1 + ((horizRestoreScale + (1 - horizRestoreScale) * wy) - 1) * anisoBlend;
+            const overlap = dirMinDist - dist;
+            const restoreMag = overlap * effectiveMinDistRestoreForce * dirRestoreScale * pCurr.mass;
             forceX += radialX * restoreMag;
             forceY += radialY * restoreMag;
         }
@@ -1341,7 +1349,7 @@ function updateBarHopState(comp, geom, composites, now, gravityY, gravityScale) 
     const particles = comp.particles;
     const n = particles.length;
     const { cx, cy, vx: avgVx, vy: avgVy } = geom;
-    const hopGravityScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.35;
+    const hopGravityScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 2.05;
     const hopMinAirMs = FLOAT_BAR.HOP_MIN_AIR_MS || 160;
     const hopRecatchYMin = FLOAT_BAR.HOP_RECATCH_Y_MIN || 92;
     const hopRecatchYMax = FLOAT_BAR.HOP_RECATCH_Y_MAX || 138;
@@ -1494,10 +1502,10 @@ function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepDampX, s
 }
 
 /**
- * サブ関数5.5：遅延ランプアップ型「適応的圧迫ダンピング」（面積歪み復元保護・着地定着保護付き）
- * 空中落下中・定着遷移中・着地直後 350ms の液体ボヨヨン揺れおよび面積歪み復元途中は無傷で保護し、
- * 下段で形状が復元しきって全体が静止（< 0.22 px/frame）し続けた場合のみ
- * 350ms → 900ms へ滑らかに重心相対速度（内部微振動）を減衰させて下敷き小塊をピタッと静寂化する
+ * サブ関数5.5：衝撃波打ち連動解放 ＆ 遅延ランプアップ型「適応的圧迫ダンピング」（面積歪み復元保護・着地定着保護付き）
+ * 空中落下中・定着遷移中・衝撃波打ち中は連動揺れを無傷で保護し、
+ * 下段で形状が復元しきって全体が静止（< 0.28 px/frame）し続けた場合のみ
+ * 650ms → 1300ms へ滑らかに重心相対速度（内部微振動）を減衰させてピタッと静寂化する
  */
 function applyAdaptiveSettleDamping(comp, geom, subDeltaMs, substeps) {
     if (comp.isFloating || comp.isBarHopping || comp.isGrowing ||
@@ -1506,15 +1514,15 @@ function applyAdaptiveSettleDamping(comp, geom, subDeltaMs, substeps) {
         return;
     }
 
-    // 面積歪みが大きい復元途中は減衰させず奇形凍結を防止
+    // 面積歪みが大きい復元途中は減衰させず奇形凍結を防止（底層の正常圧縮 10〜14% は静寂化対象へ含める）
     const targetArea = comp.targetArea || (Math.PI * (comp.ringRadius || 16) * (comp.ringRadius || 16));
     const areaRatio = geom.signedArea / Math.max(1, targetArea);
-    if (Math.abs(1 - areaRatio) > 0.12) {
+    if (Math.abs(1 - areaRatio) > 0.20) {
         comp.lowSpeedMs = 0;
         return;
     }
 
-    const speedThresh = PHYSICS.SETTLE_SPEED_THRESHOLD || 0.22;
+    const speedThresh = PHYSICS.SETTLE_SPEED_THRESHOLD || 0.28;
     const centVx = geom.vx;
     const centVy = geom.vy;
     const centSpeedSq = centVx * centVx + centVy * centVy;
@@ -1524,19 +1532,34 @@ function applyAdaptiveSettleDamping(comp, geom, subDeltaMs, substeps) {
         return;
     }
 
+    // 周囲から衝撃波を受けて表面が波打ち始めた場合のみ静寂化を一時解除（通常ジッターは無視）
+    const particles = comp.particles;
+    const n = particles.length;
+    const relWaveThresh = (PHYSICS.SETTLE_REL_WAVE_THRESHOLD !== undefined) ? PHYSICS.SETTLE_REL_WAVE_THRESHOLD : 0.48;
+    let sumRelSpeedSq = 0;
+    for (let j = 0; j < n; j++) {
+        const body = particles[j];
+        const rvx = body.velocity.x - centVx;
+        const rvy = body.velocity.y - centVy;
+        sumRelSpeedSq += rvx * rvx + rvy * rvy;
+    }
+    const avgRelSpeedSq = sumRelSpeedSq / n;
+    if (avgRelSpeedSq >= relWaveThresh * relWaveThresh) {
+        comp.lowSpeedMs = 0;
+        return;
+    }
+
     comp.lowSpeedMs = (comp.lowSpeedMs || 0) + subDeltaMs;
 
-    const delayMs = (PHYSICS.SETTLE_DELAY_MS !== undefined) ? PHYSICS.SETTLE_DELAY_MS : 350;
+    const delayMs = (PHYSICS.SETTLE_DELAY_MS !== undefined) ? PHYSICS.SETTLE_DELAY_MS : 650;
     if (comp.lowSpeedMs < delayMs) return;
 
-    const rampMs = Math.max(1, PHYSICS.SETTLE_RAMP_MS || 550);
+    const rampMs = Math.max(1, PHYSICS.SETTLE_RAMP_MS || 650);
     const rampT = Math.min(1, (comp.lowSpeedMs - delayMs) / rampMs);
-    const maxFrameDamp = PHYSICS.SETTLE_MAX_DAMPING || 0.88;
+    const maxFrameDamp = PHYSICS.SETTLE_MAX_DAMPING || 0.86;
     const frameDamp = 1 - (1 - maxFrameDamp) * rampT;
     const stepRelDamp = Math.pow(frameDamp, 1 / substeps);
 
-    const particles = comp.particles;
-    const n = particles.length;
     for (let j = 0; j < n; j++) {
         const body = particles[j];
         const relVx = body.velocity.x - centVx;
@@ -1630,7 +1653,7 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
         // 2.5 斜め下ショットすり抜け保護（AABB完全離脱検知による即解除）
         updateBarGraceState(comp, composites, now);
 
-        // 3. 穏健なアンチ裏返り修復 / 強化非線形バルク内圧・体積粘性の適用
+        // 3. 穏健なアンチ裏返り修復 / 強化非線形バルク内圧・体積粘性・異方性最小距離復元の適用
         applyVolumeAndShapeForces(comp, geom);
 
         // 4. 天井非激突 2.5D上段飛び越えホップ（半カプセル水平安定 ＆ 進行方向優先セーフ・リキャッチ）
@@ -1639,7 +1662,7 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
         // 5. 上段フロートバー上の無重力フック・柔らかな上下レール圧縮・低減衰スライド
         applyFloatBarControl(comp, geom.cx, geom.cy, gravityY, gravityScale, stepDampX, stepDampY);
 
-        // 5.5 遅延ランプアップ型「適応的圧迫ダンピング」（面積歪み復元保護・着地定着保護付き静寂化）
+        // 5.5 衝撃波打ち連動解放 ＆ 遅延ランプアップ型「適応的圧迫ダンピング」（面積歪み復元保護・着地定着保護付き静寂化）
         applyAdaptiveSettleDamping(comp, geom, safeSubDeltaMs, substeps);
 
         // 6. 全ビーズのX/Y独立最大速度クランプ
