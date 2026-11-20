@@ -1,10 +1,9 @@
 /**
  * render.js
- * @version v7.6 (Two-Pass Foreground Text Rendering & Max-Inscribed Center Placement - Phase 3)
+ * @version v7.9 (Front-Jelly Text Occlusion Guard & Bar Height Fallback Sync - Phase 5)
  * @changes
- *   - 事前確保バッファ deferredTextBuffer（ゼロアロケーション）を新設し、drawSoftBodies() の通常レイヤーを「全本体描画パス → 全数字テキスト最前面パス」へ分離することで、大塊の黒枠・本体による小塊数字の上書き隠れを根絶（2.5Dホップ中ゼリーは従来通り最前面レイヤーで影→本体→数字を描画）
- *   - 外縁ポリゴン全辺までの最短距離二乗を算出する共通ヘルパー computeMinEdgeDistSq() を新設し、下段ゼリー限定（!comp.isFloating && !comp.isBarHopping）で重心がポリゴン外または狭い場合（centroidClearance < equivalentRadius * 0.58）に重複排除済みの最大内接円中心探索（1.18倍ヒステリシス＋重心近傍優先）を実行するよう改善
- *   - 最大内接円探索でより広い移動先を採用した場合は effectiveThickness を移動先の真のクリアランス（bestClearance）で上書き更新し、広い空間に見合った見やすいフォントサイズを適用（既存デッドゾーン＋ローパス補間維持）
+ *   - 後続通常レイヤー（j > i）のゼリー物理リング内部に覆われているかを AABB 枝刈り ＋ isPointInsidePolygon で高速判定する isPointOccludedByFrontJellies() を新設し、drawSoftBodies() / drawSingleSoftBody() で手前ゼリーに覆われている数字だけは最前面バッファへ回さず即時描画することで「大塊の中に別数字が浮かぶ現象」を根絶
+ *   - v7.9 の上段カプセル帯半高（FLOAT_BAR.CHANNEL_HALF_HEIGHT: 25）に合わせ、drawSingleSoftBody() および drawAimAndHopGuide() の上段基準高さフォールバック値を 22 → 25 へ同期
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -93,6 +92,37 @@ function drawJellyTextItem(ctx, x, y, angle, scale, valueText, fillStyle, alpha,
     ctx.textBaseline = 'middle';
     ctx.fillText(valueText, 0, 0);
     ctx.restore();
+}
+
+/**
+ * 指定座標 (px, py) が、自身より後（手前）に描画される通常レイヤーのゼリー物理リング内部に
+ * 覆われているかを AABB 枝刈り ＋ Point-in-Polygon で高速判定する
+ * @param {number} px
+ * @param {number} py
+ * @param {Array<Matter.Composite>} composites
+ * @param {number} startIndex - 自身の次インデックス（compIndex + 1）
+ * @returns {boolean}
+ */
+function isPointOccludedByFrontJellies(px, py, composites, startIndex) {
+    if (!composites || startIndex < 0) return false;
+    for (let j = startIndex; j < composites.length; j++) {
+        const other = composites[j];
+        if (!other ||
+            other.label !== 'jelly_composite' ||
+            other.isBarHopping ||
+            !other.particles ||
+            other.particles.length < 3) {
+            continue;
+        }
+        const aabb = other.aabb;
+        if (aabb && (px < aabb.minX || px > aabb.maxX || py < aabb.minY || py > aabb.maxY)) {
+            continue;
+        }
+        if (isPointInsidePolygon(px, py, other.particles, other.particles.length)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -394,7 +424,7 @@ function drawBumpersAndLedBars(ctx, bumperState) {
 // ==========================================
 // サブ関数 3：ソフトボディ（幾何外向き法線・収縮補正密着スムージング・ホップ最前面ポップアップ・合体真っ白フラッシュ）
 // ==========================================
-function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false) {
+function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false, composites = null, compIndex = -1) {
     let particles = comp.particles || null;
     if (!particles) {
         particles = [];
@@ -727,7 +757,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false)
     const digitScale = valueText.length >= 5 ? 0.58 : (valueText.length >= 4 ? 0.68 : (valueText.length >= 3 ? 0.82 : 1.0));
     // 上段横長カプセル時は縦半高を基準にバランス良く収める
     const refRadius = comp.isFloating
-        ? Math.min(config.radius, (comp.capsuleHalfHeight || FLOAT_BAR.CHANNEL_HALF_HEIGHT || 22) * 1.15)
+        ? Math.min(config.radius, (comp.capsuleHalfHeight || FLOAT_BAR.CHANNEL_HALF_HEIGHT || 25) * 1.15)
         : config.radius;
     const blendedThickness = effectiveThickness * 0.55 + equivalentRadius * 0.45;
     const baseFontSize = Math.max(11.5, refRadius * 0.62 * digitScale);
@@ -749,8 +779,12 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false)
     const textAlpha = isMerged ? 1.0 : renderMeta.unmergedAlpha;
     const fontStr = `${isMerged ? '900' : '600'} ${fontSize.toFixed(1)}px "Courier New", Courier, monospace`;
 
-    // 通常レイヤーは全本体描画後に最前面へまとめて描画し、ホップ飛行中ゼリーはそのまま最前面で即時描画
-    if (deferText) {
+    // 通常レイヤーは全本体描画後に最前面へまとめて描画するが、
+    // 後続（手前）ゼリーの物理リング内部に覆われている数字だけは最前面へ透かさず即時描画する
+    const shouldDeferText = deferText &&
+        !(composites && compIndex >= 0 && isPointOccludedByFrontJellies(textX, textY, composites, compIndex + 1));
+
+    if (shouldDeferText) {
         pushDeferredText(textX, textY, displayAngle, scale, valueText, fillStyle, textAlpha, fontStr);
     } else {
         drawJellyTextItem(ctx, textX, textY, displayAngle, scale, valueText, fillStyle, textAlpha, fontStr);
@@ -773,7 +807,7 @@ function drawSoftBodies(ctx, composites, gameState) {
         resonanceLineWidth: 8.5 + pulseWave * 2.5
     };
 
-    // 1パス目：通常レイヤー（下段フィールド内 ＋ 上段待機中ゼリー）の全本体を描画し、数字はバッファへ退避
+    // 1パス目：通常レイヤー（下段フィールド内 ＋ 上段待機中ゼリー）の全本体を描画し、非遮蔽の数字はバッファへ退避
     hoppingCompositesBuffer.length = 0;
     deferredTextCount = 0;
     for (let i = 0; i < composites.length; i++) {
@@ -784,10 +818,10 @@ function drawSoftBodies(ctx, composites, gameState) {
             hoppingCompositesBuffer.push(comp);
             continue;
         }
-        drawSingleSoftBody(ctx, comp, gameState, renderMeta, true);
+        drawSingleSoftBody(ctx, comp, gameState, renderMeta, true, composites, i);
     }
 
-    // 2パス目：通常レイヤーの全数字テキストを最前面へまとめて描画（大塊の黒枠・本体による小塊数字の上書き隠れを根絶）
+    // 2パス目：通常レイヤーの非遮蔽数字テキストを最前面へまとめて描画（大塊の黒枠・本体による小塊数字の上書き隠れを根絶）
     for (let i = 0; i < deferredTextCount; i++) {
         const item = deferredTextBuffer[i];
         drawJellyTextItem(ctx, item.x, item.y, item.angle, item.scale, item.valueText, item.fillStyle, item.alpha, item.font);
@@ -812,12 +846,12 @@ function drawAimAndHopGuide(ctx, gameState) {
 
     let originX = gameState.dragStartX;
     let originY = gameState.dragStartY;
-    let selectedHalfH = 22;
+    let selectedHalfH = 25;
 
     if (gameState.selectedJelly) {
         const sel = gameState.selectedJelly;
         selectedHalfH = sel.isFloating
-            ? (sel.capsuleHalfHeight || Math.min(sel.targetRadius || 21.5, FLOAT_BAR.CHANNEL_HALF_HEIGHT || 22))
+            ? (sel.capsuleHalfHeight || Math.min(sel.targetRadius || 21.5, FLOAT_BAR.CHANNEL_HALF_HEIGHT || 25))
             : (sel.targetRadius || 21.5);
 
         if (sel.centroid) {
@@ -1013,7 +1047,7 @@ export function renderGame(ctx, world, gameState, bumperState) {
     // 2. 内壁厳密クリップ半円バンパー ＆ フレーム内「幅 5px 角丸赤点灯サイドバー」
     drawBumpersAndLedBars(ctx, bumperState);
 
-    // 3. ソフトボディ本体（通常レイヤー全本体 → 通常レイヤー全数字最前面 → ホップ最前面レイヤー）
+    // 3. ソフトボディ本体（通常レイヤー全本体 → 通常レイヤー非遮蔽数字最前面 → ホップ最前面レイヤー）
     drawSoftBodies(ctx, composites, gameState);
 
     // 4. 順方向ダイレクトエイム矢印・ホップ予測ドット・オフセットガイド

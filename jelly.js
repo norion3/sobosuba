@@ -1,11 +1,9 @@
 /**
  * jelly.js
- * @version v7.7 (Water-Bubble Sound Integration, Merge Anticipate & Wall Bounce Audio - Phase 2)
+ * @version v7.9 (Merge Spawn Containment Prevention & Wall-Escape Clearance - Phase 4)
  * @changes
- *   - sound.js のインポートを /sobosuba/sound.js?v=7 へ更新し、吸い付き開始音 playSoundMergeAnticipate を追加インポート
- *   - handleCollisions() で合体成立判定を先に評価し、合体が成立する同数字ペアでは通常衝突音（playSoundCollide）をスキップして playSoundMergeAnticipate(bodyA.jellyValue) へ一本化（0ms 二重濁りを根絶、保護中同数字接触は通常衝突音を維持）
- *   - handleCollisions() へ静的壁・床・スロープ（isStatic === true）との法線方向接近速度（> 1.8 px/frame・ペアキー ${jellyId}|WALL 450ms クールダウン）による控えめな水球バウンド音を追加（壁沿い縦滑落の誤爆ゼロ）
- *   - handleMerges() の合体音呼び出しを playSoundMerge(currentChainCount, val) へ拡張し、合体後のサイズ数値を連携
+ *   - physics.js（/sobosuba/physics.js?v=7）から clampPointToContainer を追加インポート
+ *   - handleMerges() の下段新ゼリー生成直前に、縮小スポーン輪郭内へ飲み込まれる恐れのある非合体中小〜中塊（otherRadius < spawnRadius * 0.85 かつ dist < spawnRadius + otherRadius * 0.45）のみを容器内壁クランプおよび壁際逃げ道フォールバック（中央上方向退避）付きで安全に押し分ける「合体時内包予防クリアランス処理（clearMergeSpawnOverlap / shiftCompositeClamped）」を追加
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
@@ -18,6 +16,7 @@
 
 import Matter from 'https://esm.sh/matter-js';
 import { GAME_WIDTH, GAME_HEIGHT, CONTAINER, JELLY_CONFIG, PHYSICS, FLOAT_BAR, EFFECTS, SCORE } from '/sobosuba/constants.js?v=7';
+import { clampPointToContainer } from '/sobosuba/physics.js?v=7';
 import { createSoftBodyJelly, getSoftBodyCentroid, getCapsuleHalfExtentsForValue } from '/sobosuba/softbody.js?v=7';
 import { playSoundCollide, playSoundMerge, playSoundMergeAnticipate } from '/sobosuba/sound.js?v=7';
 
@@ -31,6 +30,7 @@ const Body = Matter.Body;
 // 同じメモリ番地の配列を使い回すことでガベージコレクションの発生を抑えます。
 const compositesToRemove = [];
 const compositesToAdd = [];
+const tempClampPoint = { x: 0, y: 0 };
 
 // 接触即合体を防ぐ「吸い付きの間」ディレイキュー
 const pendingMerges = [];
@@ -145,6 +145,139 @@ function applyMergeAttraction(compA, compB, isFloatingMerge) {
             x: p.velocity.x - addX,
             y: p.velocity.y - addY
         });
+    }
+}
+
+/**
+ * 指定コンポジットの全ビーズを (shiftX, shiftY) だけ容器内壁・45度スロープ内クランプ付きで安全シフトし、
+ * centroid および aabb を即同期して重心の実際の移動距離（px）を返す
+ * @param {Matter.Composite} comp
+ * @param {number} shiftX
+ * @param {number} shiftY
+ * @returns {number} 実際の重心移動距離（px）
+ */
+function shiftCompositeClamped(comp, shiftX, shiftY) {
+    const pts = comp.particles;
+    const n = pts.length;
+    const pRadius = comp.particleRadius || 4;
+    let prevSumX = 0;
+    let prevSumY = 0;
+    let sumX = 0;
+    let sumY = 0;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    for (let i = 0; i < n; i++) {
+        const p = pts[i];
+        prevSumX += p.position.x;
+        prevSumY += p.position.y;
+        const clamped = clampPointToContainer(
+            p.position.x + shiftX,
+            p.position.y + shiftY,
+            pRadius,
+            tempClampPoint
+        );
+        Body.setPosition(p, { x: clamped.x, y: clamped.y });
+        sumX += clamped.x;
+        sumY += clamped.y;
+        if (clamped.x < minX) minX = clamped.x;
+        if (clamped.x > maxX) maxX = clamped.x;
+        if (clamped.y < minY) minY = clamped.y;
+        if (clamped.y > maxY) maxY = clamped.y;
+    }
+
+    const oldCx = prevSumX / n;
+    const oldCy = prevSumY / n;
+    const newCx = sumX / n;
+    const newCy = sumY / n;
+
+    if (comp.centroid) {
+        comp.centroid.x = newCx;
+        comp.centroid.y = newCy;
+    } else {
+        comp.centroid = { x: newCx, y: newCy };
+    }
+    if (comp.aabb) {
+        comp.aabb.minX = minX;
+        comp.aabb.maxX = maxX;
+        comp.aabb.minY = minY;
+        comp.aabb.maxY = maxY;
+    } else {
+        comp.aabb = { minX, maxX, minY, maxY };
+    }
+
+    return Math.hypot(newCx - oldCx, newCy - oldCy);
+}
+
+/**
+ * 下段合体で新ゼリーを生成する直前に、縮小スポーン輪郭内に飲み込まれる恐れのある非合体中小〜中塊のみを
+ * 容器内壁クランプ＋壁際逃げ道フォールバック（中央上方向退避）付きで安全に押し分ける
+ * @param {Matter.World} world
+ * @param {number} spawnX
+ * @param {number} spawnY
+ * @param {number} spawnRadius
+ */
+function clearMergeSpawnOverlap(world, spawnX, spawnY, spawnRadius) {
+    if (!world || spawnRadius <= 0) return;
+    const composites = world.composites || [];
+    const maxTargetRadius = spawnRadius * 0.85;
+    const maxShiftLimit = spawnRadius * 0.85;
+
+    for (let i = 0; i < composites.length; i++) {
+        const other = composites[i];
+        if (!other ||
+            other.label !== 'jelly_composite' ||
+            other.isFloating ||
+            other.isBarHopping ||
+            other.isMerging ||
+            !other.particles ||
+            other.particles.length === 0) {
+            continue;
+        }
+
+        const otherRadius = other.targetRadius || 24.0;
+        // 中空リング内に飲み込まれる恐れのある小〜中塊のみを対象とし、隣接大塊の連鎖ワープを防止
+        if (otherRadius >= maxTargetRadius) continue;
+
+        const otherPos = getSoftBodyCentroid(other);
+        if (!otherPos) continue;
+
+        const dx = otherPos.x - spawnX;
+        const dy = otherPos.y - spawnY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const clearDist = spawnRadius + otherRadius * 0.45;
+
+        if (dist >= clearDist) continue;
+
+        const neededShift = Math.min(maxShiftLimit, (clearDist - dist) + 4);
+        if (neededShift <= 0.5) continue;
+
+        let ux = 0;
+        let uy = -1;
+        if (dist > 0.001) {
+            ux = dx / dist;
+            uy = dy / dist;
+        } else {
+            const toCenterX = Math.max(-1, Math.min(1, ((GAME_WIDTH * 0.5) - otherPos.x) / 100));
+            const fallbackLen = Math.hypot(toCenterX, -1);
+            ux = toCenterX / fallbackLen;
+            uy = -1 / fallbackLen;
+        }
+
+        const movedDist = shiftCompositeClamped(other, ux * neededShift, uy * neededShift);
+
+        // 壁際・底面際・45度スロープ際で外側方向が塞がれていた場合は、中央上方向へ代替退避する
+        if (movedDist < neededShift * 0.4) {
+            const curPos = other.centroid || otherPos;
+            const toCenterX = Math.max(-1, Math.min(1, ((GAME_WIDTH * 0.5) - curPos.x) / 100));
+            const fallbackLen = Math.hypot(toCenterX, -1);
+            const fbUx = toCenterX / fallbackLen;
+            const fbUy = -1 / fallbackLen;
+            const remainShift = Math.max(neededShift * 0.6, neededShift - movedDist);
+            shiftCompositeClamped(other, fbUx * remainShift, fbUy * remainShift);
+        }
     }
 }
 
@@ -463,6 +596,9 @@ export function handleMerges(world) {
                 const maxY = GAME_HEIGHT - frameW - spawnRadius - 4;
                 spawnX = (minX <= maxX) ? Math.max(minX, Math.min(maxX, spawnX)) : (GAME_WIDTH / 2);
                 spawnY = (minY <= maxY) ? Math.max(minY, Math.min(maxY, spawnY)) : (GAME_HEIGHT / 2);
+
+                // 下段新ゼリー生成直前に、中空リング内に飲み込まれる恐れのある小〜中塊を外側へ安全退避させる
+                clearMergeSpawnOverlap(world, spawnX, spawnY, spawnRadius);
             }
 
             // 新しい一段階大きな中空ビーズリングを「親2体の運動量継承 ＋ 縮小スポーン（0.78倍）→ Ease-Out-Back 膨張成長」で生成

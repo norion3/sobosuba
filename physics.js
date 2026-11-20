@@ -1,10 +1,8 @@
 /**
  * physics.js
- * @version v7.0 (Fixed-Timestep Accumulator & Bumper Calibration - Phase 2)
+ * @version v7.9 (Multi-Layer Position Iterations Enhancement - Phase 2)
  * @changes
- *   - 120Hz端末（ProMotion等）での物理2倍速・バネ硬化・軌道ズレを根絶するため、stepPhysics() へ60Hz基準の固定タイムステップ・アキュムレータ（fixedSubDelta = (1000 / 60) / SUBSTEPS 固定刻み）を導入し、実行ステップ数を返すよう拡張
- *   - updateBumpers() を固定刻みの実経過物理時間へ同期させ、実行ステップ0のフレームでも誤カウントしないよう修正
- *   - 新バンパー密度（PHYSICS.BUMPER_DENSITY: 0.0035）・剛性（0.0065）・減衰（0.08）を反映し、constants.js の絶対パスを /sobosuba/constants.js?v=7 へ統一
+ *   - 多層積層時の底層沈み込み・潰れを防ぐため、initPhysics() 内の engine.positionIterations を 8 → 10 へ強化（その他は現行維持）
  * 
  * Matter.jsを用いた物理世界の初期化、壁の生成、固定タイムステップ・サブステップ駆動、および
  * ゲームオーバー条件となる「左右のサイド判定ボタン（バンパースイッチ）」を構築・制御するモジュール
@@ -119,8 +117,8 @@ export function initPhysics() {
     }
 
     engine = Engine.create();
-    // 圧迫下での微小振動を抑え物理収束性を高める反復回数強化
-    engine.positionIterations = 8;
+    // 多層積層時の底層沈み込み・微小振動を抑え物理収束性を高める反復回数強化
+    engine.positionIterations = 10;
     engine.velocityIterations = 6;
 
     world = engine.world;

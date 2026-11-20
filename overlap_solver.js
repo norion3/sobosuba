@@ -1,14 +1,14 @@
 /**
  * overlap_solver.js
- * @version v7.0 (Symmetric Intrusion Push Distribution - Phase 3)
+ * @version v7.9 (Composite Ejection with Wall-Clearance Avoidance & One-Pass Intrusion Cache - Phase 3)
  * @changes
- *   - 侵入ビーズ1点だけが単独ワープしてツノ・クチバシ状の奇形を生む現象を根絶するため、侵入側（A）の押し戻しを「侵入ビーズ本体 64% ＋ 両隣ビーズ各 18%」へ対称分散させ、滑らかな接触面を維持
- *   - GRAVITYキャッシュ不整合対策として constants.js / physics.js の絶対パスを ?v=7 へ統一
+ *   - 事前確保バッファ insideFlagsBuffer（Uint8Array(64)）と tempWallCheckPoint を追加し、resolvePolygonIntrusion() の1パス内包判定キャッシュ化および壁・床・45度スロープ塞がり回避ペナルティ（clampPointToContainer 基準 rB + rA * 2.2）付きの統一方向脱出（Composite Ejection：!bothFloating 限定・上限 maxPush * 1.35・脱出後 centroid / aabb 即同期・法線接近速度吸収）を実装
+ *   - 通常部分侵入時の sepPad を (rA + rB) * 0.48 へ調整し、solveAntiOverlap() のフォールバック値を v7.9 新定数（0.68 / 3.8 / 0.35）へ同期
  * 
  * ソフトボディ間の「非侵入（Anti-Overlap）排斥ソルバー」および共通幾何判定を提供するモジュール
  * 
- * 広域AABB高速絞り込み ＋ Point-in-Polygon 包含判定 ＋ 双方最近傍エッジ外向き対称分散排斥により、
- * 中空ビーズリング同士のめり込み・重なり固定および局所的な突起奇形を物理的に解消します。
+ * 広域AABB高速絞り込み ＋ Point-in-Polygon 包含判定 ＋ 内包時の統一方向脱出（Composite Ejection）および
+ * 双方最近傍エッジ外向き対称分散排斥により、中空ビーズリング同士のめり込み・重なり固定および局所的な突起奇形を物理的に解消します。
  */
 
 import Matter from 'https://esm.sh/matter-js';
@@ -17,8 +17,20 @@ import { clampPointToContainer } from '/sobosuba/physics.js?v=7';
 
 const Body = Matter.Body;
 
-// ゼロアロケーション（毎サブステップGC負荷削減）用のクランプ出力先バッファ
+// ゼロアロケーション（毎サブステップGC負荷削減）用の作業バッファ
 const tempClampPoint = { x: 0, y: 0 };
+const tempWallCheckPoint = { x: 0, y: 0 };
+let insideFlagsBuffer = new Uint8Array(64);
+
+/**
+ * 1パス内包判定フラグバッファの容量が不足する場合のみ拡張する
+ * @param {number} requiredCount
+ */
+function ensureInsideFlagsCapacity(requiredCount) {
+    if (insideFlagsBuffer.length < requiredCount) {
+        insideFlagsBuffer = new Uint8Array(requiredCount);
+    }
+}
 
 /**
  * 点 (px, py) が多角形（外周ビーズ群または外縁座標バッファ）の内部にあるか Ray-Casting で判定する
@@ -110,6 +122,43 @@ function applyClampedPush(body, dx, dy, margin) {
 }
 
 /**
+ * 統一方向脱出直後にコンポジットの centroid および aabb をインプレース再同期する
+ * @param {Matter.Composite} comp
+ */
+function syncCompositeCentroidAndAABB(comp) {
+    if (!comp || !comp.particles || comp.particles.length === 0) return;
+    const pts = comp.particles;
+    const n = pts.length;
+    let sumX = 0;
+    let sumY = 0;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    for (let i = 0; i < n; i++) {
+        const pos = pts[i].position;
+        sumX += pos.x;
+        sumY += pos.y;
+        if (pos.x < minX) minX = pos.x;
+        if (pos.x > maxX) maxX = pos.x;
+        if (pos.y < minY) minY = pos.y;
+        if (pos.y > maxY) maxY = pos.y;
+    }
+
+    if (comp.centroid) {
+        comp.centroid.x = sumX / n;
+        comp.centroid.y = sumY / n;
+    }
+    if (comp.aabb) {
+        comp.aabb.minX = minX;
+        comp.aabb.maxX = maxX;
+        comp.aabb.minY = minY;
+        comp.aabb.maxY = maxY;
+    }
+}
+
+/**
  * 相手エッジ側ビーズの衝突法線方向（侵入ビーズへ向かう接近成分）を吸収してジッターを遮断する
  * @param {Matter.Body} body - 相手エッジ側ビーズ
  * @param {number} ux - 侵入ビーズ側の脱出法線X
@@ -130,7 +179,9 @@ function absorbEdgeApproachVelocity(body, ux, uy, absorbRatio) {
 
 /**
  * 侵入したビーズ（ゼリーA側）を相手ゼリーBの最近傍エッジ外側へ対称分散（本体64%＋両隣各18%）で押し戻し、
- * 相手側のエッジ2点およびその外側隣接2ビーズへ反作用を滑らかに分散させる
+ * 相手側のエッジ2点およびその外側隣接2ビーズへ反作用を滑らかに分散させる。
+ * ゼリーAがゼリーBの内部空洞へ深く内包された場合は、壁・床・45度スロープ塞がり回避ペナルティ付きの
+ * 統一方向脱出（Composite Ejection）で一斉に外へ吐き出して綱引きロックを根絶する。
  * @param {Matter.Composite} compA - 侵入側ゼリー
  * @param {Matter.Composite} compB - 侵入された側ゼリー
  * @param {number} stiffness - 排斥強度
@@ -153,22 +204,176 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
     const centB = compB.centroid;
     const bothFloating = Boolean(compA.isFloating && compB.isFloating);
     const effectiveSlop = bothFloating ? 0 : slop;
-    const sepPad = (rA + rB) * 0.35;
+    const sepPad = (rA + rB) * 0.48;
 
+    // 1パス目：全ビーズの包含判定結果と侵入ビーズ数を事前確保バッファへキャッシュ（二重判定を排除）
+    ensureInsideFlagsCapacity(nA);
+    let insideCount = 0;
     for (let i = 0; i < nA; i++) {
+        const pos = ptsA[i].position;
+        const px = pos.x;
+        const py = pos.y;
+        if (aabbB && (px < aabbB.minX || px > aabbB.maxX || py < aabbB.minY || py > aabbB.maxY)) {
+            insideFlagsBuffer[i] = 0;
+            continue;
+        }
+        if (isPointInsidePolygon(px, py, ptsB, nB)) {
+            insideFlagsBuffer[i] = 1;
+            insideCount++;
+        } else {
+            insideFlagsBuffer[i] = 0;
+        }
+    }
+
+    if (insideCount === 0) return;
+
+    // ==========================================
+    // 内包・深部飲み込み時の「統一方向脱出（Composite Ejection）」
+    // ==========================================
+    // 上段待機同士は除外し、下段で明らかな内包状態になった場合のみ単一脱出口へ一斉押し出しを行う
+    if (!bothFloating && centA) {
+        const centroidInside = isPointInsidePolygon(centA.x, centA.y, ptsB, nB);
+        const isDeeplyContained =
+            (centroidInside && insideCount >= nA * 0.45) ||
+            (insideCount >= nA * 0.55);
+
+        if (isDeeplyContained) {
+            const wallClearance = rB + rA * 2.2;
+            let bestScore = Infinity;
+            let bestDistSq = Infinity;
+            let bestIdx1 = 0;
+            let bestIdx2 = 1;
+            let bestT = 0;
+            let bestQx = centA.x;
+            let bestQy = centA.y;
+            let bestEx = 1;
+            let bestEy = 0;
+
+            for (let k = 0; k < nB; k++) {
+                const nextK = (k + 1) % nB;
+                const b1 = ptsB[k].position;
+                const b2 = ptsB[nextK].position;
+
+                const ex = b2.x - b1.x;
+                const ey = b2.y - b1.y;
+                const lenSq = ex * ex + ey * ey;
+
+                let t = 0;
+                if (lenSq > 1e-8) {
+                    t = ((centA.x - b1.x) * ex + (centA.y - b1.y) * ey) / lenSq;
+                    if (t < 0) t = 0;
+                    else if (t > 1) t = 1;
+                }
+
+                const qx = b1.x + ex * t;
+                const qy = b1.y + ey * t;
+                const dx = qx - centA.x;
+                const dy = qy - centA.y;
+                const distSq = dx * dx + dy * dy;
+
+                // 内壁・天井・床・45度スロープで塞がれている辺には距離ペナルティを課し、開けた辺へ脱出させる
+                clampPointToContainer(qx, qy, wallClearance, tempWallCheckPoint);
+                const isWallBlocked =
+                    Math.abs(tempWallCheckPoint.x - qx) > 0.5 ||
+                    Math.abs(tempWallCheckPoint.y - qy) > 0.5;
+                const score = isWallBlocked ? (distSq + 25000) : distSq;
+
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestDistSq = distSq;
+                    bestIdx1 = k;
+                    bestIdx2 = nextK;
+                    bestT = t;
+                    bestQx = qx;
+                    bestQy = qy;
+                    bestEx = ex;
+                    bestEy = ey;
+                }
+            }
+
+            const bestDist = Math.sqrt(bestDistSq);
+            let ejectUx = 0;
+            let ejectUy = -1;
+
+            if (bestDist > 1.0) {
+                ejectUx = (bestQx - centA.x) / bestDist;
+                ejectUy = (bestQy - centA.y) / bestDist;
+            } else {
+                // 極近接時は時計回りエッジの幾何学的外向き法線 (ey, -ex) を採用
+                const eLen = Math.sqrt(bestEx * bestEx + bestEy * bestEy);
+                if (eLen > 1e-6) {
+                    ejectUx = bestEy / eLen;
+                    ejectUy = -bestEx / eLen;
+                }
+            }
+
+            const ejectPush = Math.min(maxPush * 1.35, (bestDist + rA + rB) * stiffness);
+            if (ejectPush > 0.001) {
+                const pushA = ejectPush * 0.72;
+                const pushB = ejectPush * 0.28;
+
+                // 内包された compA の全ビーズを単一の脱出方向へ一斉移動 ＆ 逆向き速度を吸収
+                for (let i = 0; i < nA; i++) {
+                    const p = ptsA[i];
+                    applyClampedPush(p, ejectUx * pushA, ejectUy * pushA, rA);
+                    const velDotA = p.velocity.x * ejectUx + p.velocity.y * ejectUy;
+                    if (velDotA < 0) {
+                        Body.setVelocity(p, {
+                            x: p.velocity.x - ejectUx * velDotA * 0.72,
+                            y: p.velocity.y - ejectUy * velDotA * 0.72
+                        });
+                    }
+                }
+
+                // compB の脱出口周辺エッジを反対側へ開いてスムーズに吐き出す
+                const w1 = 1 - bestT;
+                const w2 = bestT;
+                const b1Body = ptsB[bestIdx1];
+                const b2Body = ptsB[bestIdx2];
+
+                if (nB >= 4) {
+                    const bPrevBody = ptsB[(bestIdx1 - 1 + nB) % nB];
+                    const bNextBody = ptsB[(bestIdx2 + 1) % nB];
+                    if (w1 > 0.001) {
+                        applyClampedPush(b1Body, -ejectUx * pushB * 0.70 * w1, -ejectUy * pushB * 0.70 * w1, rB);
+                        applyClampedPush(bPrevBody, -ejectUx * pushB * 0.30 * w1, -ejectUy * pushB * 0.30 * w1, rB);
+                        absorbEdgeApproachVelocity(b1Body, ejectUx, ejectUy, 0.55 * w1);
+                        absorbEdgeApproachVelocity(bPrevBody, ejectUx, ejectUy, 0.25 * w1);
+                    }
+                    if (w2 > 0.001) {
+                        applyClampedPush(b2Body, -ejectUx * pushB * 0.70 * w2, -ejectUy * pushB * 0.70 * w2, rB);
+                        applyClampedPush(bNextBody, -ejectUx * pushB * 0.30 * w2, -ejectUy * pushB * 0.30 * w2, rB);
+                        absorbEdgeApproachVelocity(b2Body, ejectUx, ejectUy, 0.55 * w2);
+                        absorbEdgeApproachVelocity(bNextBody, ejectUx, ejectUy, 0.25 * w2);
+                    }
+                } else {
+                    if (w1 > 0.001) {
+                        applyClampedPush(b1Body, -ejectUx * pushB * w1, -ejectUy * pushB * w1, rB);
+                        absorbEdgeApproachVelocity(b1Body, ejectUx, ejectUy, 0.55 * w1);
+                    }
+                    if (w2 > 0.001) {
+                        applyClampedPush(b2Body, -ejectUx * pushB * w2, -ejectUy * pushB * w2, rB);
+                        absorbEdgeApproachVelocity(b2Body, ejectUx, ejectUy, 0.55 * w2);
+                    }
+                }
+
+                // 後続ペア判定で古い座標を参照しないよう centroid / aabb を即同期
+                syncCompositeCentroidAndAABB(compA);
+                syncCompositeCentroidAndAABB(compB);
+            }
+            return;
+        }
+    }
+
+    // ==========================================
+    // 通常部分侵入時の対称分散排斥（1パス目のキャッシュを参照）
+    // ==========================================
+    for (let i = 0; i < nA; i++) {
+        if (insideFlagsBuffer[i] === 0) continue;
+
         const p = ptsA[i];
         const px = p.position.x;
         const py = p.position.y;
-
-        // 相手ポリゴンのタイトAABB外なら即スキップ（高速化）
-        if (aabbB && (px < aabbB.minX || px > aabbB.maxX || py < aabbB.minY || py > aabbB.maxY)) {
-            continue;
-        }
-
-        // Point-in-Polygon 包含判定（相手リングの内部空洞へ侵入しているビーズのみ対象）
-        if (!isPointInsidePolygon(px, py, ptsB, nB)) {
-            continue;
-        }
 
         // 相手ポリゴンBの全エッジから点Pへの最近傍エッジと射影点を探索
         let bestDistSq = Infinity;
@@ -213,7 +418,7 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
         // 内部から最近傍エッジ外側への脱出方向ベクトルを算出
         const dist = Math.sqrt(bestDistSq);
 
-        // 微小侵入スロップ（0.6px デッドゾーン）：下敷き圧迫時の微振動ループを物理遮断
+        // 微小侵入スロップ（0.35px デッドゾーン）：下敷き圧迫時の微振動ループを物理遮断
         if (dist < effectiveSlop) {
             continue;
         }
@@ -334,9 +539,9 @@ export function solveAntiOverlap(jellies) {
     const count = jellies.length;
     if (count < 2) return;
 
-    const stiffness = PHYSICS.ANTI_OVERLAP_STIFFNESS || 0.52;
-    const maxPush = PHYSICS.ANTI_OVERLAP_MAX_PUSH || 2.6;
-    const slop = (PHYSICS.OVERLAP_SLOP !== undefined) ? PHYSICS.OVERLAP_SLOP : 0.6;
+    const stiffness = PHYSICS.ANTI_OVERLAP_STIFFNESS || 0.68;
+    const maxPush = PHYSICS.ANTI_OVERLAP_MAX_PUSH || 3.8;
+    const slop = (PHYSICS.OVERLAP_SLOP !== undefined) ? PHYSICS.OVERLAP_SLOP : 0.35;
 
     for (let i = 0; i < count; i++) {
         const compA = jellies[i];

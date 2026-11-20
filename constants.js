@@ -1,8 +1,9 @@
 /**
  * constants.js
- * @version v7.6 (Small Jelly Pressure & Shape Boost Constants - Phase 1)
+ * @version v7.9 (Size Curve Enlargement, Multi-Layer Pressure & Anti-Overlap Tuning - Phase 1)
  * @changes
- *   - 下段で大塊に挟まれて潰れやすい小塊（1〜16）のみを半径に応じた連続係数で耐圧補強し、32以上の大塊および上段フロートバーの現行バランスを完全保護するため、PHYSICS へ 6項目（SMALL_BOOST_REF_RADIUS: 41.5 / SMALL_SKIN_BOOST: 0.09 / SMALL_BEND_BOOST: 0.18 / SMALL_PRESSURE_MULT: 1.16 / SMALL_RESTORE_MULT: 3.5 / SMALL_MIN_DIST_RATIO_BOOST: 0.06）を追加
+ *   - 序〜中盤の積み上がり感と視認性を向上しつつ全15段階の空間回収率（34.4%〜36.5%）を維持するため、JELLY_CONFIG の全16段階半径を確定カーブ（1: 24.0 〜 64: 51.5 〜 16384: 148.0 〜 32768: 166.0）へ更新し、上段カプセル帯半高 FLOAT_BAR.CHANNEL_HALF_HEIGHT を 22 → 25 へ同期
+ *   - 多層積層時の潰れ耐性および1〜64の連続耐圧補強を強化するため、PHYSICS（DENSITY_SCALE_EXP: 0.85 / SOFTBODY_PRESSURE: 0.00415 / PRESSURE_NONLINEAR_GAIN: 16.0 / PRESSURE_RATIO_MAX: 6.4 / BULK_DAMPING: 0.00086 / SMALL_BOOST_REF_RADIUS: 58.5 / SMALL_SKIN_BOOST: 0.10 / SMALL_BEND_BOOST: 0.20 / SMALL_RESTORE_MULT: 3.6 / ANTI_OVERLAP_STIFFNESS: 0.68 / ANTI_OVERLAP_MAX_PUSH: 3.8 / OVERLAP_SLOP: 0.35）を更新（SMALL_PRESSURE_MULT / BUMPER_DENSITY / BUMPER_STIFFNESS は現行維持）
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -63,25 +64,25 @@ export const COLOR_THEMES = {
 
 export const ACTIVE_THEME = COLOR_THEMES.default;
 
-// 内幅404px（外枠8px考慮）へ最適化したサイズ成長カーブ（空間回収率約34%維持）
+// 内幅404px（外枠8px考慮）へ最適化したサイズ成長カーブ（空間回収率 34.4%〜36.5% 統一）
 // 細密ビーズ数（16〜30個）により角丸多角形への液体的な追従性を高める
 export const JELLY_CONFIG = {
-    1:     { color: ACTIVE_THEME.colors[1],     radius: 21.5, text: ACTIVE_THEME.text, particles: 16 },
-    2:     { color: ACTIVE_THEME.colors[2],     radius: 24.5, text: ACTIVE_THEME.text, particles: 16 },
-    4:     { color: ACTIVE_THEME.colors[4],     radius: 28,   text: ACTIVE_THEME.text, particles: 18 },
-    8:     { color: ACTIVE_THEME.colors[8],     radius: 32,   text: ACTIVE_THEME.text, particles: 18 },
-    16:    { color: ACTIVE_THEME.colors[16],    radius: 36.5, text: ACTIVE_THEME.text, particles: 20 },
-    32:    { color: ACTIVE_THEME.colors[32],    radius: 41.5, text: ACTIVE_THEME.text, particles: 20 },
-    64:    { color: ACTIVE_THEME.colors[64],    radius: 48,   text: ACTIVE_THEME.text, particles: 22 },
-    128:   { color: ACTIVE_THEME.colors[128],   radius: 55,   text: ACTIVE_THEME.text, particles: 22 },
-    256:   { color: ACTIVE_THEME.colors[256],   radius: 63.5, text: ACTIVE_THEME.text, particles: 24 },
-    512:   { color: ACTIVE_THEME.colors[512],   radius: 73,   text: ACTIVE_THEME.text, particles: 24 },
-    1024:  { color: ACTIVE_THEME.colors[1024],  radius: 84,   text: ACTIVE_THEME.text, particles: 26 },
-    2048:  { color: ACTIVE_THEME.colors[2048],  radius: 96,   text: ACTIVE_THEME.text, particles: 26 },
-    4096:  { color: ACTIVE_THEME.colors[4096],  radius: 110,  text: ACTIVE_THEME.text, particles: 28 },
-    8192:  { color: ACTIVE_THEME.colors[8192],  radius: 127,  text: ACTIVE_THEME.text, particles: 28 },
-    16384: { color: ACTIVE_THEME.colors[16384], radius: 146,  text: ACTIVE_THEME.text, particles: 30 },
-    32768: { color: ACTIVE_THEME.colors[32768], radius: 164,  text: ACTIVE_THEME.text, particles: 30 }
+    1:     { color: ACTIVE_THEME.colors[1],     radius: 24.0,  text: ACTIVE_THEME.text, particles: 16 },
+    2:     { color: ACTIVE_THEME.colors[2],     radius: 27.5,  text: ACTIVE_THEME.text, particles: 16 },
+    4:     { color: ACTIVE_THEME.colors[4],     radius: 31.0,  text: ACTIVE_THEME.text, particles: 18 },
+    8:     { color: ACTIVE_THEME.colors[8],     radius: 35.0,  text: ACTIVE_THEME.text, particles: 18 },
+    16:    { color: ACTIVE_THEME.colors[16],    radius: 39.5,  text: ACTIVE_THEME.text, particles: 20 },
+    32:    { color: ACTIVE_THEME.colors[32],    radius: 45.0,  text: ACTIVE_THEME.text, particles: 20 },
+    64:    { color: ACTIVE_THEME.colors[64],    radius: 51.5,  text: ACTIVE_THEME.text, particles: 22 },
+    128:   { color: ACTIVE_THEME.colors[128],   radius: 58.5,  text: ACTIVE_THEME.text, particles: 22 },
+    256:   { color: ACTIVE_THEME.colors[256],   radius: 67.0,  text: ACTIVE_THEME.text, particles: 24 },
+    512:   { color: ACTIVE_THEME.colors[512],   radius: 76.5,  text: ACTIVE_THEME.text, particles: 24 },
+    1024:  { color: ACTIVE_THEME.colors[1024],  radius: 87.5,  text: ACTIVE_THEME.text, particles: 26 },
+    2048:  { color: ACTIVE_THEME.colors[2048],  radius: 100.0, text: ACTIVE_THEME.text, particles: 26 },
+    4096:  { color: ACTIVE_THEME.colors[4096],  radius: 114.0, text: ACTIVE_THEME.text, particles: 28 },
+    8192:  { color: ACTIVE_THEME.colors[8192],  radius: 130.0, text: ACTIVE_THEME.text, particles: 28 },
+    16384: { color: ACTIVE_THEME.colors[16384], radius: 148.0, text: ACTIVE_THEME.text, particles: 30 },
+    32768: { color: ACTIVE_THEME.colors[32768], radius: 166.0, text: ACTIVE_THEME.text, particles: 30 }
 };
 
 // ==========================================
@@ -96,8 +97,8 @@ export const PHYSICS = {
     FRICTION_AIR: 0.0012,         // 極低空気抵抗（SUBSTEPS=4 での4重失速を防ぎ一直線弾道＆液体揺れを維持）
 
     // 隙間ゼロ高密度・細密中空ビーズリング（液体柔軟性＋質量スケーリング）
-    DENSITY_PARTICLE: 0.0012,     // 基準半径（21.5px）における外周ビーズ剛体の密度
-    DENSITY_SCALE_EXP: 0.65,      // 質量比を r^1.35 へ抑え下敷き圧壊を防ぐ密度スケーリング指数
+    DENSITY_PARTICLE: 0.0012,     // 基準半径（24.0px）における外周ビーズ剛体の密度
+    DENSITY_SCALE_EXP: 0.85,      // 圧潰荷重比を抑え多層積層時の小〜中塊圧壊を防ぐ密度スケーリング指数
     BEAD_RADIUS_RATIO: 0.18,      // 全体半径に対する細密外周ビーズ半径の基準比率
     BEAD_MIN_OVERLAP_RATIO: 1.35, // 隣接ビーズ直径 >= 1.35 * 辺長 を保証する隙間ゼロ比率
     SKIN_STIFFNESS: 0.325,        // 水風船の流動感とくびれ・奇形防止を両立する皮の張り剛性
@@ -108,22 +109,22 @@ export const PHYSICS = {
     TARGET_AREA_RATIO: 1.015,     // 水風船の非圧縮体積をしっかり保つ目標面積比
     PBD_AREA_STIFFNESS: 0,        // 永久微振動の原因となるPBD位置ワープを完全撤廃
     PBD_MAX_CORRECTION: 0,        // PBD位置ワープ上限0（純粋な力ベース内圧へ完全移行）
-    SOFTBODY_PRESSURE: 0.0040,    // 主軸となる力ベース内部圧力係数（水風船の張りと自然な積み上がりを確保）
-    PRESSURE_NONLINEAR_GAIN: 15.0,// 面積圧縮時に水らしい非圧縮性を発揮する非線形バルク反発係数
+    SOFTBODY_PRESSURE: 0.00415,   // 主軸となる力ベース内部圧力係数（水風船の張りと多層積層時の積み上がりを確保）
+    PRESSURE_NONLINEAR_GAIN: 16.0,// 面積圧縮時に水らしい非圧縮性を発揮する非線形バルク反発係数
     PRESSURE_NONLINEAR_THRESHOLD: 0.09, // 面積9%圧縮から非線形バルク反発が立ち上がる圧縮率閾値
-    PRESSURE_RATIO_MAX: 5.8,      // 陽的積分安定性を守りつつ底層圧壊を防ぐ圧力比上限クランプ
-    BULK_DAMPING: 0.00080,        // 内圧強化に合わせて半径方向ビビリ振動のみ吸収する体積粘性
+    PRESSURE_RATIO_MAX: 6.4,      // 陽的積分安定性を守りつつ多層底層圧壊を防ぐ圧力比上限クランプ
+    BULK_DAMPING: 0.00086,        // 内圧強化に合わせて半径方向ビビリ振動のみ吸収する体積粘性
     SHAPE_MATCH_STIFFNESS: 0,     // 液体感を阻害する真円への記憶（Shape Matching）を完全撤廃
     INVERSION_AREA_RATIO: 0.18,   // 極限裏返り時のみ作動する穏健な自動修復閾値
     SOFTBODY_MIN_DIST_RATIO: 0.78,// 角丸多角形密着を保護しつつ横潰れ時のみ縦へ押し返す最小距離比率
     MIN_DIST_RESTORE_FORCE: 0.00068, // 横潰れ限定ガードの縦方向復元力係数
 
-    // 小塊（1〜16）下段限定・連続耐圧補強定数（32以上および上段フロートバーは完全不変）
-    SMALL_BOOST_REF_RADIUS: 41.5,    // ブースト減衰の基準半径（32以上で係数0.0）
-    SMALL_SKIN_BOOST: 0.09,          // 最小塊（1）下段時の皮剛性加算量
-    SMALL_BEND_BOOST: 0.18,          // 最小塊（1）下段時の曲げ剛性加算量
+    // 小〜中塊（1〜64）下段限定・連続耐圧補強定数（128以上および上段フロートバーは完全不変）
+    SMALL_BOOST_REF_RADIUS: 58.5,    // ブースト減衰の基準半径（128以上で係数0.0）
+    SMALL_SKIN_BOOST: 0.10,          // 最小塊（1）下段時の皮剛性加算量
+    SMALL_BEND_BOOST: 0.20,          // 最小塊（1）下段時の曲げ剛性加算量
     SMALL_PRESSURE_MULT: 1.16,       // 最小塊（1）下段時の内圧・体積粘性倍率
-    SMALL_RESTORE_MULT: 3.5,         // 最小塊（1）下段時の最小距離復元力倍率
+    SMALL_RESTORE_MULT: 3.6,         // 最小塊（1）下段時の最小距離復元力倍率
     SMALL_MIN_DIST_RATIO_BOOST: 0.06,// 最小塊（1）下段時の最小距離比率加算量
 
     // 遅延適応的圧迫ダンピング（着地直後のボヨヨン揺れ保護 ＆ 下敷き静寂化）
@@ -133,9 +134,9 @@ export const PHYSICS = {
     SETTLE_MAX_DAMPING: 0.88,     // 完全圧迫静止時の重心相対速度減衰係数（1フレーム換算）
 
     // 分散非侵入排斥ソルバー（微小侵入スロップによる下敷きジッター遮断）
-    ANTI_OVERLAP_STIFFNESS: 0.62, // 分散型 Point-in-Polygon 侵入ビーズ排斥強度（深い食い込み防止）
-    ANTI_OVERLAP_MAX_PUSH: 3.2,   // 1サブステップあたりの最大排斥距離（px）
-    OVERLAP_SLOP: 0.6,            // 微小侵入（0.6px未満）を無視するデッドゾーン（px）
+    ANTI_OVERLAP_STIFFNESS: 0.68, // 分散型 Point-in-Polygon 侵入ビーズ排斥強度（深い食い込み防止）
+    ANTI_OVERLAP_MAX_PUSH: 3.8,   // 1サブステップあたりの最大排斥距離（px）
+    OVERLAP_SLOP: 0.35,           // 微小侵入（0.35px未満）を無視するデッドゾーン（px）
     MAX_PARTICLE_SPEED: 5.6,      // 互換維持用（合体衝撃波等の上限基準）
     MAX_PARTICLE_VX: 10.5,        // 落下中の横速度削れを防ぐ非トンネリング範囲内の水平最大速度（px/frame）
     MAX_PARTICLE_VY: 11.0,        // 落下中の横速度と独立して制御する垂直最大速度（px/frame）
@@ -145,7 +146,7 @@ export const PHYSICS = {
     SOFTBODY_STIFFNESS: 0.04,
     SOFTBODY_PERIMETER_STIFFNESS: 0.15,
 
-    // バンパー関連（ゼリー総質量 1.2〜11.1 に合わせた再正規化）
+    // バンパー関連（ゼリー総質量に合わせた再正規化・現行維持）
     BUMPER_STIFFNESS: 0.0058,     // 積み上げ圧力で自然に押し込めるバネ剛性
     BUMPER_DAMPING: 0.08,         // バンパーのバネ減衰
     BUMPER_DENSITY: 0.0035,       // バンパー質量を約6.83へ適正化しゼリーとの釣り合いを確保
@@ -189,7 +190,7 @@ export const FLOAT_BAR = {
     LAUNCH_GRACE_MIN_SLOPE: 0.22, // 真横当てバー上合体を保護する最小下向き勾配（dy >= 0.22 * |dx|）
 
     // 上段「横長カプセル（ピル）形状」圧縮 ＆ 発射／着地モーフィング定数
-    CHANNEL_HALF_HEIGHT: 22,      // 1(21.5px)が丸く収まり4〜64が横長に伸びるフラット帯半高
+    CHANNEL_HALF_HEIGHT: 25,      // 1(24.0px)が丸く収まり4〜64が横長に伸びるフラット帯半高
     CHANNEL_COMPRESSION_STIFFNESS: 0.055, // 定規のような直線を避け、丸みとたわみのある液体感を残す圧縮強度
     CAPSULE_MAX_HALF_WIDTH: 110,  // 上段カプセルの最大半幅上限（px）
     MORPH_DURATION_MS: 160,       // 発射時の「変身の間」（横長カプセル→円形リング復元時間・ms）
