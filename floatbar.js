@@ -1,9 +1,8 @@
 /**
  * floatbar.js
- * @version v8.5 (Zero-Alloc Floating/Bar-Area Buffers & Initial Refill Auto-Merge Avoidance - Phase 11)
+ * @version v8.7 (Plan 2 Adjusted: Earlier Mid/Late Spawn Table Scaling - Phase 2)
  * @changes
- *   - getFloatingJellies() および getBarAreaJellies() の内部処理で事前確保バッファ・オブジェクトプール（floatingJelliesBuffer / barAreaJelliesBuffer / barAreaEntryPool）を再利用し、毎フレーム（60FPS）の配列・オブジェクト新規確保による GC 負荷を削減（未使用エントリの comp 参照も毎回クリア）
- *   - ゲーム開始直後の初回補充（プレイヤーが1発も撃っていない状態）において、出現側（左端／右端）の待機ゼリーと同数字が供給されて意図せず自動合体するケースを回避するロジックを追加
+ *   - ゼリーの形・動きおよび最大出現数字（16）を維持したまま適当落としでの自動掃除を抑えるため、generateNextValue() のスコア帯および出現確率を補正済み案 2 へ更新（序盤 0〜39 は現行同一、中盤前倒し 40 で 4・160 で 8・450 で 16 解禁、1400〜 で比率段階引き上げ、終盤 3500〜 は 1:12% / 2:20% / 4:26% / 8:23% / 16:19%）
  * 
  * 上部フロートバーのゼリー生成・出現テーブル・左右2点クリアランス検知スポーナー・
  * セーフティスポーンおよび上枠スポーナーゲージ進捗管理を担うモジュール
@@ -39,7 +38,7 @@ function getSafeBarPaddingX() {
 }
 
 // ==========================================
-// 出現テーブル（本家スコア帯準拠・中終盤段階拡張）
+// 出現テーブル（本家スコア帯準拠・補正済み案2 中終盤前倒し段階拡張）
 // ==========================================
 /**
  * 現在のスコア進行に応じて、次に上段フロートバーへ供給するゼリーの数値を抽選する
@@ -50,40 +49,40 @@ export function generateNextValue(score = 0) {
     const rand = Math.random();
     const s = Number(score) || 0;
 
-    // 本家スコア方式（盤面有効値総和）の進行速度に最適化した段階的出現テーブル
-    if (s >= 5000) {
-        if (rand > 0.82) return 16; // 18%
-        if (rand > 0.60) return 8;  // 22%
-        if (rand > 0.32) return 4;  // 28%
+    // 補正済み案2：最大出現数字16を維持し、4/8/16の解禁と比率を前倒しして適当落とし耐性を適正化
+    if (s >= 3500) {
+        if (rand > 0.81) return 16; // 19%
+        if (rand > 0.58) return 8;  // 23%
+        if (rand > 0.32) return 4;  // 26%
         if (rand > 0.12) return 2;  // 20%
         return 1;                   // 12%
     }
-    if (s >= 2000) {
-        if (rand > 0.87) return 16; // 13%
-        if (rand > 0.70) return 8;  // 17%
-        if (rand > 0.44) return 4;  // 26%
-        if (rand > 0.18) return 2;  // 26%
-        return 1;                   // 18%
+    if (s >= 1400) {
+        if (rand > 0.85) return 16; // 15%
+        if (rand > 0.65) return 8;  // 20%
+        if (rand > 0.40) return 4;  // 25%
+        if (rand > 0.17) return 2;  // 23%
+        return 1;                   // 17%
     }
-    if (s >= 700) {
-        if (rand > 0.92) return 16; // 8%
-        if (rand > 0.80) return 8;  // 12%
-        if (rand > 0.58) return 4;  // 22%
-        if (rand > 0.28) return 2;  // 30%
-        return 1;                   // 28%
+    if (s >= 450) {
+        if (rand > 0.90) return 16; // 10%
+        if (rand > 0.75) return 8;  // 15%
+        if (rand > 0.51) return 4;  // 24%
+        if (rand > 0.24) return 2;  // 27%
+        return 1;                   // 24%
     }
-    if (s >= 250) {
-        if (rand > 0.88) return 8;  // 12%
-        if (rand > 0.68) return 4;  // 20%
-        if (rand > 0.34) return 2;  // 34%
-        return 1;                   // 34%
+    if (s >= 160) {
+        if (rand > 0.85) return 8;  // 15%
+        if (rand > 0.62) return 4;  // 23%
+        if (rand > 0.30) return 2;  // 32%
+        return 1;                   // 30%
     }
-    if (s >= 80) {
-        if (rand > 0.78) return 4;  // 22%
-        if (rand > 0.38) return 2;  // 40%
-        return 1;                   // 38%
+    if (s >= 40) {
+        if (rand > 0.75) return 4;  // 25%
+        if (rand > 0.35) return 2;  // 40%
+        return 1;                   // 35%
     }
-    return rand > 0.45 ? 2 : 1;     // 序盤：2(55%) / 1(45%)
+    return rand > 0.45 ? 2 : 1;     // 序盤（0〜39）：2(55%) / 1(45%)
 }
 
 // ==========================================

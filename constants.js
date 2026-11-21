@@ -1,11 +1,9 @@
 /**
  * constants.js
- * @version v8.6 (Plan B: +6% Size Scaling, Settled Vertical Stretch Constants & Upper Channel Sync - Phase 1)
+ * @version v8.7 (Plan 2 Adjusted: Bumper Sensitivity & Critical Damping Sync - Phase 1)
  * @changes
- *   - 難易度を少し引き上げるため JELLY_CONFIG 全16ティアの半径を約 +6%（面積 +12.4%）拡大（1: 25.5 〜 32768: 176.0）
- *   - 小〜中塊耐圧ブースト基準半径 PHYSICS.SMALL_BOOST_REF_RADIUS を新 128 半径に合わせて 58.5 → 62.0 へ同期
- *   - 上段バー上の 1（半径 25.5）真円維持および終盤横幅余裕確保のため FLOAT_BAR.CHANNEL_HALF_HEIGHT を 25 → 26 へ同期
- *   - 下段で動きが落ち着いた塊のみ自然に縦方向へ伸びる静止時縦ストレッチ力場定数（PHYSICS.SETTLE_STRETCH_SPEED_THRESHOLD / SETTLE_STRETCH_RESET_SPEED / SETTLE_STRETCH_DELAY_MS / SETTLE_STRETCH_RAMP_MS / SETTLE_STRETCH_TARGET_ASPECT / SETTLE_STRETCH_ASPECT_SPAN / SETTLE_STRETCH_FORCE_Y / SETTLE_STRETCH_FORCE_X_RATIO）を新設
+ *   - ゼリーの形・動きを維持したまま積み上げ側圧でバンパーが自然に押し込まれるよう、PHYSICS.BUMPER_STIFFNESS を 0.0040 → 0.0026、PHYSICS.BUMPER_DAMPING を 0.08 → 0.065（臨界減衰比 0.901 を維持）、PHYSICS.BUMPER_DENSITY を 0.0026 → 0.0022 へ調整
+ *   - バンパーの赤点灯（ON）判定および配置高さを適切化するため、BUMPER.PUSH_THRESHOLD を 9 → 7.5、BUMPER.Y_RATIO を 0.30 → 0.32（y=224）へ調整
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -183,10 +181,10 @@ export const PHYSICS = {
     SOFTBODY_STIFFNESS: 0.04,
     SOFTBODY_PERIMETER_STIFFNESS: 0.15,
 
-    // バンパー関連（定着荷重軽減・質量均等化後の実効横力比0.59xに合わせた厳密同期）
-    BUMPER_STIFFNESS: 0.0040,     // 積み上げ側圧で自然に押し込める同期済みバネ剛性
-    BUMPER_DAMPING: 0.08,         // バンパーのバネ減衰
-    BUMPER_DENSITY: 0.0026,       // バンパー質量を約5.07へ適正化し横ショット直撃誤爆防止と釣り合いを両立
+    // バンパー関連（定着軽重力と臨界減衰比0.901に同期した押し込み・復帰バランス）
+    BUMPER_STIFFNESS: 0.0026,     // 積み上げ側圧で自然に押し込める同期済みバネ剛性
+    BUMPER_DAMPING: 0.065,        // 過減衰を防ぎつつ97msで素早く復帰する同期済みバネ減衰
+    BUMPER_DENSITY: 0.0022,       // バンパー質量を約4.48へ適正化し横ショット直撃誤爆防止と押し込みやすさを両立
 
     // 順方向ダイレクトエイム関連（SUBSTEPS=4 正規化済み・360度エイム解放）
     SLINGSHOT_FORCE_MULTIPLIER: 0.00015, // 互換用
@@ -208,7 +206,7 @@ export const PHYSICS = {
 // 4. 上部フロートバー（横長カプセル待機・左右2本スポーナー・天井非激突2.5Dホップ）の設定
 // ==========================================
 export const FLOAT_BAR = {
-    Y: 108,                       // バンパー引き上げ（30%）と両立し上空空間を確保したバー中心Y座標
+    Y: 108,                       // バンパー位置（32%）と両立し上空空間を確保したバー中心Y座標
     MAX_COUNT: 5,                 // バー上に保持する目安最大ゼリー数
     PADDING_X: 26,                // 内壁8px＋バンパー18px面を回避し端落とし非干渉を保証する左右余白
     LEFT_SPAWN_X: 48,             // 左側スポーナーの出現基準X座標（内壁＋バンパー基準）
@@ -271,8 +269,8 @@ export const CONTAINER = {
 export const BUMPER = {
     WIDTH: 18,                    // 内壁から内側へ突出する半円ボタン厚み（px）
     HEIGHT_RATIO: 0.165,          // 画面高さに対するバンパーの高さ割合（115.5px）
-    Y_RATIO: 0.30,                // 本家実測準拠の引き上げ位置（y=210、下段安全高+60px拡大）
-    PUSH_THRESHOLD: 9,            // フレーム側へこの距離以上押し込まれたら赤色(ON)判定（px）
+    Y_RATIO: 0.32,                // バンパー配置位置（y=224、上段バーとの余白確保と自然なピンチ感を両立）
+    PUSH_THRESHOLD: 7.5,          // フレーム側へこの距離以上押し込まれたら赤色(ON)判定（px）
     MAX_PUSH: 15,                 // フレーム側へ押し込める最大距離（px）
     CHAMFER_RADIUS: 7,            // 上下端でゼリーが引っ掛かりにくい角丸面取り半径（px）
     GAME_OVER_HOLD_MS: 450        // 合体演出中の理不尽即死と誤爆を防ぐ左右同時押し込み確定時間（ms）
