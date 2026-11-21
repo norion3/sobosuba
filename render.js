@@ -1,9 +1,8 @@
 /**
  * render.js
- * @version v7.9 (Front-Jelly Text Occlusion Guard & Bar Height Fallback Sync - Phase 5)
+ * @version v8.4 (Power-Scaled Normal Aim Arrow Visuals - Phase 3)
  * @changes
- *   - 後続通常レイヤー（j > i）のゼリー物理リング内部に覆われているかを AABB 枝刈り ＋ isPointInsidePolygon で高速判定する isPointOccludedByFrontJellies() を新設し、drawSoftBodies() / drawSingleSoftBody() で手前ゼリーに覆われている数字だけは最前面バッファへ回さず即時描画することで「大塊の中に別数字が浮かぶ現象」を根絶
- *   - v7.9 の上段カプセル帯半高（FLOAT_BAR.CHANNEL_HALF_HEIGHT: 25）に合わせ、drawSingleSoftBody() および drawAimAndHopGuide() の上段基準高さフォールバック値を 22 → 25 へ同期
+ *   - drawAimAndHopGuide() の通常ショット（!isHopAim）矢印描画を強弱連動ビジュアルへ更新し、弱〜中帯（AIM_CANCEL_RADIUS → AIM_MAX_DRAG: 22 → 120px）では白（rgba(255,255,255,0.80) → #ffffff）・軸幅 4.6 → 6.0px・先端ヘッド 15 → 19px・起点リング半径 8.5 → 9.5px へ変化し、下方向パワー帯（120 → AIM_MAX_DRAG_DOWN: 170px）では白 → ゴールド（#fde047）→ アンバーオレンジ（#fb923c）へ色ジャンプなしで連続変化しつつ軸幅 6.0 → 8.0px・先端ヘッド 19 → 24px・起点リング半径 9.5 → 10.5px へ伸長するよう実装（ホップ時のシアン矢印・予測ドット・キャンセル／そっと落としガイドは完全不変）
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -836,7 +835,7 @@ function drawSoftBodies(ctx, composites, gameState) {
 }
 
 // ==========================================
-// サブ関数 4：順方向ダイレクトエイム矢印（中心起点白丸＆太矢印）・ホップ予測ドット・オフセットガイド
+// サブ関数 4：順方向ダイレクトエイム矢印（中心起点白丸＆強弱連動太矢印）・ホップ予測ドット・オフセットガイド
 // ==========================================
 function drawAimAndHopGuide(ctx, gameState) {
     if (!gameState || !gameState.isDragging || gameState.isGameOver) return;
@@ -911,26 +910,60 @@ function drawAimAndHopGuide(ctx, gameState) {
         ctx.fillStyle = isHopAim ? 'rgba(34, 211, 238, 0.16)' : 'rgba(255, 255, 255, 0.16)';
         ctx.fill();
 
-        // (C) 本家準拠：中心起点白丸 ＋ 太い順方向実線矢印（ホップ時はシアン、通常時は白）
-        const arrowColor = isHopAim ? '#22d3ee' : '#ffffff';
+        // (C) 本家準拠：中心起点丸 ＋ 順方向実線矢印
+        // ホップ時は従来のシアン固定、通常ショット時は引き量に応じた弱〜中（白）→下方向パワー帯（ゴールド→アンバーオレンジ）へ連続変化
+        let arrowColor = '#22d3ee';
+        let ringRadius = 9.5;
+        let shaftWidth = 6;
+        let headLen = 19;
+
+        if (!isHopAim) {
+            const baseMaxDrag = Math.max(cancelRadius + 1, PHYSICS.AIM_MAX_DRAG || 120);
+            const downMaxDrag = Math.max(baseMaxDrag + 1, PHYSICS.AIM_MAX_DRAG_DOWN || 170);
+            const baseT = Math.max(0, Math.min(1, (dist - cancelRadius) / (baseMaxDrag - cancelRadius)));
+            const powerT = Math.max(0, Math.min(1, (dist - baseMaxDrag) / (downMaxDrag - baseMaxDrag)));
+
+            ringRadius = 8.5 + 1.0 * baseT + 1.0 * powerT;
+            shaftWidth = 4.6 + 1.4 * baseT + 2.0 * powerT;
+            headLen = 15 + 4 * baseT + 5 * powerT;
+
+            if (powerT <= 0) {
+                const alpha = 0.80 + 0.20 * baseT;
+                arrowColor = `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
+            } else if (powerT <= 0.5) {
+                // #ffffff (255, 255, 255) → #fde047 (253, 224, 71)
+                const u = powerT * 2;
+                const r = Math.round(255 + (253 - 255) * u);
+                const g = Math.round(255 + (224 - 255) * u);
+                const b = Math.round(255 + (71 - 255) * u);
+                arrowColor = `rgb(${r}, ${g}, ${b})`;
+            } else {
+                // #fde047 (253, 224, 71) → #fb923c (251, 146, 60)
+                const u = (powerT - 0.5) * 2;
+                const r = Math.round(253 + (251 - 253) * u);
+                const g = Math.round(224 + (146 - 224) * u);
+                const b = Math.round(71 + (60 - 71) * u);
+                arrowColor = `rgb(${r}, ${g}, ${b})`;
+            }
+        }
+
         const endX = originX + dx;
         const endY = originY + dy;
         const angle = Math.atan2(dy, dx);
-        const headLen = 19;
 
-        // 中心起点リング（本家実機画像の起点白丸表現）
+        // 中心起点リング（本家実機画像の起点丸表現）
         ctx.beginPath();
-        ctx.arc(originX, originY, 9.5, 0, Math.PI * 2);
+        ctx.arc(originX, originY, ringRadius, 0, Math.PI * 2);
         ctx.strokeStyle = arrowColor;
         ctx.lineWidth = 3;
         ctx.stroke();
 
-        // 矢印の軸（太めの実線）
+        // 矢印の軸（強弱連動の実線）
         ctx.beginPath();
         ctx.moveTo(originX + Math.cos(angle) * 8, originY + Math.sin(angle) * 8);
         ctx.lineTo(endX - Math.cos(angle) * (headLen * 0.55), endY - Math.sin(angle) * (headLen * 0.55));
         ctx.strokeStyle = arrowColor;
-        ctx.lineWidth = 6;
+        ctx.lineWidth = shaftWidth;
         ctx.lineCap = 'round';
         ctx.stroke();
 

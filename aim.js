@@ -1,10 +1,10 @@
 /**
  * aim.js
- * @version v7.7 (Water-Bubble Select & Shoot Power Audio Integration - Phase 3)
+ * @version v8.4 (Downward Elliptical Aim Clamp, Unified Power Curve & Sound Power Sync - Phase 2)
  * @changes
- *   - sound.js のインポートを /sobosuba/sound.js?v=7 へ更新し、上段タップ選択音 playSoundSelect を追加インポート
- *   - startAimDrag() で上段ゼリー選択成功時に playSoundSelect(closest.jellyValue) を呼び出すよう追加
- *   - endAimDrag() で通常発射／そっと落とし時のドラッグ強度比率 powerRatio（0.0〜1.0）を算出し、playSoundShoot(powerRatio) へ渡すよう拡張
+ *   - 方向別最大ドラッグ長算出ヘルパー getMaxDragForDirection(dx, dy) を追加し、clampAimVector(dx, dy) を「上半円（dy <= 0）：半径 AIM_MAX_DRAG (120px)／下半楕円（dy > 0）：横 120px × 縦 AIM_MAX_DRAG_DOWN (170px)」の C1 連続クランプへ更新
+ *   - endAimDrag() の通常ショット速度算出へ全方向共通基準 baseP（分母 AIM_MAX_DRAG）による等方スカラー倍率 powerScale = 0.78 + 0.22 * baseP を導入（同一長さ＝全方向同一初速・角度ズレ 0.000度・水平最大 6.72 維持・真下最大 9.52）し、playSoundShoot(powerRatio) へ渡す powerRatio を発射初速ベース（launchSpeed / maxDownSpeed）へ統一
+ *   - updateHopPreviewPoints() 内の MAX_PARTICLE_VY フォールバック値を 11.0 → 12.0 へ同期（ホップ軌道・予測ドット挙動は完全不変）
  * 
  * 上段フロートバーのゼリー選択、360度順方向ダイレクトエイム、
  * 天井非激突2.5D上段飛び越えホップ自動切替および放物線軌道プレビュー計算を担う操作モジュール
@@ -54,7 +54,33 @@ export function resetAimState(gameState) {
 }
 
 /**
- * ドラッグベクトルを最大ドラッグ距離でクランプする（上向き角度制限なし・360度解放）
+ * ドラッグ方向に応じた最大ドラッグ距離を C1 連続で算出する
+ * 上半円（dy <= 0）は半径 AIM_MAX_DRAG（120px）、下半楕円（dy > 0）は横 120px × 縦 AIM_MAX_DRAG_DOWN（170px）
+ * @param {number} dx - X方向ドラッグ量
+ * @param {number} dy - Y方向ドラッグ量
+ * @returns {number} 方向別の最大ドラッグ距離（px）
+ */
+function getMaxDragForDirection(dx, dy) {
+    const baseMaxDrag = PHYSICS.AIM_MAX_DRAG || 120;
+    if (dy <= 0) {
+        return baseMaxDrag;
+    }
+    const downMaxDrag = Math.max(baseMaxDrag, PHYSICS.AIM_MAX_DRAG_DOWN || 170);
+    const rawDist = Math.sqrt(dx * dx + dy * dy);
+    if (rawDist <= 1e-8) {
+        return baseMaxDrag;
+    }
+    const cosT = dx / rawDist;
+    const sinT = dy / rawDist;
+    const invR = Math.sqrt(
+        (cosT * cosT) / (baseMaxDrag * baseMaxDrag) +
+        (sinT * sinT) / (downMaxDrag * downMaxDrag)
+    );
+    return invR > 1e-8 ? (1 / invR) : baseMaxDrag;
+}
+
+/**
+ * ドラッグベクトルを方向別の最大ドラッグ距離（上半円 120px / 下半楕円 120x170px）で連続クランプする（360度解放）
  * @param {number} dx - X方向ドラッグ量
  * @param {number} dy - Y方向ドラッグ量
  * @returns {{ x: number, y: number }} クランプ済みベクトル
@@ -63,7 +89,7 @@ export function clampAimVector(dx, dy) {
     let vecX = dx;
     let vecY = dy;
     const rawDist = Math.sqrt(vecX * vecX + vecY * vecY);
-    const maxDrag = PHYSICS.AIM_MAX_DRAG || 120;
+    const maxDrag = getMaxDragForDirection(vecX, vecY);
 
     if (rawDist > maxDrag) {
         const ratio = maxDrag / rawDist;
@@ -140,7 +166,7 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
 
     const inheritVx = (FLOAT_BAR.HOP_INHERIT_VX !== undefined) ? FLOAT_BAR.HOP_INHERIT_VX : 0.2;
     const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
-    const maxVy = PHYSICS.MAX_PARTICLE_VY || 11.0;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 12.0;
     const maxHopSpeed = FLOAT_BAR.HOP_MAX_SPEED || 11.5;
     let vx = avgVx * inheritVx + hopVel.x;
     let vy = hopVel.y;
@@ -482,13 +508,24 @@ export function endAimDrag(gameState, onLaunchedCallback = null, world = null) {
         if (dist >= cancelRadius) {
             const safeAim = clampAimVector(vecX, vecY);
             const forceMult = (PHYSICS.AIM_FORCE_MULTIPLIER !== undefined) ? PHYSICS.AIM_FORCE_MULTIPLIER : 0.056;
-            const maxDrag = Math.max(cancelRadius + 1, PHYSICS.AIM_MAX_DRAG || 120);
+            const baseMaxDrag = Math.max(cancelRadius + 1, PHYSICS.AIM_MAX_DRAG || 120);
+            const downMaxDrag = Math.max(baseMaxDrag, PHYSICS.AIM_MAX_DRAG_DOWN || 170);
             const safeDist = Math.sqrt(safeAim.x * safeAim.x + safeAim.y * safeAim.y);
-            powerRatio = Math.max(0, Math.min(1, (safeDist - cancelRadius) / (maxDrag - cancelRadius)));
+
+            // 全方向共通基準（AIM_MAX_DRAG: 120）による等方スカラー倍率（角度ズレ 0.000度・同一長さ＝同一初速）
+            const baseP = Math.max(0, Math.min(1, (safeDist - cancelRadius) / (baseMaxDrag - cancelRadius)));
+            const powerScale = 0.78 + 0.22 * baseP;
+            const scaledMult = forceMult * powerScale;
             addVelocity = {
-                x: safeAim.x * forceMult,
-                y: safeAim.y * forceMult
+                x: safeAim.x * scaledMult,
+                y: safeAim.y * scaledMult
             };
+
+            // 全方向で勢いと水音のキレを一致させる発射初速ベース統一 powerRatio
+            const launchSpeed = Math.sqrt(addVelocity.x * addVelocity.x + addVelocity.y * addVelocity.y);
+            const maxDownSpeed = Math.max(0.001, downMaxDrag * forceMult);
+            powerRatio = Math.max(0, Math.min(1, launchSpeed / maxDownSpeed));
+
             useBarGrace = shouldEnableBarLaunchGrace(selected, safeAim, world);
         }
         playSoundShoot(powerRatio);

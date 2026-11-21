@@ -1,15 +1,16 @@
 /**
  * sound.js
- * @version v7.8 (Healing Water-Drop ASMR & Procedural Water Reverb - Phase 1)
+ * @version v8.4 (Zombie AudioContext Auto-Recovery & Gentle Suikinkutsu Water Audio - Phase 4)
  * @changes
- *   - ensureAudioGraph(ctx) へ AudioContext 紐づきで自動再構築されるプロシージャル「静かな水辺リバーブ（ConvolverNode・ステレオ 0.65秒 指数減衰IR・Dry 78% / Wet 26%・2400Hz ローパス）」を追加し、マスターローパスを 4200Hz (Q=0.5) へ調整
- *   - ゴムの水風船感を招いていた長いピッチスイープ・Dip-Rise・三角波・中域摩擦ノイズを徹底排除し、全8種の効果音（playSoundMerge / playSoundCollide / playSoundMergeAnticipate / playSoundShoot / playSoundHop / playSoundSelect / playSoundGameOverZap / ON確認音）を「短い水滴スイープ＋澄んだ純サイン波余韻＋高透明帯域（520〜260Hz）」の本家 sobosuba 風・癒し水音ASMRへ刷新
+ *   - 他画面・別アプリ復帰後の「音量 ON のまま無音」バグを根治するため、5重離脱／異常検知（visibilitychange / pagehide / blur / audioCtx.onstatechange / 300msグレース付き currentTime フリーズ監視）と、touchstart・touchend・mousedown・click の2段構えキャプチャ先行自動ハードリカバリ（#soundToggleBtn 競合回避・非ユーザージェスチャー誤リセット防止・リバーブIR Float32Array キャッシュによる高速再構築）を実装
+ *   - 合体・連鎖・連続落下時の耳への優しさと心地よさを引き上げるため、マスターローパス（2600Hz, Q=0.45）・水辺リバーブ（0.58s IR・Dry 80% / Wet 22%・1650Hz LP）へ調整し、playSoundMerge() を 400〜220Hz 黄金帯域・ウェーブペンタトニック旋律・3層純正整数比（完全オクターブ / 完全五度）・等ラウドネス自動補正・連続密度ダッキング・62ms ハープアルペジオ・ノイズ撤廃・10ms 丸アタックへリチューン（周辺効果音も同トーンへ調和）
  * 
  * Web Audio APIを使用した軽量プロシージャル癒し水音サウンドモジュール
  * 
- * 外部の音声ファイルに依存せず、短い水滴ピッチスイープ・澄んだ純サイン波余韻・
+ * 外部の音声ファイルに依存せず、短い水滴ピッチスイープ・純正協和の純サイン波余韻・
  * プロシージャル水辺リバーブを用いて、本家sobosubaのような静かで耳に心地よい水滴・水琴窟ASMRサウンドを
- * 動的に生成・再生します。起動時はデフォルト OFF であり、音量 ON 操作時にハード初期化を行います。
+ * 動的に生成・再生します。起動時はデフォルト OFF であり、音量 ON 操作時のハード初期化および
+ * 他画面復帰時の自動ハードリカバリに対応します。
  */
 
 let audioCtx = null;
@@ -21,24 +22,41 @@ let masterCompressor = null;
 let masterGain = null;
 let sharedNoiseBuffer = null;
 
+// 高速復帰（< 0.2ms）用のリバーブ IR 生データキャッシュ（サンプルレート単位で再利用）
+let cachedReverbSampleRate = 0;
+let cachedReverbIRLeft = null;
+let cachedReverbIRRight = null;
+
 // デフォルト OFF の音量状態フラグ（起動時は完全無音）
 let soundEnabled = false;
 let suspendTimer = null;
+
+// 他画面復帰・ゾンビ AudioContext 自動復旧状態管理
+let needsAudioRecovery = false;
+let pendingTouchendUnlock = false;
+let lastRecoveryTimeMs = 0;
+let audioCtxCreatedAtMs = 0;
+let lastClockWallMs = 0;
+let lastClockAudioTime = -1;
 
 // 各種スロットリング・連鎖和声・同時合体アルペジオ状態管理
 let lastCollideSoundTime = 0;
 let lastAnticipateSoundTime = 0;
 let lastSelectSoundTime = 0;
 let lastMergeScheduledTime = 0;
-let chainBaseFreq = 520;
+let chainBaseFreq = 400;
 
-const COLLIDE_THROTTLE_MS = 45;
+const COLLIDE_THROTTLE_MS = 55;
 const ANTICIPATE_THROTTLE_MS = 35;
 const SELECT_THROTTLE_MS = 40;
+const RECOVERY_COOLDOWN_MS = 250;
 const MASTER_GAIN_LEVEL = 0.92;
-const PENTATONIC_SEMITONES = [0, 2, 4, 7, 9, 12, 14, 16, 19];
 
-// 復帰リスナーの多重登録防止フラグ
+// 1〜7連は純正ペンタトニック上昇、8連以降は温かい水琴窟和音帯を波のように優しく往復
+const PENTATONIC_RISE_SEMITONES = [0, 2, 4, 7, 9, 12, 14];
+const PENTATONIC_WAVE_SEMITONES = [12, 9, 7, 9, 12, 14];
+
+// 復帰・キャプチャリスナーの多重登録防止フラグ
 let lifecycleListenersBound = false;
 
 /**
@@ -54,10 +72,10 @@ function clamp(v, min, max) {
 
 /**
  * 有機的な微細ピッチ揺らぎ（±rate）を返す
- * @param {number} [rate=0.02]
+ * @param {number} [rate=0.015]
  * @returns {number}
  */
-function pitchJitter(rate = 0.02) {
+function pitchJitter(rate = 0.015) {
     return 1 + (Math.random() * 2 - 1) * rate;
 }
 
@@ -81,6 +99,19 @@ function getAnySizeNorm(value) {
     const safeVal = Math.max(1, Number(value) || 4);
     const tier = Math.log2(safeVal); // 1 -> 0, 2048 -> 11
     return clamp(tier / 11, 0, 1);
+}
+
+/**
+ * イベント発生元が音量トグルボタン（#soundToggleBtn）かどうかを判定する
+ * @param {EventTarget|null} target
+ * @returns {boolean}
+ */
+function isSoundToggleTarget(target) {
+    return Boolean(
+        target &&
+        typeof target.closest === 'function' &&
+        target.closest('#soundToggleBtn')
+    );
 }
 
 /**
@@ -115,37 +146,60 @@ function clearAudioGraphCache() {
 }
 
 /**
- * 静かな水辺リバーブ用のステレオ 0.65 秒 指数減衰インパルス応答（IR）バッファを生成する
+ * 静かな水辺リバーブ用のステレオ 0.58 秒 指数減衰インパルス応答（IR）バッファを生成する
+ * 生データ（Float32Array）をサンプルレート単位でキャッシュし、再構築時のタップ遅延を < 0.2ms へ抑える
  * @param {AudioContext} ctx
  * @returns {AudioBuffer|null}
  */
 function createWaterReverbIR(ctx) {
     try {
         const sampleRate = ctx.sampleRate || 44100;
-        const duration = 0.65;
+        const duration = 0.58;
         const length = Math.max(2048, Math.floor(sampleRate * duration));
-        const irBuffer = ctx.createBuffer(2, length, sampleRate);
 
-        for (let ch = 0; ch < 2; ch++) {
-            const data = irBuffer.getChannelData(ch);
+        if (cachedReverbSampleRate !== sampleRate ||
+            !cachedReverbIRLeft ||
+            !cachedReverbIRRight ||
+            cachedReverbIRLeft.length !== length) {
+            const left = new Float32Array(length);
+            const right = new Float32Array(length);
+            const channels = [left, right];
+
             // わずかな初期プリディレイ（約 8ms）後に滑らかに立ち上がり指数減衰させる
             const preDelaySamples = Math.floor(sampleRate * 0.008);
             const fadeInSamples = Math.floor(sampleRate * 0.018);
-            let prev = 0;
 
-            for (let i = 0; i < length; i++) {
-                if (i < preDelaySamples) {
-                    data[i] = 0;
-                    continue;
+            for (let ch = 0; ch < 2; ch++) {
+                const data = channels[ch];
+                let prev = 0;
+
+                for (let i = 0; i < length; i++) {
+                    if (i < preDelaySamples) {
+                        data[i] = 0;
+                        continue;
+                    }
+                    const t = (i - preDelaySamples) / Math.max(1, length - preDelaySamples);
+                    const fadeIn = Math.min(1, (i - preDelaySamples) / Math.max(1, fadeInSamples));
+                    const decay = Math.pow(1 - t, 3.2) * Math.exp(-t * 2.5);
+                    // 1次平滑化でざらつきのないシルク状の残響を生成
+                    const raw = (Math.random() * 2 - 1);
+                    prev = prev * 0.50 + raw * 0.50;
+                    data[i] = prev * decay * fadeIn;
                 }
-                const t = (i - preDelaySamples) / Math.max(1, length - preDelaySamples);
-                const fadeIn = Math.min(1, (i - preDelaySamples) / Math.max(1, fadeInSamples));
-                const decay = Math.pow(1 - t, 3.2) * Math.exp(-t * 2.4);
-                // 1次平滑化でざらつきのないシルク状の残響を生成
-                const raw = (Math.random() * 2 - 1);
-                prev = prev * 0.45 + raw * 0.55;
-                data[i] = prev * decay * fadeIn;
             }
+
+            cachedReverbSampleRate = sampleRate;
+            cachedReverbIRLeft = left;
+            cachedReverbIRRight = right;
+        }
+
+        const irBuffer = ctx.createBuffer(2, length, sampleRate);
+        if (typeof irBuffer.copyToChannel === 'function') {
+            irBuffer.copyToChannel(cachedReverbIRLeft, 0);
+            irBuffer.copyToChannel(cachedReverbIRRight, 1);
+        } else {
+            irBuffer.getChannelData(0).set(cachedReverbIRLeft);
+            irBuffer.getChannelData(1).set(cachedReverbIRRight);
         }
         return irBuffer;
     } catch (_err) {
@@ -155,7 +209,7 @@ function createWaterReverbIR(ctx) {
 
 /**
  * 現在の AudioContext に紐づくマスターチェイン
- * （合流入力 → Dry 78% ＋ Wet 26% 水辺リバーブ [0.65s IR → Lowpass 2400Hz] → Master Lowpass 4200Hz → 高速ソフトリミッター → MasterGain）
+ * （合流入力 → Dry 80% ＋ Wet 22% 水辺リバーブ [0.58s IR → Lowpass 1650Hz] → Master Lowpass 2600Hz → 高速ソフトリミッター → MasterGain）
  * および 0.25 秒分の共有ホワイトノイズバッファを 1対1 で構築・取得する
  * @param {AudioContext} ctx
  * @returns {{ input: AudioNode, masterGain: GainNode, noiseBuffer: AudioBuffer|null } | null}
@@ -178,15 +232,15 @@ function ensureAudioGraph(ctx) {
         const inputBus = ctx.createGain();
         inputBus.gain.setValueAtTime(1.0, now);
 
-        // 1. マスターローパスフィルタ（4200Hz, Q=0.5：水滴の透明なきらめきを残しつつ耳に刺さる金属域だけカット）
+        // 1. マスターローパスフィルタ（2600Hz, Q=0.45：耳に刺さる金属域を完全遮断し丸く優しい響きへ）
         const lp = ctx.createBiquadFilter();
         lp.type = 'lowpass';
-        lp.frequency.setValueAtTime(4200, now);
-        lp.Q.setValueAtTime(0.5, now);
+        lp.frequency.setValueAtTime(2600, now);
+        lp.Q.setValueAtTime(0.45, now);
 
-        // 2. パラレル Dry（78%）＋ Wet（26%：静かな水辺リバーブ → 2400Hz ローパス）
+        // 2. パラレル Dry（80%）＋ Wet（22%：静かな水辺リバーブ → 1650Hz ローパス）
         const dryGain = ctx.createGain();
-        dryGain.gain.setValueAtTime(0.78, now);
+        dryGain.gain.setValueAtTime(0.80, now);
         inputBus.connect(dryGain);
         dryGain.connect(lp);
 
@@ -198,11 +252,11 @@ function ensureAudioGraph(ctx) {
 
                 const wetFilter = ctx.createBiquadFilter();
                 wetFilter.type = 'lowpass';
-                wetFilter.frequency.setValueAtTime(2400, now);
+                wetFilter.frequency.setValueAtTime(1650, now);
                 wetFilter.Q.setValueAtTime(0.5, now);
 
                 const wetGain = ctx.createGain();
-                wetGain.gain.setValueAtTime(0.26, now);
+                wetGain.gain.setValueAtTime(0.22, now);
 
                 inputBus.connect(convolver);
                 convolver.connect(wetFilter);
@@ -263,7 +317,7 @@ function ensureAudioGraph(ctx) {
 }
 
 /**
- * 共有ホワイトノイズバッファから極小の高域しずく粒・清流スウィッシュを再生する共通ヘルパー
+ * 共有ホワイトノイズバッファから柔らかな清流スウィッシュを再生する共通ヘルパー
  * @param {AudioContext} ctx
  * @param {{ input: AudioNode, noiseBuffer: AudioBuffer|null }} graph
  * @param {number} startTime
@@ -289,7 +343,7 @@ function playWaterNoiseBurst(ctx, graph, startTime, duration, filterType, startF
     }
 
     const gain = ctx.createGain();
-    const attack = Math.min(0.004, duration * 0.25);
+    const attack = Math.min(0.005, duration * 0.25);
     gain.gain.setValueAtTime(0.0001, startTime);
     gain.gain.linearRampToValueAtTime(peakGain, startTime + attack);
     gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
@@ -325,7 +379,7 @@ function playSilentUnlockBuffer(ctx) {
 }
 
 /**
- * 音量 ON 時の澄んだ2粒の水琴窟雫確認音（ハード初期化直後の発音確認を兼ねる）
+ * 音量 ON 時の温かく澄んだ2粒の水琴窟雫確認音（ハード初期化直後の発音確認を兼ねる）
  * @param {AudioContext} ctx
  */
 function playConfirmOnTone(ctx) {
@@ -336,8 +390,8 @@ function playConfirmOnTone(ctx) {
     try {
         const now = ctx.currentTime;
         const drops = [
-            { delay: 0,     fStart: 523, fEnd: 659, sweep: 0.024, dur: 0.130, peak: 0.14 },
-            { delay: 0.052, fStart: 659, fEnd: 784, sweep: 0.026, dur: 0.160, peak: 0.13 }
+            { delay: 0,     fStart: 392, fEnd: 494, sweep: 0.026, dur: 0.145, peak: 0.12 },
+            { delay: 0.056, fStart: 494, fEnd: 587, sweep: 0.028, dur: 0.175, peak: 0.11 }
         ];
 
         for (let i = 0; i < drops.length; i++) {
@@ -352,7 +406,7 @@ function playConfirmOnTone(ctx) {
             osc.frequency.exponentialRampToValueAtTime(d.fEnd, t0 + d.sweep);
 
             gain.gain.setValueAtTime(0.0001, t0);
-            gain.gain.linearRampToValueAtTime(d.peak, t0 + 0.005);
+            gain.gain.linearRampToValueAtTime(d.peak, t0 + 0.008);
             gain.gain.exponentialRampToValueAtTime(0.0001, tEnd);
 
             osc.connect(gain);
@@ -368,13 +422,20 @@ function playConfirmOnTone(ctx) {
 }
 
 /**
- * タブ・別アプリ復帰時に AudioContext の再開を試みるライフサイクルリスナーを1度だけ登録する
+ * タブ・別画面・別アプリへの離脱監視と、復帰後初回操作時の
+ * 2段構えキャプチャ先行ハードリカバリ（touchstart/mousedown → touchend/click）を1度だけ登録する
  */
 function bindAudioLifecycleListeners() {
     if (lifecycleListenersBound || typeof window === 'undefined' || typeof document === 'undefined') {
         return;
     }
     lifecycleListenersBound = true;
+
+    // 離脱検知：音量 ON のまま別画面へ移った場合は、復帰後初回操作で自動ハード再構築するようフラグを立てる
+    const markNeedsRecovery = () => {
+        if (!soundEnabled) return;
+        needsAudioRecovery = true;
+    };
 
     const tryAutoResume = () => {
         if (!soundEnabled || !audioCtx || audioCtx.state === 'closed') return;
@@ -385,18 +446,89 @@ function bindAudioLifecycleListeners() {
                     res.catch(() => {});
                 }
             } catch (_err) {
-                // 自動再開が拒否された場合は次回ユーザー操作の ensureAudioRunning() / ハード初期化で復帰
+                // 自動再開が拒否された場合は復帰後初回操作のキャプチャ先行ハードリカバリで確実に復旧
             }
         }
     };
 
+    // 経路 1〜3：バックグラウンド離脱・画面遷移・GRAVITYネイティブオーバーレイ遷移の検知
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
+        if (document.visibilityState === 'hidden') {
+            markNeedsRecovery();
+        } else if (document.visibilityState === 'visible') {
             tryAutoResume();
         }
     });
-    window.addEventListener('pageshow', tryAutoResume);
+    window.addEventListener('pagehide', markNeedsRecovery);
+    window.addEventListener('blur', markNeedsRecovery);
+    window.addEventListener('pageshow', (e) => {
+        if (e && e.persisted) {
+            markNeedsRecovery();
+        }
+        tryAutoResume();
+    });
     window.addEventListener('focus', tryAutoResume);
+
+    // 復帰後 1 段目（touchstart / mousedown キャプチャ先行）：input.js / aim.js より先に同期ハード再構築
+    const handleStartCaptureRecovery = (e) => {
+        if (!soundEnabled || !needsAudioRecovery) return;
+        // 音量ボタン押下（OFF 切替等）とは競合させない
+        if (e && isSoundToggleTarget(e.target)) return;
+
+        const nowMs = performance.now();
+        if (nowMs - lastRecoveryTimeMs < RECOVERY_COOLDOWN_MS) return;
+
+        lastRecoveryTimeMs = nowMs;
+        needsAudioRecovery = false;
+        // 厳格な iOS WebKit で touchstart 起動が保留された場合に備え、直後の touchend / click でダメ押し解除を予約
+        pendingTouchendUnlock = true;
+        hardResetAudioContext(false);
+    };
+
+    // 復帰後 2 段目（touchend / click キャプチャ先行）：iOS が確実に User Activation を認める瞬間にダメ押しアンロック
+    const handleEndCaptureUnlock = (e) => {
+        if (!soundEnabled) return;
+        if (!pendingTouchendUnlock && !needsAudioRecovery) return;
+        if (e && isSoundToggleTarget(e.target)) return;
+
+        const wasNeedsRecovery = needsAudioRecovery;
+        pendingTouchendUnlock = false;
+        needsAudioRecovery = false;
+
+        if (!audioCtx || audioCtx.state === 'closed' || audioCtx.state === 'interrupted') {
+            lastRecoveryTimeMs = performance.now();
+            hardResetAudioContext(false);
+            return;
+        }
+
+        if (wasNeedsRecovery) {
+            const nowMs = performance.now();
+            if (nowMs - lastRecoveryTimeMs >= RECOVERY_COOLDOWN_MS) {
+                lastRecoveryTimeMs = nowMs;
+                hardResetAudioContext(false);
+                return;
+            }
+        }
+
+        // touchstart で作成済みの audioCtx を壊さずに resume() ＋ 無音バッファで確実に起動完了させる
+        try {
+            if (audioCtx.state !== 'running') {
+                const res = audioCtx.resume();
+                if (res && typeof res.catch === 'function') {
+                    res.catch(() => {});
+                }
+            }
+            playSilentUnlockBuffer(audioCtx);
+            ensureAudioGraph(audioCtx);
+        } catch (_err) {
+            hardResetAudioContext(false);
+        }
+    };
+
+    window.addEventListener('touchstart', handleStartCaptureRecovery, { capture: true, passive: true });
+    window.addEventListener('mousedown', handleStartCaptureRecovery, { capture: true, passive: true });
+    window.addEventListener('touchend', handleEndCaptureUnlock, { capture: true, passive: true });
+    window.addEventListener('click', handleEndCaptureUnlock, { capture: true, passive: true });
 }
 
 bindAudioLifecycleListeners();
@@ -413,7 +545,7 @@ export function isSoundEnabled() {
  * iOS / GRAVITY WebView 同期制約準拠のオーディオ・ハード初期化
  * 1. 旧 AudioContext と旧マスターグラフを退避・破棄して非同期クローズ（await せずユーザージェスチャー同期スタックを維持）
  * 2. 同一同期スタック内で新規 AudioContext と新マスターグラフを生成し、resume() ＋ 1サンプル無音バッファでハードアンロック
- * 3. オプションで音量 ON 水滴確認音を鳴らす
+ * 3. 経路 4（onstatechange 中断監視）をバインドし、オプションで音量 ON 水滴確認音を鳴らす
  * @param {boolean} [playConfirm=true] - 初期化直後にオン確認音を鳴らすかどうか
  * @returns {boolean} 新規 AudioContext の構築に成功した場合は true
  */
@@ -433,14 +565,21 @@ export function hardResetAudioContext(playConfirm = true) {
     audioCtx = null;
     clearAudioGraphCache();
 
-    if (oldCtx && oldCtx.state !== 'closed') {
+    if (oldCtx) {
         try {
-            const closePromise = oldCtx.close();
-            if (closePromise && typeof closePromise.catch === 'function') {
-                closePromise.catch(() => {});
-            }
+            oldCtx.onstatechange = null;
         } catch (_err) {
-            // 既にクローズ済み等の例外は無視
+            // 無視
+        }
+        if (oldCtx.state !== 'closed') {
+            try {
+                const closePromise = oldCtx.close();
+                if (closePromise && typeof closePromise.catch === 'function') {
+                    closePromise.catch(() => {});
+                }
+            } catch (_err) {
+                // 既にクローズ済み等の例外は無視
+            }
         }
     }
 
@@ -448,11 +587,22 @@ export function hardResetAudioContext(playConfirm = true) {
     try {
         const nextCtx = new AudioContextClass();
         audioCtx = nextCtx;
+        audioCtxCreatedAtMs = performance.now();
+        lastClockWallMs = 0;
+        lastClockAudioTime = -1;
         lastCollideSoundTime = 0;
         lastAnticipateSoundTime = 0;
         lastSelectSoundTime = 0;
         lastMergeScheduledTime = 0;
-        chainBaseFreq = 520;
+        chainBaseFreq = 400;
+
+        // 経路 4：音量 ON 稼働中に OS から interrupted / suspended された瞬間を検知して次回操作で確実復旧
+        nextCtx.onstatechange = () => {
+            if (audioCtx !== nextCtx || !soundEnabled) return;
+            if (nextCtx.state === 'interrupted' || nextCtx.state === 'suspended') {
+                needsAudioRecovery = true;
+            }
+        };
 
         if (nextCtx.state === 'suspended' || nextCtx.state === 'interrupted') {
             const resumePromise = nextCtx.resume();
@@ -488,7 +638,10 @@ export function ensureAudioRunning() {
         : null;
     if (!AudioContextClass) return;
 
-    if (!audioCtx || audioCtx.state === 'closed') {
+    if (needsAudioRecovery || !audioCtx || audioCtx.state === 'closed') {
+        needsAudioRecovery = false;
+        pendingTouchendUnlock = true;
+        lastRecoveryTimeMs = performance.now();
         hardResetAudioContext(false);
         return;
     }
@@ -520,6 +673,8 @@ export function ensureAudioRunning() {
 export function setSoundEnabled(enabled) {
     const nextEnabled = Boolean(enabled);
     soundEnabled = nextEnabled;
+    needsAudioRecovery = false;
+    pendingTouchendUnlock = false;
 
     if (suspendTimer) {
         clearTimeout(suspendTimer);
@@ -527,6 +682,7 @@ export function setSoundEnabled(enabled) {
     }
 
     if (nextEnabled) {
+        lastRecoveryTimeMs = performance.now();
         hardResetAudioContext(true);
     } else if (audioCtx && audioCtx.state === 'running') {
         const targetCtx = audioCtx;
@@ -578,13 +734,15 @@ export function initSound() {
 }
 
 /**
- * 全効果音共通の再生可否ガード（ミュート・未初期化・中断状態の安全制御 ＆ マスターグラフ確保）
+ * 全効果音共通の再生可否ガード（ミュート・未初期化・中断状態の安全制御 ＆ 経路5 currentTime フリーズ監視 ＆ マスターグラフ確保）
+ * ※非ユーザージェスチャー内での誤リセットを避けるため、フリーズ検知時は needsAudioRecovery フラグを立てるのみとし、次回ユーザー操作で安全に再構築する
  * @returns {{ ctx: AudioContext, graph: { input: AudioNode, masterGain: GainNode, noiseBuffer: AudioBuffer|null } } | null}
  */
 function getPlayableAudio() {
     if (!soundEnabled || !audioCtx || audioCtx.state === 'closed') return null;
 
     if (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted') {
+        needsAudioRecovery = true;
         try {
             const res = audioCtx.resume();
             if (res && typeof res.catch === 'function') {
@@ -592,6 +750,25 @@ function getPlayableAudio() {
             }
         } catch (_err) {
             return null;
+        }
+    } else if (audioCtx.state === 'running') {
+        // 経路 5：ゾンビ AudioContext（state === 'running' なのに currentTime が停止）の検知
+        // コンテキスト生成直後 300ms はグレース期間として除外
+        const nowWallMs = performance.now();
+        if (nowWallMs - audioCtxCreatedAtMs >= 300) {
+            const curAudioTime = audioCtx.currentTime;
+            if (lastClockWallMs > 0) {
+                if ((nowWallMs - lastClockWallMs) >= 180) {
+                    if ((curAudioTime - lastClockAudioTime) < 0.001) {
+                        needsAudioRecovery = true;
+                    }
+                    lastClockWallMs = nowWallMs;
+                    lastClockAudioTime = curAudioTime;
+                }
+            } else {
+                lastClockWallMs = nowWallMs;
+                lastClockAudioTime = curAudioTime;
+            }
         }
     }
 
@@ -616,13 +793,13 @@ export function playSoundSelect(sizeValue = 4) {
     const { ctx, graph } = audio;
     const now = ctx.currentTime;
     const sizeNorm = getAnySizeNorm(sizeValue);
-    const j = pitchJitter(0.018);
+    const j = pitchJitter(0.012);
 
-    // 水面に指先がそっと触れたような極小雫音（520〜360Hz → +18%、22ms上昇、48ms余韻）
-    const startFreq = (520 - sizeNorm * 160) * j;
-    const endFreq = startFreq * 1.18;
-    const sweepDur = 0.022;
-    const totalDur = 0.048;
+    // 水面に指先がそっと触れたような極小雫音（430〜300Hz → +14%、24ms上昇、52ms余韻）
+    const startFreq = (430 - sizeNorm * 130) * j;
+    const endFreq = startFreq * 1.14;
+    const sweepDur = 0.024;
+    const totalDur = 0.052;
 
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -631,7 +808,7 @@ export function playSoundSelect(sizeValue = 4) {
     osc.frequency.exponentialRampToValueAtTime(endFreq, now + sweepDur);
 
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(0.06, now + 0.004);
+    gain.gain.linearRampToValueAtTime(0.05, now + 0.006);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + totalDur);
 
     osc.connect(gain);
@@ -643,8 +820,8 @@ export function playSoundSelect(sizeValue = 4) {
 }
 
 /**
- * 発射音（そっと落とし「ぽとん」〜 通常ショット「さらっ」）
- * @param {number} [powerRatio=0.5] - 発射強度比率（0.0 = そっと落とし 〜 1.0 = 全力ショット）
+ * 発射音（そっと落とし「ぽとん」〜 下方向強ショット「さらっ」）
+ * @param {number} [powerRatio=0.5] - 発射強度比率（0.0 = そっと落とし 〜 1.0 = 全力下ショット）
  */
 export function playSoundShoot(powerRatio = 0.5) {
     const audio = getPlayableAudio();
@@ -654,14 +831,14 @@ export function playSoundShoot(powerRatio = 0.5) {
     const now = ctx.currentTime;
     const p = clamp(Number(powerRatio), 0, 1);
     const safePower = Number.isFinite(p) ? p : 0.5;
-    const j = pitchJitter(0.018);
+    const j = pitchJitter(0.012);
 
-    // そっと落とし: 340→430Hz (24ms上昇, 75ms余韻, 0.11)、強ショット: 360→560Hz (30ms上昇)
-    const startFreq = (340 + safePower * 20) * j;
-    const endFreq = (430 + safePower * 130) * j;
-    const sweepDur = 0.024 + safePower * 0.006;
-    const totalDur = 0.075 + safePower * 0.015;
-    const peakGain = 0.11 + safePower * 0.05;
+    // そっと落とし: 290→370Hz (26ms上昇, 80ms余韻, 0.085)、強ショット: 310→460Hz (34ms上昇, 0.13)
+    const startFreq = (290 + safePower * 20) * j;
+    const endFreq = (370 + safePower * 90) * j;
+    const sweepDur = 0.026 + safePower * 0.008;
+    const totalDur = 0.080 + safePower * 0.018;
+    const peakGain = 0.085 + safePower * 0.045;
 
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -670,7 +847,7 @@ export function playSoundShoot(powerRatio = 0.5) {
     osc.frequency.exponentialRampToValueAtTime(endFreq, now + sweepDur);
 
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(peakGain, now + 0.005);
+    gain.gain.linearRampToValueAtTime(peakGain, now + 0.007);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + totalDur);
 
     osc.connect(gain);
@@ -680,25 +857,25 @@ export function playSoundShoot(powerRatio = 0.5) {
     osc.start(now);
     osc.stop(now + totalDur + 0.02);
 
-    // 強ショット時のみ柔らかな清流スウィッシュ（1400→2600Hz, 30ms, 最大0.028）を薄く付加
-    const swishGain = safePower * 0.028;
+    // 強ショット時のみ控えめで丸い清流スウィッシュ（950→1750Hz, 28ms, 最大 0.018）を薄く付加
+    const swishGain = safePower * 0.018;
     if (swishGain > 0.002) {
         playWaterNoiseBurst(
             ctx,
             graph,
             now,
-            0.030,
+            0.028,
             'bandpass',
-            1400 * j,
-            2600 * j,
-            2.4,
+            950 * j,
+            1750 * j,
+            2.2,
             swishGain
         );
     }
 }
 
 /**
- * 上段飛び越えホップ音（Bar-Hop：2粒の澄んだ水滴が軽やかに跳ねる音「ぽろりん」）
+ * 上段飛び越えホップ音（Bar-Hop：2粒の温かく澄んだ水滴が軽やかに跳ねる音「ぽろりん」）
  */
 export function playSoundHop() {
     const audio = getPlayableAudio();
@@ -706,12 +883,11 @@ export function playSoundHop() {
 
     const { ctx, graph } = audio;
     const now = ctx.currentTime;
-    const j = pitchJitter(0.018);
+    const j = pitchJitter(0.012);
 
-    // ゴムの溜め（音程下がり）を撤廃し、澄んだ2粒の水滴が軽やかに跳ねる構成
     const drops = [
-        { delay: 0.000, fStart: 390, fEnd: 520, sweep: 0.022, dur: 0.088, peak: 0.14 },
-        { delay: 0.028, fStart: 520, fEnd: 700, sweep: 0.026, dur: 0.115, peak: 0.15 }
+        { delay: 0.000, fStart: 350, fEnd: 440, sweep: 0.024, dur: 0.092, peak: 0.110 },
+        { delay: 0.032, fStart: 440, fEnd: 587, sweep: 0.028, dur: 0.120, peak: 0.115 }
     ];
 
     for (let i = 0; i < drops.length; i++) {
@@ -726,7 +902,7 @@ export function playSoundHop() {
         osc.frequency.exponentialRampToValueAtTime(d.fEnd * j, t0 + d.sweep);
 
         gain.gain.setValueAtTime(0.0001, t0);
-        gain.gain.linearRampToValueAtTime(d.peak, t0 + 0.005);
+        gain.gain.linearRampToValueAtTime(d.peak, t0 + 0.007);
         gain.gain.exponentialRampToValueAtTime(0.0001, tEnd);
 
         osc.connect(gain);
@@ -739,8 +915,8 @@ export function playSoundHop() {
 }
 
 /**
- * 接触音（異数字衝突・高速壁/床着地時の静かな水滴音「ぽちゃ」「ころん」「こぽっ」）
- * ゴムの Dip-Rise を撤廃し、短い上向きスイープ＋澄んだ純サイン波余韻と 45ms 間引きで癒し感を維持
+ * 接触音（異数字衝突・高速壁/床着地時の静かで耳に優しい水滴音「ぽちゃ」「ころん」「こぽっ」）
+ * 連続落下時にも邪魔にならない 440〜230Hz 帯域・7ms 丸アタック・55ms 間引き・ノイズなし純水滴構成
  * @param {number} [intensity=0.5] - 衝突の強さ（0.0 〜 1.0）
  * @param {number} [jellyValue=4] - 衝突したゼリーの数値（小さいほど高音、大きいほど低音）
  */
@@ -748,7 +924,7 @@ export function playSoundCollide(intensity = 0.5, jellyValue = 4) {
     const audio = getPlayableAudio();
     if (!audio || intensity < 0.1) return;
 
-    // 45ms 以内の連続発火を制限し、大合体衝撃波時の同時衝突スパイクを防止
+    // 55ms 以内の連続発火を制限し、連続落下や大合体衝撃波時の同時衝突スパイクを防止
     const nowMs = performance.now();
     if (nowMs - lastCollideSoundTime < COLLIDE_THROTTLE_MS) return;
     lastCollideSoundTime = nowMs;
@@ -757,22 +933,22 @@ export function playSoundCollide(intensity = 0.5, jellyValue = 4) {
     const now = ctx.currentTime;
     const clampedIntensity = clamp(Number(intensity) || 0.5, 0.1, 1.0);
     const sizeNorm = getAnySizeNorm(jellyValue); // 0.0(最小) 〜 1.0(最大)
-    const j = pitchJitter(0.022);
+    const j = pitchJitter(0.015);
 
-    // サイズ帯域 560Hz（小）〜 270Hz（大）：0.84f → 1.16f へ 18〜26ms だけ澄んで上がり、58〜88ms で静かに消える
-    const baseFreq = (560 - sizeNorm * 290) * j;
-    const sweepDur = 0.018 + sizeNorm * 0.008;
-    const totalDur = 0.058 + sizeNorm * 0.030;
+    // サイズ帯域 440Hz（小）〜 230Hz（大）：0.86f → 1.12f へ 20〜28ms 穏やかに上がり、62〜92ms で静かに消える
+    const baseFreq = (440 - sizeNorm * 210) * j;
+    const sweepDur = 0.020 + sizeNorm * 0.008;
+    const totalDur = 0.062 + sizeNorm * 0.030;
 
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(baseFreq * 0.84, now);
-    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.16, now + sweepDur);
+    osc.frequency.setValueAtTime(baseFreq * 0.86, now);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.12, now + sweepDur);
 
-    const peakGain = 0.055 + clampedIntensity * 0.10; // 0.055 〜 0.155 の静かで上品なバランス
+    const peakGain = 0.045 + clampedIntensity * 0.075; // 0.045 〜 0.12 の耳に優しい控えめバランス
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(peakGain, now + 0.004);
+    gain.gain.linearRampToValueAtTime(peakGain, now + 0.007);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + totalDur);
 
     osc.connect(gain);
@@ -781,19 +957,6 @@ export function playSoundCollide(intensity = 0.5, jellyValue = 4) {
 
     osc.start(now);
     osc.stop(now + totalDur + 0.02);
-
-    // 極小の高域しずく粒（2200Hz, 7ms, 最大 0.012）
-    playWaterNoiseBurst(
-        ctx,
-        graph,
-        now,
-        0.007,
-        'bandpass',
-        2200 * j,
-        2450 * j,
-        2.5,
-        0.004 + clampedIntensity * 0.008
-    );
 }
 
 /**
@@ -811,20 +974,20 @@ export function playSoundMergeAnticipate(sizeValue = 4) {
     const { ctx, graph } = audio;
     const now = ctx.currentTime;
     const sizeNorm = getAnySizeNorm(sizeValue);
-    const j = pitchJitter(0.018);
+    const j = pitchJitter(0.010);
 
-    // 1.08f → 0.90f へ 28ms でそっと吸い込む極小の純サイン波（ノイズなし・直後の合体音の透明感を際立たせる）
-    const baseFreq = (520 - sizeNorm * 240) * j;
-    const dur = 0.028;
+    // 400〜230Hz 帯域で 1.06f → 0.92f へ 30ms そっと吸い込む極小の純サイン波（ノイズなし）
+    const baseFreq = (400 - sizeNorm * 170) * j;
+    const dur = 0.030;
 
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(baseFreq * 1.08, now);
-    osc.frequency.exponentialRampToValueAtTime(Math.max(150, baseFreq * 0.90), now + dur);
+    osc.frequency.setValueAtTime(baseFreq * 1.06, now);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(150, baseFreq * 0.92), now + dur);
 
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(0.065, now + 0.005);
+    gain.gain.linearRampToValueAtTime(0.045, now + 0.007);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
 
     osc.connect(gain);
@@ -836,8 +999,9 @@ export function playSoundMergeAnticipate(sizeValue = 4) {
 }
 
 /**
- * 合体音（本家 sobosuba 準拠・水滴ASMR／水琴窟合成「ぽろんっ…ぴく」／大塊「こぽぉんっ…ぽろ」）
- * 基準帯域 520〜260Hz、短い水滴スイープ＋澄んだ純サイン波余韻、純正ペンタトニック連鎖上昇、45msマイクロアルペジオ対応
+ * 合体音（耳に優しいせせらぎ・水琴窟ASMR合成「ぽろんっ…ぴく」／大塊「こぽぉんっ…ぽろ」）
+ * 400〜220Hz 黄金帯域・ウェーブペンタトニック旋律・3層純正整数比（完全オクターブ/完全五度）・
+ * 等ラウドネス自動補正・連続密度ダッキング・62ms ハープアルペジオ・ノイズ撤廃・10ms 丸アタック
  * @param {number} [chainCount=0] - 現在の連鎖回数（0始まり）
  * @param {number} [mergedValue=4] - 合体後に生成されたゼリーの数値（省略時は互換デフォルト 4）
  */
@@ -849,33 +1013,43 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     const now = ctx.currentTime;
     const safeChain = Math.max(0, Math.floor(Number(chainCount) || 0));
     const sizeNorm = getMergeSizeNorm(mergedValue); // 0.0(2) 〜 1.0(2048+)
-    const j = pitchJitter(0.018);
+    // 連続合体の残響がリバーブ内で澄んだペンタトニック和音として溶け合うよう揺らぎを ±0.4% に制限
+    const j = pitchJitter(0.004);
 
-    // 同時複数合体時は 45ms ずつ微シフト（最大遅延 135ms）して粒立ちの良いアルペジオにする
+    // 同時複数合体時は 62ms ずつ微シフト（最大遅延 186ms）して粒立ちのよいハープ・アルペジオにする
+    const prevScheduled = lastMergeScheduledTime;
     let startTime = now;
-    if (lastMergeScheduledTime > now - 0.044) {
-        startTime = Math.min(now + 0.135, lastMergeScheduledTime + 0.045);
+    if (prevScheduled > now - 0.060) {
+        startTime = Math.min(now + 0.186, prevScheduled + 0.062);
     }
     lastMergeScheduledTime = startTime;
 
-    // 連鎖開始（chainCount === 0）でサイズ基準周波数（520〜260Hz）を記憶し、
-    // 連鎖中は記憶した基準軸から純正ペンタトニックで澄んで駆け上がる
-    const sizeBaseFreq = 520 - sizeNorm * 260;
+    // 連続落下・同時合体時の自動ソフトダッキング（間隔 < 260ms ほど柔らかく音量を抑える）
+    const deltaSincePrev = (prevScheduled > 0) ? Math.max(0, startTime - prevScheduled) : 1.0;
+    const densityRatio = clamp(deltaSincePrev / 0.260, 0, 1);
+    const mainDuck = 0.76 + 0.24 * densityRatio; // 0.76 〜 1.00
+    const subDuck = 0.50 + 0.50 * densityRatio;  // 0.50 〜 1.00
+
+    // 連鎖開始（chainCount === 0）でサイズ基準周波数（400〜220Hz）を記憶し、
+    // 1〜7連は純正ペンタトニック上昇、8連以降は最高音張り付きを防いで温かい和音帯を波のように往復
+    const sizeBaseFreq = 400 - sizeNorm * 180;
     if (safeChain === 0) {
         chainBaseFreq = sizeBaseFreq;
     }
 
-    const stepIndex = Math.min(PENTATONIC_SEMITONES.length - 1, safeChain);
-    const semitones = PENTATONIC_SEMITONES[stepIndex];
+    const semitones = (safeChain < PENTATONIC_RISE_SEMITONES.length)
+        ? PENTATONIC_RISE_SEMITONES[safeChain]
+        : PENTATONIC_WAVE_SEMITONES[(safeChain - PENTATONIC_RISE_SEMITONES.length) % PENTATONIC_WAVE_SEMITONES.length];
     const pitchRatio = Math.pow(2, semitones / 12);
     const f = chainBaseFreq * pitchRatio * j;
 
-    // --- 層 1：主水滴（純サイン波：最初の 22〜36ms だけ 0.78f → 1.26f へ澄んで上昇し、以後音程固定で 170〜290ms 減衰） ---
-    const sweepDur = 0.022 + sizeNorm * 0.014;
-    const decayDur = 0.170 + sizeNorm * 0.120;
-    const mainStartFreq = Math.max(155, f * 0.78);
-    const mainEndFreq = Math.min(1950, f * 1.26);
-    const mainPeak = 0.28 + sizeNorm * 0.05;
+    // --- 層 1：主水滴（純サイン波：24〜38ms で 0.82f → 1.18f へ穏やかに上昇、10ms 丸アタック、等ラウドネス補正） ---
+    const sweepDur = 0.024 + sizeNorm * 0.014;
+    const decayDur = 0.180 + sizeNorm * 0.120;
+    const mainStartFreq = Math.max(150, f * 0.82);
+    const mainEndFreq = Math.min(1180, f * 1.18);
+    const loudnessComp = clamp(Math.pow(420 / Math.max(420, mainEndFreq), 0.55), 0.56, 1.0);
+    const mainPeak = (0.255 + sizeNorm * 0.035) * loudnessComp * mainDuck;
 
     const mainOsc = ctx.createOscillator();
     const mainGain = ctx.createGain();
@@ -884,7 +1058,7 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     mainOsc.frequency.exponentialRampToValueAtTime(mainEndFreq, startTime + sweepDur);
 
     mainGain.gain.setValueAtTime(0.0001, startTime);
-    mainGain.gain.linearRampToValueAtTime(mainPeak, startTime + 0.005);
+    mainGain.gain.linearRampToValueAtTime(mainPeak, startTime + 0.010);
     mainGain.gain.exponentialRampToValueAtTime(0.0001, startTime + decayDur);
 
     mainOsc.connect(mainGain);
@@ -894,19 +1068,19 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     mainOsc.start(startTime);
     mainOsc.stop(startTime + decayDur + 0.02);
 
-    // --- 層 2：水底の深み（濁りのない純サイン波オクターブ下 0.5f・下限 155Hz、大塊ほど柔らかく添える） ---
-    const bodyFreq = Math.max(155, mainEndFreq * 0.5);
-    const bodyDur = 0.160 + sizeNorm * 0.115;
-    const bodyPeak = 0.035 + sizeNorm * 0.075; // 0.035 〜 0.11
+    // --- 層 2：水底ボディ（純正整数比：mainEndFreq >= 310Hz は完全オクターブ 1:2、未満は純正完全五度下 2:3 で濁りゼロ） ---
+    const bodyFreq = (mainEndFreq >= 310) ? (mainEndFreq * 0.5) : (mainEndFreq * (2 / 3));
+    const bodyDur = 0.165 + sizeNorm * 0.115;
+    const bodyPeak = (0.030 + sizeNorm * 0.065) * loudnessComp * mainDuck;
 
     const bodyOsc = ctx.createOscillator();
     const bodyGain = ctx.createGain();
     bodyOsc.type = 'sine';
-    bodyOsc.frequency.setValueAtTime(Math.max(145, bodyFreq * 0.90), startTime);
+    bodyOsc.frequency.setValueAtTime(bodyFreq * 0.92, startTime);
     bodyOsc.frequency.exponentialRampToValueAtTime(bodyFreq, startTime + sweepDur * 0.95);
 
     bodyGain.gain.setValueAtTime(0.0001, startTime);
-    bodyGain.gain.linearRampToValueAtTime(bodyPeak, startTime + 0.010);
+    bodyGain.gain.linearRampToValueAtTime(bodyPeak, startTime + 0.012);
     bodyGain.gain.exponentialRampToValueAtTime(0.0001, startTime + bodyDur);
 
     bodyOsc.connect(bodyGain);
@@ -916,14 +1090,14 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     bodyOsc.start(startTime);
     bodyOsc.stop(startTime + bodyDur + 0.02);
 
-    // --- 層 3：2次小雫（38〜56ms 遅れ：1.45f → 1.85f、18ms上昇、上限 2400Hz、音量 20%）＋ 極小高域しずく粒 ---
-    const subDelay = 0.038 + sizeNorm * 0.018;
+    // --- 層 3：2次小雫（40〜58ms 遅れ：主音到達の純正完全五度上 1.5倍・連続密度ダッキング連動・高域ノイズなし） ---
+    const subDelay = 0.040 + sizeNorm * 0.018;
     const subStart = startTime + subDelay;
     const subSweep = 0.018;
     const subDur = 0.068 + sizeNorm * 0.026;
-    const subStartFreq = Math.min(2100, f * 1.45);
-    const subEndFreq = Math.min(2400, Math.max(subStartFreq * 1.05, f * 1.85));
-    const subPeak = mainPeak * 0.20;
+    const subEndFreq = Math.min(1650, mainEndFreq * 1.5);
+    const subStartFreq = subEndFreq * 0.84;
+    const subPeak = mainPeak * 0.18 * subDuck;
 
     const subOsc = ctx.createOscillator();
     const subGain = ctx.createGain();
@@ -932,7 +1106,7 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     subOsc.frequency.exponentialRampToValueAtTime(subEndFreq, subStart + subSweep);
 
     subGain.gain.setValueAtTime(0.0001, subStart);
-    subGain.gain.linearRampToValueAtTime(subPeak, subStart + 0.004);
+    subGain.gain.linearRampToValueAtTime(subPeak, subStart + 0.006);
     subGain.gain.exponentialRampToValueAtTime(0.0001, subStart + subDur);
 
     subOsc.connect(subGain);
@@ -941,13 +1115,10 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
 
     subOsc.start(subStart);
     subOsc.stop(subStart + subDur + 0.02);
-
-    // 水面に触れた瞬間の極小高域しずく粒（2400Hz, 8ms, 0.014）
-    playWaterNoiseBurst(ctx, graph, startTime, 0.008, 'bandpass', 2400 * j, 2650 * j, 2.6, 0.014);
 }
 
 /**
- * ゲームオーバー演出音（静かな水底へ4粒の澄んだ水滴がペンタトニック下降する癒しの終幕音・580ms 同期）
+ * ゲームオーバー演出音（静かな水底へ4粒の温かい水滴がペンタトニック下降する癒しの終幕音・580ms 同期）
  * 既存呼び出し互換のため関数名 playSoundGameOverZap を維持。
  */
 export function playSoundGameOverZap() {
@@ -957,12 +1128,12 @@ export function playSoundGameOverZap() {
     const { ctx, graph } = audio;
     const now = ctx.currentTime;
 
-    // 濁った三角波を撤廃し、澄んだ4粒の水滴がペンタトニック下降（C5 → A4 → G4 → D4）してリバーブ余韻で静かに消える
+    // 温かい4粒の水滴がペンタトニック下降（A4 → G4 → E4 → C4）してリバーブ余韻で静かに消える
     const drops = [
-        { delay: 0.000, freq: 523.25, sweep: 0.022, dur: 0.160, peak: 0.19 }, // C5
-        { delay: 0.100, freq: 440.00, sweep: 0.024, dur: 0.175, peak: 0.18 }, // A4
-        { delay: 0.210, freq: 392.00, sweep: 0.026, dur: 0.190, peak: 0.17 }, // G4
-        { delay: 0.330, freq: 293.66, sweep: 0.030, dur: 0.250, peak: 0.16 }  // D4（0.330 + 0.250 = 0.580s 収束）
+        { delay: 0.000, freq: 440.00, sweep: 0.024, dur: 0.165, peak: 0.16 }, // A4
+        { delay: 0.100, freq: 392.00, sweep: 0.026, dur: 0.180, peak: 0.15 }, // G4
+        { delay: 0.210, freq: 329.63, sweep: 0.028, dur: 0.195, peak: 0.14 }, // E4
+        { delay: 0.330, freq: 261.63, sweep: 0.032, dur: 0.250, peak: 0.13 }  // C4（0.330 + 0.250 = 0.580s 収束）
     ];
 
     for (let i = 0; i < drops.length; i++) {
@@ -973,11 +1144,11 @@ export function playSoundGameOverZap() {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'sine';
-        osc.frequency.setValueAtTime(d.freq * 0.86, t0);
+        osc.frequency.setValueAtTime(d.freq * 0.88, t0);
         osc.frequency.exponentialRampToValueAtTime(d.freq, t0 + d.sweep);
 
         gain.gain.setValueAtTime(0.0001, t0);
-        gain.gain.linearRampToValueAtTime(d.peak, t0 + 0.006);
+        gain.gain.linearRampToValueAtTime(d.peak, t0 + 0.009);
         gain.gain.exponentialRampToValueAtTime(0.0001, tEnd);
 
         osc.connect(gain);

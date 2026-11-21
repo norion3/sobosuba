@@ -1,10 +1,9 @@
 /**
  * constants.js
- * @version v8.3 (Weight Offload Gravity Scale, Bead Mass Equalization & Bumper Sync - Phase 1)
+ * @version v8.4 (Downward Power-Shot Drag Limit & Vertical Speed Cap Sync - Phase 1)
  * @changes
- *   - 下部への荷重伝達を大幅にカットしつつ落下テンポとホップ軌道を維持するため、PHYSICS.GRAVITY_Y（0.62 → 0.66）、FLOAT_BAR.HOP_GRAVITY_SCALE（2.05 → 1.92）を更新し、着地定着後の荷重伝達カット係数 PHYSICS.SETTLED_GRAVITY_SCALE（0.38）を新設
- *   - 大塊が小塊を一方的に押し潰す逆質量偏りを解消するため、PHYSICS.DENSITY_SCALE_EXP（0.85 → 1.45）を更新し、荷重軽減に合わせて小塊の硬さ（SMALL_BEND_BOOST: 0.135 → 0.095 / SMALL_RESTORE_MULT: 2.5 → 2.0）を微緩和
- *   - 定着重力軽減と質量均等化に合わせて、バンパー復元抵抗（BUMPER_DENSITY: 0.0035 → 0.0026 / BUMPER_STIFFNESS: 0.0050 → 0.0040）および合体膨張インパルス（MERGE_RADIAL_IMPULSE: 1.18 → 0.86）を厳密同期
+ *   - 下方向ショット時のみ矢印を長く引き伸ばして弱・中・強の明確な操作幅を解放するため、PHYSICS.AIM_MAX_DRAG_DOWN（170）を新設（上半円ホップおよび横軸上限は AIM_MAX_DRAG: 120 を維持）
+ *   - 下方向フルパワー着地時の速度頭打ちを防ぎつつ1サブステップ最大移動量 3.00px の裏返り・トンネリング完全安全圏を守るため、PHYSICS.MAX_PARTICLE_VY を 11.0 → 12.0 へ更新
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -163,7 +162,7 @@ export const PHYSICS = {
     OVERLAP_SLOP: 0.35,           // 微小侵入（0.35px未満）を無視するデッドゾーン（px）
     MAX_PARTICLE_SPEED: 5.6,      // 互換維持用（合体衝撃波等の上限基準）
     MAX_PARTICLE_VX: 10.5,        // 落下中の横速度削れを防ぐ非トンネリング範囲内の水平最大速度（px/frame）
-    MAX_PARTICLE_VY: 11.0,        // 落下中の横速度と独立して制御する垂直最大速度（px/frame）
+    MAX_PARTICLE_VY: 12.0,        // 下方向フルパワー着地の頭打ちを防ぎつつ1サブステップ最大3.00pxの安全圏を守る垂直最大速度（px/frame）
 
     // 互換維持用
     DENSITY_CORE: 0.002,
@@ -179,7 +178,8 @@ export const PHYSICS = {
     SLINGSHOT_FORCE_MULTIPLIER: 0.00015, // 互換用
     SLINGSHOT_MAX_DRAG: 150,             // 互換用
     AIM_FORCE_MULTIPLIER: 0.056,         // 端まで一直線に届く通常ショット初速係数
-    AIM_MAX_DRAG: 120,                   // スマホ片手スワイプで最大威力を出しやすいドラッグ距離（px）
+    AIM_MAX_DRAG: 120,                   // スマホ片手スワイプで最大威力を出しやすいドラッグ距離（px・上半円＆横軸上限）
+    AIM_MAX_DRAG_DOWN: 170,              // 下方向限定で弱・中・強の明確な操作幅とパワーショットを解放する最大ドラッグ距離（px）
     AIM_CANCEL_RADIUS: 22,               // 指揺れ誤爆を防ぐキャンセル判定半径（px）
 
     // 合体時膨張インパルス ＆ 重心法線接近速度ベースの衝突音閾値

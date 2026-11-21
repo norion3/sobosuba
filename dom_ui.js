@@ -1,9 +1,10 @@
 /**
  * dom_ui.js
- * @version v8.2 (Safe Tap Handler Consolidation & Unused Cache Cleanup - Phase 3)
+ * @version v8.4 (Dynamic Optical-Center Overlay Vertical Layout - Phase 5)
  * @changes
- *   - #startOverlay・#soundToggleBtn・#retryBtn の3箇所で重複していた安全タップ処理（全8イベントの stopPropagation()・24px移動許容・350ms二重発火防止・touchcancelリセット）を内部ヘルパー bindSafeTap(element, callback, { preventTouchMove }) へ共通化（既存イベント仕様・挙動は100%不変、#retryBtn の touchcancel 耐性を統一）
- *   - 未使用だった elStartBtn キャッシュ変数および initUI() 内の取得行を削除し、#startOverlay への単一バインド構成へ整理
+ *   - 開始説明カード（#startCard）およびゲームオーバーカード（#gameOverCard）へ ID を付与し、margin: auto 0 を廃止して margin: 0; flex-shrink: 0; へ統一するとともに、#startOverlay / #gameOverUI の非対称固定下部余白（padding-bottom: min(215px, 32vh)）を撤廃して justify-content: flex-start 基盤へ刷新
+ *   - 実表示高さ・上部ヘッダー下端・Canvas 実領域・カード実高さを自動計測し、視覚的ど真ん中（yTarget = 0.75 * yStage + 0.25 * (H / 2)）へ上下セーフクランプ付きで配置する syncOverlayVerticalLayout() および rAF デバウンス付き scheduleOverlayVerticalLayout() を新設
+ *   - showStartUI() / showGameOverUI() で表示直後の同期実行＋次フレーム rAF 再同期を行い、applyViewportSize() でも rAF 予約同期を実行することで、main.js 無変更のまま全スマホサイズ・画面回転時に 1px 精度で中央配置を追従（通常プレイ中のオーバーレイ非表示時は計測負荷ゼロ）
  * 
  * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、開始説明画面、および安全なUI制御を行うモジュール
  * 
@@ -16,17 +17,24 @@ import { UI } from '/sobosuba/constants.js?v=7';
 
 // DOM要素のキャッシュ
 let elGameContainer;
+let elTopHudHeader;
 let elCanvasStage;
+let elGameCanvas;
 let elTopScoreWrapper;
 let elScoreDisplay;
 let elSoundBtn;
 let elSoundIcon;
 let elSoundLabel;
 let elStartOverlay;
+let elStartCard;
 let elGameOverUI;
+let elGameOverCard;
 let elFinalScore;
 let elWarningOverlay;
 let elRetryBtn;
+
+// オーバーレイ動的中央揃え用 rAF 多重予約デバウンスID
+let overlayLayoutRafId = 0;
 
 // 絵文字不使用の軽量インラインSVGスピーカーアイコン定義
 const SVG_SPEAKER_OFF = `
@@ -65,6 +73,100 @@ function getOptimalTopHeaderPaddingPx() {
         return UI.SAFE_TOP_HEADER_PX;
     }
     return (UI.SAFE_TOP_HEADER_BROWSER_PX !== undefined) ? UI.SAFE_TOP_HEADER_BROWSER_PX : 8;
+}
+
+/**
+ * 開始画面またはゲームオーバー画面のいずれかが現在表示中かを判定する
+ * @returns {boolean}
+ */
+function isAnyOverlayVisible() {
+    if (!elStartOverlay) elStartOverlay = document.getElementById('startOverlay');
+    if (!elGameOverUI) elGameOverUI = document.getElementById('gameOverUI');
+    const startVisible = Boolean(elStartOverlay && elStartOverlay.style.display !== 'none');
+    const overVisible = Boolean(elGameOverUI && elGameOverUI.style.display !== 'none');
+    return startVisible || overVisible;
+}
+
+/**
+ * 実表示高さ・ヘッダー下端・Canvas実領域・カード実高さを自動計測し、
+ * 表示中の開始画面（#startOverlay）／ゲームオーバー画面（#gameOverUI）を
+ * 視覚的ど真ん中（オプティカルセンター）へ上下セーフクランプ付きで配置する
+ */
+function syncOverlayVerticalLayout() {
+    if (!isAnyOverlayVisible()) return;
+
+    if (!elGameContainer) elGameContainer = document.getElementById('game-container');
+    if (!elTopHudHeader) elTopHudHeader = document.getElementById('topHudHeader');
+    if (!elGameCanvas) elGameCanvas = document.getElementById('gameCanvas');
+    if (!elStartCard) elStartCard = document.getElementById('startCard');
+    if (!elGameOverCard) elGameOverCard = document.getElementById('gameOverCard');
+    if (!elGameContainer) return;
+
+    const containerRect = elGameContainer.getBoundingClientRect();
+    const containerH = containerRect.height;
+    if (!Number.isFinite(containerH) || containerH <= 0) return;
+
+    // 1. 上部ヘッダー下端（#game-container 上端基準）を実測
+    let headerBottom = getOptimalTopHeaderPaddingPx() + 36;
+    if (elTopHudHeader) {
+        const headerRect = elTopHudHeader.getBoundingClientRect();
+        if (headerRect.height > 0) {
+            headerBottom = Math.max(0, headerRect.bottom - containerRect.top);
+        }
+    }
+
+    // 2. ゲーム盤面（Canvas）の実表示範囲を実測（未確定時はヘッダー下〜下端へフォールバック）
+    let canvasTop = headerBottom;
+    let canvasBottom = Math.max(headerBottom + 1, containerH - 8);
+    if (elGameCanvas) {
+        const canvasRect = elGameCanvas.getBoundingClientRect();
+        if (canvasRect.height > 20) {
+            canvasTop = Math.max(headerBottom, canvasRect.top - containerRect.top);
+            canvasBottom = Math.min(containerH, canvasRect.bottom - containerRect.top);
+        }
+    }
+
+    // 3. 視覚的ど真ん中（盤面中央 75% ＋ 画面全体中央 25%）を算出
+    const stageCenterY = (canvasTop + canvasBottom) * 0.5;
+    const screenCenterY = containerH * 0.5;
+    const targetCenterY = stageCenterY * 0.75 + screenCenterY * 0.25;
+
+    const minTop = Math.round(headerBottom + 12);
+    const bottomSafeMargin = 20;
+
+    const applyToOverlay = (overlayEl, cardEl) => {
+        if (!overlayEl || !cardEl || overlayEl.style.display === 'none') return;
+        const cardRect = cardEl.getBoundingClientRect();
+        const cardH = cardRect.height;
+        if (!Number.isFinite(cardH) || cardH <= 0) return;
+
+        const maxTop = Math.max(minTop, Math.round(containerH - bottomSafeMargin - cardH));
+        const desiredTop = Math.round(targetCenterY - cardH * 0.5);
+        const finalTop = Math.max(minTop, Math.min(maxTop, desiredTop));
+
+        overlayEl.style.paddingTop = `${finalTop}px`;
+        overlayEl.style.paddingBottom = `${bottomSafeMargin}px`;
+    };
+
+    applyToOverlay(elStartOverlay, elStartCard);
+    applyToOverlay(elGameOverUI, elGameOverCard);
+}
+
+/**
+ * 次フレームで syncOverlayVerticalLayout() を 1 回だけ実行予約する（rAF 多重予約デバウンス）
+ * main.js の handleResize() が Canvas サイズを確定させた直後の座標を確実に計測するために使用
+ */
+function scheduleOverlayVerticalLayout() {
+    if (!isAnyOverlayVisible()) return;
+    if (typeof requestAnimationFrame !== 'function') {
+        syncOverlayVerticalLayout();
+        return;
+    }
+    if (overlayLayoutRafId) return;
+    overlayLayoutRafId = requestAnimationFrame(() => {
+        overlayLayoutRafId = 0;
+        syncOverlayVerticalLayout();
+    });
 }
 
 /**
@@ -259,14 +361,14 @@ export function mountDOM() {
         z-index: 20;
     `;
 
-    // Tailwindを使わず、GRAVITY WebKit 規格準拠（backdrop-filter不使用・<div>ボタン・下部215pxセーフエリア）で安全にUIを構築
+    // Tailwindを使わず、GRAVITY WebKit 規格準拠（backdrop-filter不使用・<div>ボタン・実測高さベースの視覚的中央配置）で安全にUIを構築
     uiLayer.innerHTML = `
         <!-- 警告表示用オーバーレイ -->
         <div id="warningOverlay" style="position: absolute; inset: 0; background-color: #ef4444; opacity: 0; pointer-events: none; transition: opacity 100ms; mix-blend-mode: screen; z-index: 0;"></div>
 
-        <!-- Start Guide Overlay (初回起動時のみ表示・タイトルなし・簡潔3行説明・オーバーレイ全体タップ開始可) -->
-        <div id="startOverlay" style="display: none; pointer-events: auto; background-color: rgba(4, 7, 15, 0.68); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx}px); padding-right: 20px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + min(${UI.SAFE_BOTTOM_PX}px, 32vh)); padding-left: 20px; box-sizing: border-box; overflow-y: auto; touch-action: none; overscroll-behavior: none; z-index: 45;">
-            <div style="width: 100%; max-width: 340px; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.65), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.5rem, 3.8vh, 2.1rem) clamp(1.25rem, 5vw, 1.75rem); display: flex; flex-direction: column; align-items: center; text-align: center; margin: auto 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
+        <!-- Start Guide Overlay (初回起動時のみ表示・タイトルなし・簡潔3行説明・オーバーレイ全体タップ開始可・動的縦中央配置) -->
+        <div id="startOverlay" style="display: none; pointer-events: auto; background-color: rgba(4, 7, 15, 0.68); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx + 12}px); padding-right: 20px; padding-bottom: 20px; padding-left: 20px; box-sizing: border-box; overflow-y: auto; touch-action: none; overscroll-behavior: none; z-index: 45;">
+            <div id="startCard" style="width: 100%; max-width: 340px; flex-shrink: 0; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.65), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.5rem, 3.8vh, 2.1rem) clamp(1.25rem, 5vw, 1.75rem); display: flex; flex-direction: column; align-items: center; text-align: center; margin: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
                 <p style="color: #38bdf8; font-size: clamp(1.15rem, 4.8vw, 1.4rem); font-weight: 800; letter-spacing: 0.05em; line-height: 1.3; margin: 0 0 clamp(0.95rem, 2.6vh, 1.35rem) 0;">同じ数字をくっつけよう</p>
 
                 <div style="display: flex; flex-direction: column; gap: clamp(0.45rem, 1.4vh, 0.68rem); color: #e2e8f0; font-size: clamp(0.84rem, 3.5vw, 0.96rem); font-weight: 500; line-height: 1.5; letter-spacing: 0.02em; margin: 0 0 clamp(1.25rem, 3.2vh, 1.7rem) 0;">
@@ -282,9 +384,9 @@ export function mountDOM() {
             </div>
         </div>
 
-        <!-- Game Over UI (GRAVITY規格準拠: backdrop-filter不使用・ダークガラス調カード・下部215pxセーフエリア確保) -->
-        <div id="gameOverUI" style="display: none; pointer-events: auto; background-color: rgba(4, 7, 15, 0.78); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: center; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx}px); padding-right: 20px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + min(${UI.SAFE_BOTTOM_PX}px, 32vh)); padding-left: 20px; box-sizing: border-box; overflow-y: auto; touch-action: none; overscroll-behavior: none; z-index: 50;">
-            <div style="width: 100%; max-width: 340px; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.7), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.6rem, 4vh, 2.2rem) clamp(1.25rem, 5vw, 1.75rem); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: clamp(1rem, 2.8vh, 1.55rem); margin: auto 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
+        <!-- Game Over UI (GRAVITY規格準拠: backdrop-filter不使用・ダークガラス調カード・動的縦中央配置) -->
+        <div id="gameOverUI" style="display: none; pointer-events: auto; background-color: rgba(4, 7, 15, 0.78); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx + 12}px); padding-right: 20px; padding-bottom: 20px; padding-left: 20px; box-sizing: border-box; overflow-y: auto; touch-action: none; overscroll-behavior: none; z-index: 50;">
+            <div id="gameOverCard" style="width: 100%; max-width: 340px; flex-shrink: 0; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.7), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.6rem, 4vh, 2.2rem) clamp(1.25rem, 5vw, 1.75rem); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: clamp(1rem, 2.8vh, 1.55rem); margin: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
                 <h1 style="font-size: clamp(0.95rem, 3.8vw, 1.15rem); font-weight: 800; color: #fb7185; margin: 0; line-height: 1.2; letter-spacing: 0.22em;">GAME OVER</h1>
 
                 <div style="text-align: center;">
@@ -316,14 +418,18 @@ export function initUI(onRetryCallback, onToggleSoundCallback = null, onStartCal
 
     // 2. DOM要素のキャッシュを取得
     elGameContainer = document.getElementById('game-container');
+    elTopHudHeader = document.getElementById('topHudHeader');
     elCanvasStage = document.getElementById('canvasStage');
+    elGameCanvas = document.getElementById('gameCanvas');
     elTopScoreWrapper = document.getElementById('topScoreWrapper');
     elScoreDisplay = document.getElementById('scoreDisplay');
     elSoundBtn = document.getElementById('soundToggleBtn');
     elSoundIcon = document.getElementById('soundToggleIcon');
     elSoundLabel = document.getElementById('soundToggleLabel');
     elStartOverlay = document.getElementById('startOverlay');
+    elStartCard = document.getElementById('startCard');
     elGameOverUI = document.getElementById('gameOverUI');
+    elGameOverCard = document.getElementById('gameOverCard');
     elFinalScore = document.getElementById('finalScore');
     elWarningOverlay = document.getElementById('warningOverlay');
     elRetryBtn = document.getElementById('retryBtn');
@@ -389,7 +495,8 @@ export function updateSoundUI(isOn) {
 }
 
 /**
- * visualViewport から取得した実表示サイズをゲームコンテナへ同期する
+ * visualViewport から取得した実表示サイズをゲームコンテナへ同期し、
+ * 表示中オーバーレイの縦位置を次フレーム（Canvasサイズ確定後）で再同期する
  * @param {number} width - ビューポート実幅（px）
  * @param {number} height - ビューポート実高（px）
  * @param {number} offsetTop - ビューポート上オフセット（px）
@@ -405,6 +512,8 @@ export function applyViewportSize(width, height, offsetTop = 0, offsetLeft = 0) 
     elGameContainer.style.height = `${Math.round(height)}px`;
     elGameContainer.style.top = `${Math.round(offsetTop)}px`;
     elGameContainer.style.left = `${Math.round(offsetLeft)}px`;
+
+    scheduleOverlayVerticalLayout();
 }
 
 /**
@@ -443,7 +552,7 @@ export function updateNextPreviewUI() {
 }
 
 /**
- * 開始説明カードオーバーレイの表示（初回起動時）
+ * 開始説明カードオーバーレイの表示（初回起動時・実測高さベースの視覚的中央配置）
  */
 export function showStartUI() {
     if (!elStartOverlay) {
@@ -451,6 +560,8 @@ export function showStartUI() {
     }
     if (elStartOverlay) {
         elStartOverlay.style.display = 'flex';
+        syncOverlayVerticalLayout();
+        scheduleOverlayVerticalLayout();
     }
 }
 
@@ -467,7 +578,7 @@ export function hideStartUI() {
 }
 
 /**
- * ゲームオーバー画面の表示（上部ヘッダースコアは非表示にして中央カードスコアを主役化）
+ * ゲームオーバー画面の表示（上部ヘッダースコアは非表示にし、実測高さベースの視覚的中央配置で中央カードスコアを主役化）
  * @param {number} finalScore - 最終スコア
  */
 export function showGameOverUI(finalScore) {
@@ -477,8 +588,13 @@ export function showGameOverUI(finalScore) {
     if (elTopScoreWrapper) {
         elTopScoreWrapper.style.opacity = '0';
     }
+    if (!elGameOverUI) {
+        elGameOverUI = document.getElementById('gameOverUI');
+    }
     if (elGameOverUI) {
         elGameOverUI.style.display = 'flex';
+        syncOverlayVerticalLayout();
+        scheduleOverlayVerticalLayout();
     }
 }
 
@@ -488,6 +604,9 @@ export function showGameOverUI(finalScore) {
 export function hideGameOverUI() {
     if (elTopScoreWrapper) {
         elTopScoreWrapper.style.opacity = '1';
+    }
+    if (!elGameOverUI) {
+        elGameOverUI = document.getElementById('gameOverUI');
     }
     if (elGameOverUI) {
         elGameOverUI.style.display = 'none';
