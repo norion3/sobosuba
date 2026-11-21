@@ -1,16 +1,16 @@
 /**
  * softbody.js
- * @version v8.2 (Core Softbody Separation & bar_motion.js Delegation - Phase 2)
+ * @version v8.3 (Settled Weight-Offload Buoyancy & v8.3 Fallback Sync - Phase 2)
  * @changes
- *   - 上段横長カプセル幾何・衝突マスク定義・発射 API・2.5D ホップ制御・セーフリキャッチ・上段フロートバー制御を /sobosuba/bar_motion.js?v=7 へ委譲し、本ファイルをソフトボディ生成および下段軟体物理コア（createSoftBodyJelly / getSoftBodyCentroid / updateSoftBodies）へ純化（物理計算式・v8.1フォールバック値は100%不変）
- *   - 既存モジュール（floatbar.js / aim.js / jelly.js）を無変更で動作させるため、getCapsuleHalfExtentsForValue / getSoftBodyHalfExtents / launchFloatingJelly / launchBarHop の4関数を再エクスポートして100%の後方互換を維持
+ *   - applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale) へ gravityY / gravityScale を渡し、既存の粒子力ループ内で着地定着後のウェイト・オフロード（!isBarState かつ buoyancyRatio = (1 - SETTLED_GRAVITY_SCALE) * firmness * (1 - effectiveBarBlend) > 0.0001 のとき forceY -= gravityY * gravityScale * buoyancyRatio * pCurr.mass）を適用（追加ループゼロ・GCゼロ・上段待機およびホップ中は 0% 完全保護）
+ *   - v8.3 確定定数に合わせて DENSITY_SCALE_EXP（1.45）・SMALL_BEND_BOOST（0.095）・SMALL_RESTORE_MULT（2.0）・SETTLED_GRAVITY_SCALE（0.38）のフォールバック値を同期
  * 
  * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
  * 中心に剛体コアを持たず、外周の隙間ゼロ細密ビーズリングと柔らかな表面張力・曲げ拘束・
- * 強化非線形バルク内圧・体積粘性・分散非侵入排斥により、上段では横長カプセルとして並び、
+ * 強化非線形バルク内圧・体積粘性・着地後ウェイト・オフロード・分散非侵入排斥により、上段では横長カプセルとして並び、
  * 落下〜着地インパクト直後は超液体のようにたわみ、下段定着後は軽気体バルーンのように
- * 縦に立ち上がって体積を保ちつつ周囲へ心地よく波紋を伝える本家sobosuba風の挙動を実現します。
+ * 下部へ過度な重みを伝えず縦に立ち上がって体積を保ちつつ周囲へ心地よく波紋を伝える本家sobosuba風の挙動を実現します。
  * 上段フロートバー制御・発射API・2.5Dホップ制御は bar_motion.js へ分離委譲しています。
  * ESM経由でMatter.jsを直接読み込み、起動エラーを防ぎます。
  */
@@ -94,7 +94,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
 
     // 質量スケーリング（大塊の下敷きによる小塊の圧壊・微振動を防止）
     const baseRadius = (JELLY_CONFIG[1] && JELLY_CONFIG[1].radius) ? JELLY_CONFIG[1].radius : 21.5;
-    const densityExp = (PHYSICS.DENSITY_SCALE_EXP !== undefined) ? PHYSICS.DENSITY_SCALE_EXP : 0.65;
+    const densityExp = (PHYSICS.DENSITY_SCALE_EXP !== undefined) ? PHYSICS.DENSITY_SCALE_EXP : 1.45;
     const scaledDensity = (PHYSICS.DENSITY_PARTICLE || 0.0012) * Math.pow(baseRadius / Math.max(baseRadius, radius), densityExp);
 
     // 小〜中塊（1〜64）下段定着限定の連続耐圧補強因子を算出（128以上は 0.0、ゼロ除算防止ガード付き）
@@ -145,7 +145,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     const settledSkinBase = (PHYSICS.SETTLED_SKIN_STIFFNESS !== undefined) ? PHYSICS.SETTLED_SKIN_STIFFNESS : 0.335;
     const settledBendBase = (PHYSICS.SETTLED_BEND_STIFFNESS !== undefined) ? PHYSICS.SETTLED_BEND_STIFFNESS : 0.135;
     const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.065;
-    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.135;
+    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.095;
     const initialSkinStiffness = isFloating
         ? PHYSICS.SKIN_STIFFNESS
         : (settledSkinBase + smallSkinBoost * smallBoostFactor);
@@ -463,7 +463,7 @@ function updateGrowAndMorphConstraints(comp, now) {
     const settledSkinBase = (PHYSICS.SETTLED_SKIN_STIFFNESS !== undefined) ? PHYSICS.SETTLED_SKIN_STIFFNESS : 0.335;
     const settledBendBase = (PHYSICS.SETTLED_BEND_STIFFNESS !== undefined) ? PHYSICS.SETTLED_BEND_STIFFNESS : 0.135;
     const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.065;
-    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.135;
+    const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.095;
 
     const settledSkin = settledSkinBase + smallSkinBoost * smallBoostFactor;
     const settledBend = settledBendBase + smallBendBoost * smallBoostFactor;
@@ -587,10 +587,10 @@ function computeBodyGeometry(comp) {
 }
 
 /**
- * サブ関数3：穏健なアンチ裏返り自動修復 OR 軽気体バルーン物理（強化非線形バルク内圧＋体積粘性＋異方性最小距離復元）
+ * サブ関数3：穏健なアンチ裏返り自動修復 OR 軽気体バルーン物理（強化非線形バルク内圧＋体積粘性＋異方性最小距離復元＋着地後ウェイト・オフロード）
  * ※PBD位置ワープおよび真円形状保持（SHAPE_MATCH）は完全撤廃
  */
-function applyVolumeAndShapeForces(comp, geom) {
+function applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale) {
     const particles = comp.particles;
     const n = particles.length;
     const pRadius = comp.particleRadius || 4;
@@ -674,7 +674,7 @@ function applyVolumeAndShapeForces(comp, geom) {
         }
     }
 
-    // (C) 強化非線形バルク内圧・体積粘性・異方性最小距離復元（空中超液体 ⇔ 下段定着耐圧 ⇔ 上段保護の2段連続補間）
+    // (C) 強化非線形バルク内圧・体積粘性・異方性最小距離復元・着地後ウェイト・オフロード（空中超液体 ⇔ 下段定着耐圧 ⇔ 上段保護の2段連続補間）
     const isBarState = Boolean(comp.isFloating || comp.isBarHopping);
     const capRingMinRadius = Math.min(ringRadius, (comp.capsuleRingHalfHeight || ringRadius) * curScale);
     const shapeBlend = (comp.shapeBlend !== undefined)
@@ -695,12 +695,21 @@ function applyVolumeAndShapeForces(comp, geom) {
     const settledRestoreBase = (PHYSICS.SETTLED_RESTORE_FORCE !== undefined) ? PHYSICS.SETTLED_RESTORE_FORCE : 0.00072;
 
     const smallPressureMult = (PHYSICS.SMALL_PRESSURE_MULT !== undefined) ? PHYSICS.SMALL_PRESSURE_MULT : 1.02;
-    const smallRestoreMult = (PHYSICS.SMALL_RESTORE_MULT !== undefined) ? PHYSICS.SMALL_RESTORE_MULT : 2.5;
+    const smallRestoreMult = (PHYSICS.SMALL_RESTORE_MULT !== undefined) ? PHYSICS.SMALL_RESTORE_MULT : 2.0;
     const smallMinDistBoost = (PHYSICS.SMALL_MIN_DIST_RATIO_BOOST !== undefined) ? PHYSICS.SMALL_MIN_DIST_RATIO_BOOST : 0.050;
 
     const horizMinScale = (PHYSICS.HORIZ_MIN_DIST_SCALE !== undefined) ? PHYSICS.HORIZ_MIN_DIST_SCALE : 0.78;
     const horizRestoreScale = (PHYSICS.HORIZ_RESTORE_SCALE !== undefined) ? PHYSICS.HORIZ_RESTORE_SCALE : 0.40;
     const anisoBlend = 1 - effectiveBarBlend;
+
+    // 着地定着後の荷重伝達カット（上段待機・ホップ中は isBarState により 0% 完全保護）
+    const settledGravScale = (PHYSICS.SETTLED_GRAVITY_SCALE !== undefined) ? PHYSICS.SETTLED_GRAVITY_SCALE : 0.38;
+    const buoyancyRatio = (!isBarState && gravityY && gravityScale)
+        ? Math.max(0, (1 - settledGravScale) * firmness * (1 - effectiveBarBlend))
+        : 0;
+    const offloadAccelY = (buoyancyRatio > 0.0001)
+        ? (gravityY * gravityScale * buoyancyRatio)
+        : 0;
 
     const settledPressureMult = 1 + (smallPressureMult - 1) * smallBoostFactor;
     const settledRestoreMult = 1 + (smallRestoreMult - 1) * smallBoostFactor;
@@ -789,6 +798,11 @@ function applyVolumeAndShapeForces(comp, geom) {
             const restoreMag = overlap * effectiveMinDistRestoreForce * dirRestoreScale * pCurr.mass;
             forceX += radialX * restoreMag;
             forceY += radialY * restoreMag;
+        }
+
+        // 4. 着地後ウェイト・オフロード（定着した塊の自重の一部を相殺し、下部・小塊への荷重伝達を大幅カット）
+        if (offloadAccelY > 0) {
+            forceY -= offloadAccelY * pCurr.mass;
         }
 
         Body.applyForce(pCurr, pCurr.position, { x: forceX, y: forceY });
@@ -947,8 +961,8 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
         // 2.5 斜め下ショットすり抜け保護（AABB完全離脱検知による即解除・bar_motion.js 委譲）
         updateBarGraceState(comp, composites, now);
 
-        // 3. 穏健なアンチ裏返り修復 / 強化非線形バルク内圧・体積粘性・異方性最小距離復元の適用
-        applyVolumeAndShapeForces(comp, geom);
+        // 3. 穏健なアンチ裏返り修復 / 強化非線形バルク内圧・体積粘性・異方性最小距離復元・着地後ウェイト・オフロードの適用
+        applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale);
 
         // 4. 天井非激突 2.5D上段飛び越えホップ（半カプセル水平安定 ＆ 進行方向優先セーフ・リキャッチ・bar_motion.js 委譲）
         updateBarHopState(comp, geom, composites, now, gravityY, gravityScale);

@@ -1,10 +1,10 @@
 /**
  * constants.js
- * @version v8.1 (Light-Gas Balloon Physics, Vertical Rise Anisotropy & Wave Propagation Constants - Phase 1)
+ * @version v8.3 (Weight Offload Gravity Scale, Bead Mass Equalization & Bumper Sync - Phase 1)
  * @changes
- *   - 軽気体バルーン化・隙間進入性・ホップ軌道完全同期・合体インパルス＆バンパー同期のため、PHYSICS（GRAVITY_Y: 0.62 / FRICTION: 0.004 / FRICTION_STATIC: 0.004 / RESTITUTION: 0.12 / MERGE_RADIAL_IMPULSE: 1.18 / BUMPER_STIFFNESS: 0.0050）および FLOAT_BAR.HOP_GRAVITY_SCALE（2.05）を更新
- *   - 本家準拠の縦立ち上がり・ガス圧主役の体積維持のため、PHYSICS（PRESSURE_NONLINEAR_THRESHOLD: 0.055 / PRESSURE_NONLINEAR_GAIN: 14.5 / PRESSURE_RATIO_MAX: 7.5 / SETTLED_SKIN_STIFFNESS: 0.335 / SETTLED_BEND_STIFFNESS: 0.135 / SETTLED_PRESSURE: 0.00455 / SETTLED_BULK_DAMPING: 0.00056 / SETTLED_RESTORE_FORCE: 0.00072 / SMALL_SKIN_BOOST: 0.065 / SMALL_BEND_BOOST: 0.135 / SMALL_RESTORE_MULT: 2.5）を更新し、下段異方性定数（HORIZ_MIN_DIST_SCALE: 0.78 / HORIZ_RESTORE_SCALE: 0.40）を新設（TARGET_AREA_RATIO: 1.02 / SETTLED_MIN_DIST_RATIO: 0.800 / SMALL_PRESSURE_MULT: 1.02 / SMALL_MIN_DIST_RATIO_BOOST: 0.050 は現行維持）
- *   - 空中超液体〜隙間進入タイミング（AIR_SKIN_STIFFNESS: 0.25 / AIR_BEND_STIFFNESS: 0.105 / AIR_PRESSURE: 0.0037 / AIR_BULK_DAMPING: 0.00040 / AIR_MIN_DIST_RATIO: 0.64 / AIR_RESTORE_FORCE: 0.00028 / LAND_SOFT_HOLD_MS: 180 / LAND_FIRM_RAMP_MS: 420 / LAND_FAILSAFE_MS: 2200）および周囲連動揺れ解放＆静寂化バランス（SETTLE_SPEED_THRESHOLD: 0.28 / SETTLE_DELAY_MS: 650 / SETTLE_RAMP_MS: 650 / SETTLE_MAX_DAMPING: 0.86 / 新設 SETTLE_REL_WAVE_THRESHOLD: 0.48）を更新
+ *   - 下部への荷重伝達を大幅にカットしつつ落下テンポとホップ軌道を維持するため、PHYSICS.GRAVITY_Y（0.62 → 0.66）、FLOAT_BAR.HOP_GRAVITY_SCALE（2.05 → 1.92）を更新し、着地定着後の荷重伝達カット係数 PHYSICS.SETTLED_GRAVITY_SCALE（0.38）を新設
+ *   - 大塊が小塊を一方的に押し潰す逆質量偏りを解消するため、PHYSICS.DENSITY_SCALE_EXP（0.85 → 1.45）を更新し、荷重軽減に合わせて小塊の硬さ（SMALL_BEND_BOOST: 0.135 → 0.095 / SMALL_RESTORE_MULT: 2.5 → 2.0）を微緩和
+ *   - 定着重力軽減と質量均等化に合わせて、バンパー復元抵抗（BUMPER_DENSITY: 0.0035 → 0.0026 / BUMPER_STIFFNESS: 0.0050 → 0.0040）および合体膨張インパルス（MERGE_RADIAL_IMPULSE: 1.18 → 0.86）を厳密同期
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -90,7 +90,8 @@ export const JELLY_CONFIG = {
 // 3. 物理演算（Matter.js SUBSTEPS=4 正規化 ＋ 軽気体バルーン・ソフトボディ）パラメータ
 // ==========================================
 export const PHYSICS = {
-    GRAVITY_Y: 0.62,              // 軽気体バルーンの縦立ち上がりと軽快な落下テンポを両立する重力
+    GRAVITY_Y: 0.66,              // 空中落下テンポと着地後ウェイト・オフロードを両立する基準重力
+    SETTLED_GRAVITY_SCALE: 0.38,  // 着地定着後の荷重伝達カット係数（下段への圧潰荷重を大幅に軽減）
     SUBSTEPS: 4,                  // 1フレームあたりの物理サブステップ分割数
     RESTITUTION: 0.12,            // 跳ね返りすぎを抑え、隙間へ押し込む力へ変換する低反発係数
     FRICTION: 0.004,              // 塊と塊の隙間へスルスル潜り込む極低摩擦
@@ -99,7 +100,7 @@ export const PHYSICS = {
 
     // 隙間ゼロ高密度・細密中空ビーズリング（柔軟性＋質量スケーリング）
     DENSITY_PARTICLE: 0.0012,     // 基準半径（24.0px）における外周ビーズ剛体の密度
-    DENSITY_SCALE_EXP: 0.85,      // 圧潰荷重比を抑え多層積層時の小〜中塊圧壊を防ぐ密度スケーリング指数
+    DENSITY_SCALE_EXP: 1.45,      // サイズ間の1ビーズ質量を均等化し、大塊による小塊圧潰を防ぐ密度スケーリング指数
     BEAD_RADIUS_RATIO: 0.18,      // 全体半径に対する細密外周ビーズ半径の基準比率
     BEAD_MIN_OVERLAP_RATIO: 1.35, // 隣接ビーズ直径 >= 1.35 * 辺長 を保証する隙間ゼロ比率
     SKIN_STIFFNESS: 0.325,        // 上段待機・ホップ基準：流動感とくびれ・奇形防止を両立する皮の張り剛性
@@ -144,9 +145,9 @@ export const PHYSICS = {
     // 小〜中塊（1〜64）下段定着限定・連続耐圧補強定数（128以上および上段フロートバーは加算0）
     SMALL_BOOST_REF_RADIUS: 58.5,    // ブースト減衰の基準半径（128以上で係数0.0）
     SMALL_SKIN_BOOST: 0.065,         // 最小塊（1）下段定着時の皮剛性加算量
-    SMALL_BEND_BOOST: 0.135,         // 最小塊（1）下段定着時の曲げ剛性加算量
+    SMALL_BEND_BOOST: 0.095,         // 最小塊（1）下段定着時の曲げ剛性加算量（荷重軽減に合わせ柔らかさとぷっくり感を両立）
     SMALL_PRESSURE_MULT: 1.02,       // 最小塊（1）下段定着時の内圧・体積粘性倍率
-    SMALL_RESTORE_MULT: 2.5,         // 最小塊（1）下段定着時の最小距離復元力倍率
+    SMALL_RESTORE_MULT: 2.0,         // 最小塊（1）下段定着時の最小距離復元力倍率（荷重軽減に合わせ微緩和）
     SMALL_MIN_DIST_RATIO_BOOST: 0.050,// 最小塊（1）下段定着時の最小距離比率加算量
 
     // 周囲連動揺れ解放 ＆ 遅延適応的圧迫ダンピング（一定期間動き続けた後にピタッと静寂化）
@@ -169,10 +170,10 @@ export const PHYSICS = {
     SOFTBODY_STIFFNESS: 0.04,
     SOFTBODY_PERIMETER_STIFFNESS: 0.15,
 
-    // バンパー関連（軽気体重力・極低摩擦・縦立ち上がり側圧に合わせた厳密同期）
-    BUMPER_STIFFNESS: 0.0050,     // 積み上げ側圧で自然に押し込める同期済みバネ剛性
+    // バンパー関連（定着荷重軽減・質量均等化後の実効横力比0.59xに合わせた厳密同期）
+    BUMPER_STIFFNESS: 0.0040,     // 積み上げ側圧で自然に押し込める同期済みバネ剛性
     BUMPER_DAMPING: 0.08,         // バンパーのバネ減衰
-    BUMPER_DENSITY: 0.0035,       // バンパー質量を約6.83へ適正化しゼリーとの釣り合いを確保
+    BUMPER_DENSITY: 0.0026,       // バンパー質量を約5.07へ適正化し横ショット直撃誤爆防止と釣り合いを両立
 
     // 順方向ダイレクトエイム関連（SUBSTEPS=4 正規化済み・360度エイム解放）
     SLINGSHOT_FORCE_MULTIPLIER: 0.00015, // 互換用
@@ -182,7 +183,7 @@ export const PHYSICS = {
     AIM_CANCEL_RADIUS: 22,               // 指揺れ誤爆を防ぐキャンセル判定半径（px）
 
     // 合体時膨張インパルス ＆ 重心法線接近速度ベースの衝突音閾値
-    MERGE_RADIAL_IMPULSE: 1.18,          // 軽重力下でも現行と同一の波紋高さへ正規化したフィールド内合体インパルス（px/frame）
+    MERGE_RADIAL_IMPULSE: 0.86,          // 定着重力（0.251）下でも浮き上がりを防ぎ心地よい波紋を伝える合体インパルス（px/frame）
     MERGE_RADIAL_FORCE: 0.012,           // 互換用
     COLLIDE_SOUND_MIN_SPEED: 0.65,       // 衝突音を鳴らす最小重心法線接近速度（px/frame）
     COLLIDE_SOUND_MAX_SPEED: 3.0,        // 衝突音最大強度となる相対速度（px/frame）
@@ -231,7 +232,7 @@ export const FLOAT_BAR = {
     HOP_X_MULTIPLIER: 0.075,      // 1個飛び〜端から端まで思い通りに届く横方向初速係数
     HOP_INHERIT_VX: 0.2,          // 予測ドットとのズレを防ぐ控えめなバー横速度継承率
     HOP_MAX_SPEED: 11.5,          // 斜め強ホップの合成速度を切り捨てない最大合成初速（px/frame）
-    HOP_GRAVITY_SCALE: 2.05,      // 軽重力（0.62）下で現行と同一のホップ軌道・天井非激突を維持する同期重力倍率
+    HOP_GRAVITY_SCALE: 1.92,      // 基準重力（0.66）下で現行と同一のホップ軌道・天井非激突を維持する同期重力倍率
     HOP_MIN_AIR_MS: 160,          // 上昇中に誤リキャッチされないための最小滞空時間（ms）
     HOP_RECATCH_Y_MIN: 92,        // 下降中にバーへ自動再吸着するY範囲下限
     HOP_RECATCH_Y_MAX: 138,       // 下降中にバーへ自動再吸着するY範囲上限
