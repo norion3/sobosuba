@@ -1,9 +1,12 @@
 /**
  * bar_motion.js
- * @version v8.2 (Upper Float-Bar Capsule, Launch API & 2.5D Hop Motion Extraction - Phase 1)
+ * @version v8.5 (Hop Recatch Sync, Multi-Pass Safe Recatch, Large-Tier Ceiling Guard, Zero-Alloc Buffers & Fallback Sync - Phase 7)
  * @changes
- *   - softbody.js (v8.1) の肥大化解消のため、上段横長カプセル幾何（getCapsuleHalfExtentsForValue / computeCapsuleRingPoints / getSoftBodyHalfExtents）、発射 API（launchFloatingJelly / launchBarHop）、衝突マスク判定（getCollisionMaskForCategory）、および上段制御・2.5Dホップ・セーフリキャッチ（updateBarGraceState / updateBarHopState / applyFloatBarControl）を純粋に切り出し（物理式・v8.1フォールバック値は100%不変）
- *   - 循環参照ゼロ（constants.js / physics.js のみ依存）かつ独立作業バッファ tempClampPoint を確保し、内部専用の衝突マスク定数および補助関数（setSoftBodyCollisionCategory / startShapeMorph / shiftSoftBody / applySafeRecatchSeparation / ensureSafeHopLandingAltitude）をモジュール内へカプセル化
+ *   - updateBarHopState() のリキャッチ開始高度フォールバックを FLOAT_BAR.HOP_RECATCH_Y_MIN（102）へ同期し、予測ドット終端との着地位置ズレを解消
+ *   - applySafeRecatchSeparation() を事前確保バッファ使用・最大 3 パス（収束時即終了）の連鎖押し分けへ拡張し、バー上 3〜4 個密集時の異数字めり込みを根絶（同数字は即合体維持）
+ *   - 値 64 以上の半カプセル半高が大きいゼリーの天井激突を防止するため、getSafeHopMaxUpSpeed() を追加し launchBarHop() で上向き初速を天井非激突上限へ自動制限
+ *   - 毎サブステップ／発射・着地処理内の { x, y } リテラルを事前確保バッファ（tempVec / tempForce / tempClampPoint）へ置換し、GC負荷を削減
+ *   - フォールバック値を最新定数へ同期（MAX_PARTICLE_VY: 11.0 → 12.0 / HOP_GRAVITY_SCALE: 2.05 → 1.92 / CHANNEL_HALF_HEIGHT: 22 → 25 / 基準半径: 21.5 → 24.0）
  * 
  * 上段フロートバー上の横長カプセル幾何、通常発射／2.5D上段飛び越えホップ発射API、
  * 斜め下ショットすり抜け保護、セーフ・リキャッチ、および上段無重力レール制御を担うモジュール
@@ -44,6 +47,9 @@ const MASK_BAR_HOPPING = COLLISION_CATEGORY.WALL;
 // ゼロアロケーション（毎サブステップGC負荷削減）用独立作業バッファ
 // ==========================================
 const tempClampPoint = { x: 0, y: 0 };
+const tempVec = { x: 0, y: 0 };
+const tempForce = { x: 0, y: 0 };
+const recatchFloatingBuffer = [];
 
 /**
  * 状態カテゴリに応じた標準衝突マスクを返す
@@ -83,8 +89,8 @@ function setSoftBodyCollisionCategory(comp, category, customMask = null) {
  */
 export function getCapsuleHalfExtentsForValue(value) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384];
-    const radius = config ? config.radius : 21.5;
-    const channelHalfH = FLOAT_BAR.CHANNEL_HALF_HEIGHT || 22;
+    const radius = config ? config.radius : 24.0;
+    const channelHalfH = FLOAT_BAR.CHANNEL_HALF_HEIGHT || 25;
     const maxHalfW = FLOAT_BAR.CAPSULE_MAX_HALF_WIDTH || 110;
 
     // 面積保存（pi * R^2 = pi * H^2 + 4 * H * L）で高さ2Hに収めた横長カプセルの直線半長Lを算出
@@ -214,7 +220,7 @@ function shiftSoftBody(comp, shiftX, shiftY = 0) {
             pRadius,
             tempClampPoint
         );
-        Body.setPosition(p, { x: clamped.x, y: clamped.y });
+        Body.setPosition(p, clamped);
         sumX += clamped.x;
         sumY += clamped.y;
         if (clamped.x < minX) minX = clamped.x;
@@ -244,10 +250,10 @@ function shiftSoftBody(comp, shiftX, shiftY = 0) {
  */
 export function getSoftBodyHalfExtents(jellyComposite) {
     if (!jellyComposite) {
-        return { halfWidth: 21.5, halfHeight: 21.5 };
+        return { halfWidth: 24.0, halfHeight: 24.0 };
     }
 
-    const r = jellyComposite.targetRadius || 21.5;
+    const r = jellyComposite.targetRadius || 24.0;
     const capW = jellyComposite.capsuleHalfWidth || r;
     const capH = jellyComposite.capsuleHalfHeight || r;
     const blend = (jellyComposite.shapeBlend !== undefined)
@@ -272,6 +278,41 @@ export function getSoftBodyHalfExtents(jellyComposite) {
     }
 
     return { halfWidth, halfHeight };
+}
+
+/**
+ * 半カプセル半高が大きいゼリー（値 64 以上）のホップ飛行時に、天井へ激突しない上向き初速上限（px/frame 正値）を算出する
+ * （値 32 以下は現行上限 FLOAT_BAR.HOP_MAX_UP_SPEED をそのまま維持し、aim.js の予測軌道と 100% 同期する）
+ * @param {Matter.Composite|null} jellyComposite - ホップ対象のゼリーコンポジット
+ * @returns {number} 天井非激突の上向き初速上限（px/frame）
+ */
+export function getSafeHopMaxUpSpeed(jellyComposite) {
+    const defaultMaxUp = (FLOAT_BAR.HOP_MAX_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MAX_UP_SPEED : 6.55;
+    if (!jellyComposite) return defaultMaxUp;
+
+    const val = jellyComposite.jellyValue || 1;
+    if (val < 64) return defaultMaxUp;
+
+    const r = jellyComposite.targetRadius || 24.0;
+    const capH = jellyComposite.capsuleHalfHeight || r;
+    const halfH = (r + capH) * 0.5;
+    const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
+    const startY = FLOAT_BAR.Y;
+    const ceilingMargin = 3;
+    const maxRise = Math.max(8, startY - (topBarH + halfH + ceilingMargin));
+
+    // Matter.js SUBSTEPS=4 固定刻み積分と一致する1フレームあたりのホップ重力加速度から安全初速上限を算出
+    const substeps = Math.max(1, PHYSICS.SUBSTEPS || 4);
+    const baseDelta = 1000 / 60;
+    const subDelta = baseDelta / substeps;
+    const timeScale = subDelta / baseDelta;
+    const gravityY = (PHYSICS.GRAVITY_Y !== undefined) ? PHYSICS.GRAVITY_Y : 0.66;
+    const hopGravScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.92;
+    const subAccVy = (gravityY * 0.001 * hopGravScale * subDelta * subDelta) / timeScale;
+    const frameAccY = Math.max(0.001, subAccVy * substeps);
+
+    const safeMaxUp = Math.sqrt(2 * frameAccY * maxRise);
+    return Math.min(defaultMaxUp, safeMaxUp);
 }
 
 /**
@@ -317,7 +358,7 @@ export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }
     const addX = addVelocity ? (addVelocity.x || 0) : 0;
     const addY = addVelocity ? (addVelocity.y || 0) : 0;
     const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
-    const maxVy = PHYSICS.MAX_PARTICLE_VY || 11.0;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 12.0;
 
     let sumVx = 0;
     let sumVy = 0;
@@ -328,7 +369,9 @@ export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }
         const vx = Math.max(-maxVx, Math.min(maxVx, p.velocity.x + addX));
         const vy = Math.max(-maxVy, Math.min(maxVy, p.velocity.y + addY));
 
-        Body.setVelocity(p, { x: vx, y: vy });
+        tempVec.x = vx;
+        tempVec.y = vy;
+        Body.setVelocity(p, tempVec);
         sumVx += vx;
         sumVy += vy;
     }
@@ -374,7 +417,10 @@ export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -5.80 }) {
     if (!particles || particles.length === 0) return;
 
     const hopX = hopVelocity ? (hopVelocity.x || 0) : 0;
-    const hopY = hopVelocity ? (hopVelocity.y || 0) : -5.80;
+    const rawHopY = hopVelocity ? (hopVelocity.y || 0) : -5.80;
+    // 値 64 以上の半カプセル半高が大きいゼリーの上向き初速を天井非激突上限へ自動制限
+    const safeMaxUpSpeed = getSafeHopMaxUpSpeed(jellyComposite);
+    const hopY = (rawHopY < -safeMaxUpSpeed) ? -safeMaxUpSpeed : rawHopY;
     const inheritVx = (FLOAT_BAR.HOP_INHERIT_VX !== undefined) ? FLOAT_BAR.HOP_INHERIT_VX : 0.2;
     const maxHopSpeed = FLOAT_BAR.HOP_MAX_SPEED || 11.5;
     const maxHopSpeedSq = maxHopSpeed * maxHopSpeed;
@@ -394,7 +440,9 @@ export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -5.80 }) {
             vx *= scale;
             vy *= scale;
         }
-        Body.setVelocity(p, { x: vx, y: vy });
+        tempVec.x = vx;
+        tempVec.y = vy;
+        Body.setVelocity(p, tempVec);
         sumVx += vx;
         sumVy += vy;
     }
@@ -455,98 +503,174 @@ export function updateBarGraceState(comp, composites, now) {
 }
 
 /**
- * ホップ着地時の「進行方向前方優先 ＆ 壁際閉塞回避付き 異数字限定セーフ・リキャッチ」
- * 進行方向の前方（飛び越えた先）へ優先着地し、重なる異数字カプセルを後ろ側へスッと押し分ける（同数字は即合体）
+ * ホップ着地時の「進行方向前方優先 ＆ 壁際閉塞回避付き 異数字限定セーフ・リキャッチ（最大3パス連鎖押し分け）」
+ * 進行方向の前方（飛び越えた先）へ優先着地し、重なる異数字カプセルおよび玉突きされた隣カプセルを
+ * 最大 3 パス（収束時即終了）で安全に押し分ける（同数字は押し分けず即合体）
  */
 function applySafeRecatchSeparation(comp, composites, hopDirX = 0) {
     if (!comp || !comp.centroid) return;
 
     const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
     const padX = Math.max(frameW + 4, FLOAT_BAR.PADDING_X || 26);
-    const compHalfW = comp.capsuleHalfWidth || comp.targetRadius || 21.5;
+    const compHalfW = comp.capsuleHalfWidth || comp.targetRadius || 24.0;
     const minCenterX = padX + compHalfW;
     const maxCenterX = GAME_WIDTH - padX - compHalfW;
-    const forwardDir = (hopDirX > 0.05) ? 1 : ((hopDirX < -0.05) ? -1 : 0);
+    const initialForwardDir = (hopDirX > 0.05) ? 1 : ((hopDirX < -0.05) ? -1 : 0);
 
+    recatchFloatingBuffer.length = 0;
     for (let i = 0; i < composites.length; i++) {
-        const other = composites[i];
-        if (!other || other === comp || other.label !== 'jelly_composite' || !other.isFloating || other.isMerging) {
-            continue;
-        }
-        // 同数字は押し分けず、そのまま接触させて上段即合体を成立させる
-        if (other.jellyValue === comp.jellyValue) {
-            continue;
-        }
-        if (!other.centroid) continue;
-
-        const otherHalfW = other.capsuleHalfWidth || other.targetRadius || 21.5;
-        const requiredDist = compHalfW + otherHalfW + 2;
-        const dx = other.centroid.x - comp.centroid.x;
-        const absDx = Math.abs(dx);
-
-        if (absDx < requiredDist) {
-            const otherMinX = padX + otherHalfW;
-            const otherMaxX = GAME_WIDTH - padX - otherHalfW;
-
-            // 進行方向前方への乗り越え着地が可能かを優先判定（元の側へ押し戻されるバグを解消）
-            let pushDir = dx >= 0 ? 1 : -1;
-            let neededSep = requiredDist - absDx;
-
-            if (forwardDir !== 0) {
-                // 相手中心に対する前方方向への符号付き距離（正＝すでに飛び越え済み、負＝中心の手前）
-                const signedForward = (comp.centroid.x - other.centroid.x) * forwardDir;
-                if (signedForward >= -requiredDist * 0.25) {
-                    const forwardSep = requiredDist - signedForward;
-                    const backDir = -forwardDir;
-                    const otherBackRoom = backDir > 0
-                        ? Math.max(0, otherMaxX - other.centroid.x)
-                        : Math.max(0, other.centroid.x - otherMinX);
-                    const selfForwardRoom = forwardDir > 0
-                        ? Math.max(0, maxCenterX - comp.centroid.x)
-                        : Math.max(0, comp.centroid.x - minCenterX);
-
-                    if (otherBackRoom + selfForwardRoom >= forwardSep - 1) {
-                        pushDir = backDir;
-                        neededSep = forwardSep;
-                    }
-                }
-            } else if (absDx < 0.5) {
-                pushDir = (other.centroid.x >= GAME_WIDTH * 0.5) ? 1 : -1;
-            }
-
-            // 相手を pushDir 側へ動かせる余裕量を計測し、足りない分は着地ゼリー側を逆方向（-pushDir）へ安全シフト
-            const otherRoom = pushDir > 0
-                ? Math.max(0, otherMaxX - other.centroid.x)
-                : Math.max(0, other.centroid.x - otherMinX);
-
-            const idealOtherShift = neededSep * 0.65;
-            const actualOtherShift = Math.min(idealOtherShift, otherRoom);
-            const remainOverlap = neededSep - actualOtherShift;
-
-            if (actualOtherShift > 0.1) {
-                shiftSoftBody(other, pushDir * actualOtherShift, 0);
-                // 滑らかに割り込めるよう軽い横滑り速度も付与
-                const oPts = other.particles;
-                for (let k = 0; k < oPts.length; k++) {
-                    Body.setVelocity(oPts[k], {
-                        x: oPts[k].velocity.x + pushDir * 0.35,
-                        y: oPts[k].velocity.y
-                    });
-                }
-            }
-
-            if (remainOverlap > 0.1) {
-                const selfDir = -pushDir;
-                const selfRoom = selfDir > 0
-                    ? Math.max(0, maxCenterX - comp.centroid.x)
-                    : Math.max(0, comp.centroid.x - minCenterX);
-                const actualSelfShift = Math.min(remainOverlap, selfRoom);
-                if (actualSelfShift > 0.1) {
-                    shiftSoftBody(comp, selfDir * actualSelfShift, 0);
-                }
-            }
+        const c = composites[i];
+        if (c && c.label === 'jelly_composite' && c.isFloating && !c.isMerging && c.centroid) {
+            recatchFloatingBuffer.push(c);
         }
     }
+
+    const floatingCount = recatchFloatingBuffer.length;
+    if (floatingCount < 2) {
+        recatchFloatingBuffer.length = 0;
+        return;
+    }
+
+    for (let pass = 0; pass < 3; pass++) {
+        let movedInPass = false;
+        const forwardDir = (pass === 0) ? initialForwardDir : 0;
+
+        // 1. 着地したゼリー comp と異数字カプセルの押し分け（パス 0 は進行方向前方優先）
+        for (let i = 0; i < floatingCount; i++) {
+            const other = recatchFloatingBuffer[i];
+            if (other === comp) continue;
+            // 同数字は押し分けず、そのまま接触させて上段即合体を成立させる
+            if (other.jellyValue === comp.jellyValue) continue;
+
+            const otherHalfW = other.capsuleHalfWidth || other.targetRadius || 24.0;
+            const requiredDist = compHalfW + otherHalfW + 2;
+            const dx = other.centroid.x - comp.centroid.x;
+            const absDx = Math.abs(dx);
+
+            if (absDx < requiredDist) {
+                const otherMinX = padX + otherHalfW;
+                const otherMaxX = GAME_WIDTH - padX - otherHalfW;
+
+                // 進行方向前方への乗り越え着地が可能かを優先判定（元の側へ押し戻されるバグを解消）
+                let pushDir = dx >= 0 ? 1 : -1;
+                let neededSep = requiredDist - absDx;
+
+                if (forwardDir !== 0) {
+                    // 相手中心に対する前方方向への符号付き距離（正＝すでに飛び越え済み、負＝中心の手前）
+                    const signedForward = (comp.centroid.x - other.centroid.x) * forwardDir;
+                    if (signedForward >= -requiredDist * 0.25) {
+                        const forwardSep = requiredDist - signedForward;
+                        const backDir = -forwardDir;
+                        const otherBackRoom = backDir > 0
+                            ? Math.max(0, otherMaxX - other.centroid.x)
+                            : Math.max(0, other.centroid.x - otherMinX);
+                        const selfForwardRoom = forwardDir > 0
+                            ? Math.max(0, maxCenterX - comp.centroid.x)
+                            : Math.max(0, comp.centroid.x - minCenterX);
+
+                        if (otherBackRoom + selfForwardRoom >= forwardSep - 1) {
+                            pushDir = backDir;
+                            neededSep = forwardSep;
+                        }
+                    }
+                } else if (absDx < 0.5) {
+                    pushDir = (other.centroid.x >= GAME_WIDTH * 0.5) ? 1 : -1;
+                }
+
+                // 相手を pushDir 側へ動かせる余裕量を計測し、足りない分は着地ゼリー側を逆方向（-pushDir）へ安全シフト
+                const otherRoom = pushDir > 0
+                    ? Math.max(0, otherMaxX - other.centroid.x)
+                    : Math.max(0, other.centroid.x - otherMinX);
+
+                const idealOtherShift = neededSep * 0.65;
+                const actualOtherShift = Math.min(idealOtherShift, otherRoom);
+                const remainOverlap = neededSep - actualOtherShift;
+
+                if (actualOtherShift > 0.1) {
+                    shiftSoftBody(other, pushDir * actualOtherShift, 0);
+                    movedInPass = true;
+                    // 初パスのみ滑らかに割り込めるよう軽い横滑り速度を付与
+                    if (pass === 0) {
+                        const oPts = other.particles;
+                        for (let k = 0; k < oPts.length; k++) {
+                            tempVec.x = oPts[k].velocity.x + pushDir * 0.35;
+                            tempVec.y = oPts[k].velocity.y;
+                            Body.setVelocity(oPts[k], tempVec);
+                        }
+                    }
+                }
+
+                if (remainOverlap > 0.1) {
+                    const selfDir = -pushDir;
+                    const selfRoom = selfDir > 0
+                        ? Math.max(0, maxCenterX - comp.centroid.x)
+                        : Math.max(0, comp.centroid.x - minCenterX);
+                    const actualSelfShift = Math.min(remainOverlap, selfRoom);
+                    if (actualSelfShift > 0.1) {
+                        shiftSoftBody(comp, selfDir * actualSelfShift, 0);
+                        movedInPass = true;
+                    }
+                }
+            }
+        }
+
+        // 2. 玉突き押し出しで重なった他ゼリー同士の異数字連鎖押し分け（バー上 3〜4 個密集時のめり込み根絶）
+        for (let i = 0; i < floatingCount; i++) {
+            const a = recatchFloatingBuffer[i];
+            if (a === comp) continue;
+            const halfWA = a.capsuleHalfWidth || a.targetRadius || 24.0;
+            const minXA = padX + halfWA;
+            const maxXA = GAME_WIDTH - padX - halfWA;
+
+            for (let j = i + 1; j < floatingCount; j++) {
+                const b = recatchFloatingBuffer[j];
+                if (b === comp) continue;
+                // 同数字同士は押し分けず即合体を維持
+                if (a.jellyValue === b.jellyValue) continue;
+
+                const halfWB = b.capsuleHalfWidth || b.targetRadius || 24.0;
+                const requiredDist = halfWA + halfWB + 2;
+                const dx = b.centroid.x - a.centroid.x;
+                const absDx = Math.abs(dx);
+
+                if (absDx < requiredDist) {
+                    const sep = requiredDist - absDx;
+                    const dir = (absDx < 0.5)
+                        ? ((b.centroid.x >= GAME_WIDTH * 0.5) ? 1 : -1)
+                        : (dx >= 0 ? 1 : -1);
+                    const minXB = padX + halfWB;
+                    const maxXB = GAME_WIDTH - padX - halfWB;
+
+                    const roomB = dir > 0
+                        ? Math.max(0, maxXB - b.centroid.x)
+                        : Math.max(0, b.centroid.x - minXB);
+                    const roomA = dir > 0
+                        ? Math.max(0, a.centroid.x - minXA)
+                        : Math.max(0, maxXA - a.centroid.x);
+
+                    let shiftB = Math.min(sep * 0.5, roomB);
+                    let shiftA = Math.min(sep - shiftB, roomA);
+                    const remain = sep - shiftB - shiftA;
+                    if (remain > 0.1 && roomB > shiftB) {
+                        shiftB = Math.min(roomB, shiftB + remain);
+                    }
+
+                    if (shiftB > 0.1) {
+                        shiftSoftBody(b, dir * shiftB, 0);
+                        movedInPass = true;
+                    }
+                    if (shiftA > 0.1) {
+                        shiftSoftBody(a, -dir * shiftA, 0);
+                        movedInPass = true;
+                    }
+                }
+            }
+        }
+
+        if (!movedInPass) break;
+    }
+
+    recatchFloatingBuffer.length = 0;
 }
 
 /**
@@ -556,7 +680,7 @@ function ensureSafeHopLandingAltitude(comp, composites) {
     if (!comp || !comp.centroid || !comp.aabb) return;
 
     const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
-    const compHalfH = comp.capsuleHalfHeight || comp.targetRadius || 21.5;
+    const compHalfH = comp.capsuleHalfHeight || comp.targetRadius || 24.0;
     const minSafeCenterY = topBarH + compHalfH + 2;
     const rA = comp.particleRadius || 4;
     const aA = comp.aabb;
@@ -596,9 +720,9 @@ export function updateBarHopState(comp, geom, composites, now, gravityY, gravity
     const particles = comp.particles;
     const n = particles.length;
     const { cx, cy, vx: avgVx, vy: avgVy } = geom;
-    const hopGravityScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 2.05;
+    const hopGravityScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.92;
     const hopMinAirMs = FLOAT_BAR.HOP_MIN_AIR_MS || 160;
-    const hopRecatchYMin = FLOAT_BAR.HOP_RECATCH_Y_MIN || 92;
+    const hopRecatchYMin = FLOAT_BAR.HOP_RECATCH_Y_MIN || 102;
     const hopRecatchYMax = FLOAT_BAR.HOP_RECATCH_Y_MAX || 138;
     const hopMaxAirMs = FLOAT_BAR.HOP_MAX_AIR_MS || 2200;
 
@@ -639,10 +763,9 @@ export function updateBarHopState(comp, geom, composites, now, gravityY, gravity
         // 着地時の縦勢いを吸収し、横の勢いを適度に残して隣ゼリーとの合体・着地を滑らかにする
         for (let j = 0; j < n; j++) {
             const body = particles[j];
-            Body.setVelocity(body, {
-                x: body.velocity.x * 0.65,
-                y: body.velocity.y * 0.15
-            });
+            tempVec.x = body.velocity.x * 0.65;
+            tempVec.y = body.velocity.y * 0.15;
+            Body.setVelocity(body, tempVec);
         }
 
         // 進行方向前方優先・壁際閉塞回避付きの異数字限定セーフ・リキャッチ（同数字は即合体させるため押し分けない）
@@ -670,7 +793,9 @@ export function updateBarHopState(comp, geom, composites, now, gravityY, gravity
             forceY += (cy + idealLocalY - body.position.y) * 0.00024 * body.mass;
         }
 
-        Body.applyForce(body, body.position, { x: forceX, y: forceY });
+        tempForce.x = forceX;
+        tempForce.y = forceY;
+        Body.applyForce(body, body.position, tempForce);
     }
 }
 
@@ -686,14 +811,14 @@ export function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepD
     const centerX = GAME_WIDTH / 2;
     const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
     const safePadX = Math.max(frameW + 4, FLOAT_BAR.PADDING_X || 26);
-    const halfWidth = comp.capsuleHalfWidth || comp.targetRadius || 21.5;
+    const halfWidth = comp.capsuleHalfWidth || comp.targetRadius || 24.0;
     const barMinX = safePadX + halfWidth;
     const barMaxX = GAME_WIDTH - safePadX - halfWidth;
     const packForce = FLOAT_BAR.PACK_FORCE || 0.00005;
     const curScale = comp.currentGrowScale || 1.0;
 
     // 上下フラット帯（CHANNEL_HALF_HEIGHT）への圧縮フック設定
-    const capRingHalfH = (comp.capsuleRingHalfHeight || Math.max(4, (FLOAT_BAR.CHANNEL_HALF_HEIGHT || 22) - (comp.particleRadius || 4))) * curScale;
+    const capRingHalfH = (comp.capsuleRingHalfHeight || Math.max(4, (FLOAT_BAR.CHANNEL_HALF_HEIGHT || 25) - (comp.particleRadius || 4))) * curScale;
     const channelTopY = targetY - capRingHalfH;
     const channelBottomY = targetY + capRingHalfH;
     const compStiff = (FLOAT_BAR.CHANNEL_COMPRESSION_STIFFNESS !== undefined) ? FLOAT_BAR.CHANNEL_COMPRESSION_STIFFNESS : 0.055;
@@ -738,12 +863,13 @@ export function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepD
             forceY += (idealY - body.position.y) * 0.00006 * body.mass;
         }
 
-        Body.applyForce(body, body.position, { x: forceX, y: forceY });
+        tempForce.x = forceX;
+        tempForce.y = forceY;
+        Body.applyForce(body, body.position, tempForce);
 
         // 横方向は極低ダンピング（スルスル滑る）、縦方向は液体らしいタプタプ揺れを残す減衰を適用
-        Body.setVelocity(body, {
-            x: body.velocity.x * stepDampX,
-            y: body.velocity.y * stepDampY
-        });
+        tempVec.x = body.velocity.x * stepDampX;
+        tempVec.y = body.velocity.y * stepDampY;
+        Body.setVelocity(body, tempVec);
     }
 }

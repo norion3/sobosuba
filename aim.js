@@ -1,10 +1,11 @@
 /**
  * aim.js
- * @version v8.4 (Downward Elliptical Aim Clamp, Unified Power Curve & Sound Power Sync - Phase 2)
+ * @version v8.5 (Hop Slope Guard, Idle-Hold Drift Prevention, Preview Recatch & Large-Tier Ceiling Sync - Phase 8)
  * @changes
- *   - 方向別最大ドラッグ長算出ヘルパー getMaxDragForDirection(dx, dy) を追加し、clampAimVector(dx, dy) を「上半円（dy <= 0）：半径 AIM_MAX_DRAG (120px)／下半楕円（dy > 0）：横 120px × 縦 AIM_MAX_DRAG_DOWN (170px)」の C1 連続クランプへ更新
- *   - endAimDrag() の通常ショット速度算出へ全方向共通基準 baseP（分母 AIM_MAX_DRAG）による等方スカラー倍率 powerScale = 0.78 + 0.22 * baseP を導入（同一長さ＝全方向同一初速・角度ズレ 0.000度・水平最大 6.72 維持・真下最大 9.52）し、playSoundShoot(powerRatio) へ渡す powerRatio を発射初速ベース（launchSpeed / maxDownSpeed）へ統一
- *   - updateHopPreviewPoints() 内の MAX_PARTICLE_VY フォールバック値を 11.0 → 12.0 へ同期（ホップ軌道・予測ドット挙動は完全不変）
+ *   - ホップ自動切替条件へ角度勾配（FLOAT_BAR.HOP_TRIGGER_SLOPE || 0.42）を追加した共通判定ヘルパー isHopDirection() を導入し、横ショット時の意図せぬ 2.5D ホップ誤爆を防止
+ *   - ドラッグ開始直後（!hasDraggedOut かつポインタ自身の移動距離が AIM_CANCEL_RADIUS 未満の間）はゼリー横移動に dragOffsetX / dragOffsetY を追従吸収させ、移動中ゼリーを長押し様子見した際に勝手に逆方向へ矢印が伸びる問題を解消
+ *   - updateHopPreviewPoints() へ bar_motion.js の getSafeHopMaxUpSpeed() による値 64 以上の天井非激突初速制限と HOP_RECATCH_Y_MIN（102）基準のリキャッチ終端高度を適用し、実物理と予測軌道を 100% 同期
+ *   - フォールバック値を最新定数へ同期（HOP_GRAVITY_SCALE: 1.35 → 1.92 / RESTITUTION: 0.16 → 0.12 / 基準半径: 21.5 → 24.0）
  * 
  * 上段フロートバーのゼリー選択、360度順方向ダイレクトエイム、
  * 天井非激突2.5D上段飛び越えホップ自動切替および放物線軌道プレビュー計算を担う操作モジュール
@@ -17,6 +18,7 @@ import {
     launchFloatingJelly,
     launchBarHop
 } from '/sobosuba/softbody.js?v=7';
+import { getSafeHopMaxUpSpeed } from '/sobosuba/bar_motion.js?v=7';
 import { getFloatingJellies } from '/sobosuba/floatbar.js?v=7';
 import { ensureAudioRunning, playSoundSelect, playSoundShoot, playSoundHop } from '/sobosuba/sound.js?v=7';
 
@@ -26,6 +28,22 @@ import { ensureAudioRunning, playSoundSelect, playSoundShoot, playSoundHop } fro
 const HOP_PREVIEW_DOT_COUNT = 7;
 const hopTraceScratchX = [];
 const hopTraceScratchY = [];
+
+/**
+ * ドラッグベクトルが「2.5D上段飛び越えホップ」発動条件（キャンセル半径外 ＆ 上向き閾値 ＆ 角度勾配）を満たすか判定する
+ * @param {number} vecX - X方向ドラッグ量
+ * @param {number} vecY - Y方向ドラッグ量
+ * @param {number} dist - ドラッグ距離
+ * @returns {boolean} ホップ発動条件を満たす場合は true
+ */
+function isHopDirection(vecX, vecY, dist) {
+    const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
+    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
+    const hopTriggerSlope = (FLOAT_BAR.HOP_TRIGGER_SLOPE !== undefined) ? FLOAT_BAR.HOP_TRIGGER_SLOPE : 0.42;
+    return dist >= cancelRadius &&
+        vecY < hopTriggerDy &&
+        (-vecY) > Math.abs(vecX) * hopTriggerSlope;
+}
 
 /**
  * エイムおよびホップ予測に関連する gameState フィールドを安全に初期化する
@@ -43,6 +61,8 @@ export function resetAimState(gameState) {
     } else {
         gameState.hopPreviewPoints = [];
     }
+    gameState.dragPointerStartX = 0;
+    gameState.dragPointerStartY = 0;
     gameState.dragOffsetX = 0;
     gameState.dragOffsetY = 0;
     gameState.dragStartX = 0;
@@ -137,7 +157,8 @@ export function computeHopVelocity(vecX, vecY) {
 
 /**
  * 2.5D上段飛び越えホップ時の放物線予測ドット（一体外枠フレーム内壁・天井反射込み、着地先まで7点）を
- * softbody.js / physics.js の半カプセル実寸法・Matter.js 0.20 timeScale 固定刻み物理定数・X/Y独立速度クランプと 1px 精度で同期して算出する
+ * bar_motion.js / softbody.js / physics.js の半カプセル実寸法・天井非激突初速制限・リキャッチ高度・
+ * Matter.js 0.20 timeScale 固定刻み物理定数・X/Y独立速度クランプと 1px 精度で同期して算出する
  * @param {Matter.Engine|null} engine - Matter.js物理エンジン
  * @param {Object} gameState - ゲーム状態オブジェクト
  * @param {Matter.Composite} selected - 選択中のゼリーコンポジット
@@ -154,7 +175,7 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
 
     if (!selected || !centroid || !hopVel) return;
 
-    // launchBarHop() と同様に現在のバー上横移動速度の HOP_INHERIT_VX（0.2）を加味
+    // launchBarHop() と同様に現在のバー上横移動速度の HOP_INHERIT_VX（0.2）および値 64 以上の天井非激突上限を加味
     let avgVx = 0;
     const pts = selected.particles;
     if (pts && pts.length > 0) {
@@ -168,8 +189,10 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
     const maxVy = PHYSICS.MAX_PARTICLE_VY || 12.0;
     const maxHopSpeed = FLOAT_BAR.HOP_MAX_SPEED || 11.5;
+    const safeMaxUpSpeed = getSafeHopMaxUpSpeed(selected);
+    const limitedHopY = (hopVel.y < -safeMaxUpSpeed) ? -safeMaxUpSpeed : hopVel.y;
     let vx = avgVx * inheritVx + hopVel.x;
-    let vy = hopVel.y;
+    let vy = limitedHopY;
     const initSpeedSq = vx * vx + vy * vy;
     if (initSpeedSq > maxHopSpeed * maxHopSpeed) {
         const s = maxHopSpeed / Math.sqrt(initSpeedSq);
@@ -178,7 +201,7 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     }
 
     // ホップ飛行中は半カプセル（shapeBlend = 0.5）を維持するため、半カプセル実半幅・実半高と内壁座標で反射判定
-    const r = selected.targetRadius || 21.5;
+    const r = selected.targetRadius || 24.0;
     const capW = selected.capsuleHalfWidth || r;
     const capH = selected.capsuleHalfHeight || r;
     const halfW = (r + capW) * 0.5;
@@ -196,13 +219,14 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     const timeScale = subDelta / baseDelta;
     const gravityY = engine ? engine.gravity.y : PHYSICS.GRAVITY_Y;
     const gravityScale = engine ? engine.gravity.scale : 0.001;
-    const hopGravScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.35;
+    const hopGravScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.92;
     const subAccY = gravityY * gravityScale * hopGravScale * subDelta * subDelta;
     const subAccVy = subAccY / timeScale;
     const airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012);
-    const wallRestitution = (PHYSICS.RESTITUTION !== undefined) ? PHYSICS.RESTITUTION : 0.16;
+    const wallRestitution = (PHYSICS.RESTITUTION !== undefined) ? PHYSICS.RESTITUTION : 0.12;
     const minAirSteps = Math.ceil((FLOAT_BAR.HOP_MIN_AIR_MS || 160) / subDelta);
     const targetBarY = FLOAT_BAR.Y;
+    const recatchYMin = FLOAT_BAR.HOP_RECATCH_Y_MIN || 102;
     const recatchYMax = FLOAT_BAR.HOP_RECATCH_Y_MAX || 138;
 
     let px = centroid.x;
@@ -235,8 +259,8 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
         hopTraceScratchX.push(px);
         hopTraceScratchY.push(py);
 
-        // 下降フェーズでバー高度へ到達したら自動再吸着（リキャッチ）予定位置として終了
-        if (step >= minAirSteps && ((vy >= 0 && py >= targetBarY) || py > recatchYMax)) {
+        // 下降フェーズで bar_motion.js のリキャッチ開始高度（HOP_RECATCH_Y_MIN）へ到達したら着地予定位置として終了
+        if (step >= minAirSteps && ((vy >= 0 && py >= recatchYMin) || py > recatchYMax)) {
             hopTraceScratchY[hopTraceScratchY.length - 1] = targetBarY;
             break;
         }
@@ -309,7 +333,8 @@ function shouldEnableBarLaunchGrace(selected, safeAim, world) {
 
 /**
  * 選択中のSoboの現在重心と最新ポインタ座標から、エイム矢印およびホップ予測軌道を更新する
- * （本家v1.2準拠：バー上でSoboが横移動しても初期オフセットを維持して指先方向へ追従）
+ * （本家v1.2準拠：バー上でSoboが横移動しても初期オフセットを維持して指先方向へ追従。
+ *   ドラッグ開始直後の様子見中はゼリー横移動分をオフセット吸収して勝手な矢印伸長を防止）
  * @param {Matter.Engine|null} engine - Matter.js物理エンジン
  * @param {Object} gameState - ゲーム状態オブジェクト
  * @param {number} pointerX - 最新ポインタ論理X座標
@@ -330,20 +355,33 @@ export function syncAimToPointer(engine, gameState, pointerX, pointerY) {
         return;
     }
 
+    const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
+
+    // 長押し様子見対策：ドラッグ開始直後（!hasDraggedOut かつポインタ自身の移動距離が小さい間）は
+    // ゼリーの横移動に dragOffset を追従させ、指静止中に勝手に逆方向へ矢印が伸びるのを防止
+    if (!gameState.hasDraggedOut &&
+        gameState.dragPointerStartX !== undefined &&
+        gameState.dragPointerStartY !== undefined) {
+        const ptrDx = pointerX - gameState.dragPointerStartX;
+        const ptrDy = pointerY - gameState.dragPointerStartY;
+        if ((ptrDx * ptrDx + ptrDy * ptrDy) < cancelRadius * cancelRadius) {
+            gameState.dragOffsetX = gameState.dragPointerStartX - centroid.x;
+            gameState.dragOffsetY = gameState.dragPointerStartY - centroid.y;
+        }
+    }
+
     const rawDx = pointerX - (centroid.x + gameState.dragOffsetX);
     const rawDy = pointerY - (centroid.y + gameState.dragOffsetY);
     const clamped = clampAimVector(rawDx, rawDy);
     const dist = Math.sqrt(clamped.x * clamped.x + clamped.y * clamped.y);
-    const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
-    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
 
     // 一度でもキャンセル半径外へ伸ばしたかを記録（「そっと落とし」と「中心戻しキャンセル」の判別用）
     if (dist >= cancelRadius) {
         gameState.hasDraggedOut = true;
     }
 
-    // 上向きドラッグ（dy < HOP_TRIGGER_DY）で自動的に「2.5D上段飛び越えホップ」モードへ切替
-    if (dist >= cancelRadius && clamped.y < hopTriggerDy) {
+    // 上向きドラッグ（dy < HOP_TRIGGER_DY かつ角度勾配 -dy > |dx| * HOP_TRIGGER_SLOPE）で自動的に「2.5D上段飛び越えホップ」モードへ切替
+    if (isHopDirection(clamped.x, clamped.y, dist)) {
         gameState.isHopAim = true;
         const hopVel = computeHopVelocity(clamped.x, clamped.y);
         updateHopPreviewPoints(engine, gameState, selected, centroid, hopVel);
@@ -397,8 +435,8 @@ export function startAimDrag(world, gameState, startX, startY) {
         if (!centroid) continue;
 
         const ext = getSoftBodyHalfExtents(comp);
-        const halfW = ext.halfWidth || comp.targetRadius || 21.5;
-        const halfH = ext.halfHeight || comp.targetRadius || 21.5;
+        const halfW = ext.halfWidth || comp.targetRadius || 24.0;
+        const halfH = ext.halfHeight || comp.targetRadius || 24.0;
         const straightHalf = Math.max(0, halfW - halfH);
 
         // 横長カプセルの水平中心線分上における最近傍点を算出
@@ -432,7 +470,9 @@ export function startAimDrag(world, gameState, startX, startY) {
         gameState.hopPreviewPoints = [];
     }
 
-    // クリック／タッチしたSobo中心からの初期オフセットを保持（v1.2準拠の追従エイム用）
+    // クリック／タッチ開始ポインタ座標とSobo中心からの初期オフセットを保持（様子見吸収 ＆ v1.2準拠追従エイム用）
+    gameState.dragPointerStartX = startX;
+    gameState.dragPointerStartY = startY;
     gameState.dragOffsetX = startX - closestCentroid.x;
     gameState.dragOffsetY = startY - closestCentroid.y;
     gameState.dragStartX = closestCentroid.x;
@@ -485,7 +525,6 @@ export function endAimDrag(gameState, onLaunchedCallback = null, world = null) {
 
     const dist = Math.sqrt(vecX * vecX + vecY * vecY);
     const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
-    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
 
     // 【操作判別】
     // 1. 一度外へ矢印を伸ばしてから中心へ戻して離した場合 → 発射キャンセル（消費しない）
@@ -493,8 +532,8 @@ export function endAimDrag(gameState, onLaunchedCallback = null, world = null) {
         return false;
     }
 
-    // 2. 上向きドラッグ（dy < HOP_TRIGGER_DY） → 「2.5D上段飛び越えホップ（下に落ちず自動再吸着）」
-    if (dist >= cancelRadius && vecY < hopTriggerDy) {
+    // 2. 上向きドラッグ（dy < HOP_TRIGGER_DY かつ角度勾配 -dy > |dx| * HOP_TRIGGER_SLOPE） → 「2.5D上段飛び越えホップ（下に落ちず自動再吸着）」
+    if (isHopDirection(vecX, vecY, dist)) {
         const safeAim = clampAimVector(vecX, vecY);
         const hopVel = computeHopVelocity(safeAim.x, safeAim.y);
         playSoundHop();

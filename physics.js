@@ -1,8 +1,10 @@
 /**
  * physics.js
- * @version v7.9 (Multi-Layer Position Iterations Enhancement - Phase 2)
+ * @version v8.5 (Static Wall/Floor Labels, Engine Event Cleanup & Bumper Density Fallback Sync - Phase 3)
  * @changes
- *   - 多層積層時の底層沈み込み・潰れを防ぐため、initPhysics() 内の engine.positionIterations を 8 → 10 へ強化（その他は現行維持）
+ *   - 落下中ゼリーの壁バンクショット誤着地を防止する判定基盤として、initPhysics() 内の床に label: 'floor'、左右内壁に label: 'wall_left' / 'wall_right' を付与
+ *   - リトライ時の旧イベントリスナー残留を防ぐため、initPhysics() 内で Matter.Engine.clear(engine) の直前に Matter.Events.off(engine) を呼び出すよう追加
+ *   - bumperOptions の PHYSICS.BUMPER_DENSITY フォールバック値を現行定数に合わせて 0.0035 → 0.0026 へ同期
  * 
  * Matter.jsを用いた物理世界の初期化、壁の生成、固定タイムステップ・サブステップ駆動、および
  * ゲームオーバー条件となる「左右のサイド判定ボタン（バンパースイッチ）」を構築・制御するモジュール
@@ -111,8 +113,9 @@ export function clampPointToContainer(x, y, margin = 0, out = null) {
  * 物理エンジンの初期化と内壁基準の壁・45度スロープ・角丸サイド判定ボタン（バンパー）の生成
  */
 export function initPhysics() {
-    // 既存のエンジンがあればクリア
+    // 既存のエンジンがあればイベントリスナーを解除してクリア
     if (engine) {
+        Matter.Events.off(engine);
         Matter.Engine.clear(engine);
     }
 
@@ -185,10 +188,10 @@ export function initPhysics() {
         // 天井（内壁上端 y = innerTop に面を一致）
         Bodies.rectangle(GAME_WIDTH / 2, innerTop - WALL_THICKNESS / 2, GAME_WIDTH * 2, WALL_THICKNESS, ceilingOptions),
         // 床（内壁底面 y = innerBottom に面を一致）
-        Bodies.rectangle(GAME_WIDTH / 2, innerBottom + WALL_THICKNESS / 2, GAME_WIDTH * 2, WALL_THICKNESS, wallOptions),
+        Bodies.rectangle(GAME_WIDTH / 2, innerBottom + WALL_THICKNESS / 2, GAME_WIDTH * 2, WALL_THICKNESS, { ...wallOptions, label: 'floor' }),
         // 左右の内壁（左面 x = innerLeft、右面 x = innerRight に面を一致）
-        Bodies.rectangle(innerLeft - WALL_THICKNESS / 2, GAME_HEIGHT / 2, WALL_THICKNESS, GAME_HEIGHT * 2, wallOptions),
-        Bodies.rectangle(innerRight + WALL_THICKNESS / 2, GAME_HEIGHT / 2, WALL_THICKNESS, GAME_HEIGHT * 2, wallOptions),
+        Bodies.rectangle(innerLeft - WALL_THICKNESS / 2, GAME_HEIGHT / 2, WALL_THICKNESS, GAME_HEIGHT * 2, { ...wallOptions, label: 'wall_left' }),
+        Bodies.rectangle(innerRight + WALL_THICKNESS / 2, GAME_HEIGHT / 2, WALL_THICKNESS, GAME_HEIGHT * 2, { ...wallOptions, label: 'wall_right' }),
         // 底面の左右45度角カットスロープ壁（内壁基準）
         leftSlope,
         rightSlope
@@ -210,7 +213,7 @@ export function initPhysics() {
         friction: PHYSICS.FRICTION,
         frictionStatic: PHYSICS.FRICTION_STATIC,
         restitution: 0.15,
-        density: PHYSICS.BUMPER_DENSITY || 0.0035,
+        density: PHYSICS.BUMPER_DENSITY || 0.0026,
         chamfer: { radius: chamferRadius },
         label: 'bumper',
         // 下段の FIELD_JELLY のみと衝突し、壁や上段待機・ホップ中ゼリーとは干渉しないフィルタ設定

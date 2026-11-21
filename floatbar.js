@@ -1,9 +1,9 @@
 /**
  * floatbar.js
- * @version v7.0 (Late-Game Spawn Table Scaling & v7 Import Sync - Phase 6)
+ * @version v8.5 (Zero-Alloc Floating/Bar-Area Buffers & Initial Refill Auto-Merge Avoidance - Phase 11)
  * @changes
- *   - 高スコア帯（スコア 2000 / 5000〜）における 1 の過剰供給を抑え、4 / 8 / 16 の回転率を段階的に引き上げるよう generateNextValue() の出現テーブルを拡張
- *   - GRAVITYキャッシュ不整合対策として constants.js / softbody.js の絶対パスを ?v=7 へ統一
+ *   - getFloatingJellies() および getBarAreaJellies() の内部処理で事前確保バッファ・オブジェクトプール（floatingJelliesBuffer / barAreaJelliesBuffer / barAreaEntryPool）を再利用し、毎フレーム（60FPS）の配列・オブジェクト新規確保による GC 負荷を削減（未使用エントリの comp 参照も毎回クリア）
+ *   - ゲーム開始直後の初回補充（プレイヤーが1発も撃っていない状態）において、出現側（左端／右端）の待機ゼリーと同数字が供給されて意図せず自動合体するケースを回避するロジックを追加
  * 
  * 上部フロートバーのゼリー生成・出現テーブル・左右2点クリアランス検知スポーナー・
  * セーフティスポーンおよび上枠スポーナーゲージ進捗管理を担うモジュール
@@ -17,6 +17,16 @@ import {
     getSoftBodyHalfExtents,
     getCapsuleHalfExtentsForValue
 } from '/sobosuba/softbody.js?v=7';
+
+// ==========================================
+// ゼロアロケーション（毎フレームGC負荷削減）用事前確保バッファ ＆ 状態フラグ
+// ==========================================
+const floatingJelliesBuffer = [];
+const barAreaJelliesBuffer = [];
+const barAreaEntryPool = [];
+
+// ゲーム開始直後の初回補充（プレイヤー未操作時の端同数字自動合体回避）フラグ
+let isInitialRefillPending = false;
 
 /**
  * 一体外枠フレーム（FRAME_WIDTH）およびバンパー面基準（FLOAT_BAR.PADDING_X）と同期した
@@ -80,14 +90,14 @@ export function generateNextValue(score = 0) {
 // 上段フロートバー状態取得ヘルパー
 // ==========================================
 /**
- * 現在上部フロートバー上に浮いている全ゼリーを取得する（中空ビーズリング対応）
+ * 現在上部フロートバー上に浮いている全ゼリーを取得する（中空ビーズリング対応・事前確保バッファ再利用）
  * @param {Matter.World} world - Matter.jsの物理世界
  * @returns {Array<Matter.Composite>}
  */
 export function getFloatingJellies(world) {
-    if (!world) return [];
+    floatingJelliesBuffer.length = 0;
+    if (!world) return floatingJelliesBuffer;
     const composites = world.composites || Matter.Composite.allComposites(world);
-    const list = [];
     for (let i = 0; i < composites.length; i++) {
         const comp = composites[i];
         if (comp &&
@@ -96,10 +106,10 @@ export function getFloatingJellies(world) {
             !comp.isMerging &&
             comp.particles &&
             comp.particles.length > 0) {
-            list.push(comp);
+            floatingJelliesBuffer.push(comp);
         }
     }
-    return list;
+    return floatingJelliesBuffer;
 }
 
 /**
@@ -125,15 +135,16 @@ export function getBarHoppingCount(world) {
 
 /**
  * スポーナーのクリアランス検知および重なり爆発防止のため、バー領域に存在する全ゼリーを
- * 横長カプセル実幅・実高付きで取得する
+ * 横長カプセル実幅・実高付きで取得する（事前確保バッファ＆プール再利用）
  * @param {Matter.World} world
  * @param {number} newHalfHeight - 出現予定ゼリーの半高
  * @returns {Array<{ comp: Matter.Composite, cx: number, cy: number, halfWidth: number, halfHeight: number }>}
  */
 function getBarAreaJellies(world, newHalfHeight) {
-    if (!world) return [];
+    barAreaJelliesBuffer.length = 0;
+    if (!world) return barAreaJelliesBuffer;
     const composites = world.composites || Matter.Composite.allComposites(world);
-    const list = [];
+    let poolIndex = 0;
 
     for (let i = 0; i < composites.length; i++) {
         const comp = composites[i];
@@ -146,17 +157,75 @@ function getBarAreaJellies(world, newHalfHeight) {
         const ext = getSoftBodyHalfExtents(comp);
         const dy = Math.abs(centroid.y - FLOAT_BAR.Y);
         if (comp.isFloating || comp.isBarHopping || dy < (ext.halfHeight + newHalfHeight + 14)) {
-            list.push({
-                comp,
-                cx: centroid.x,
-                cy: centroid.y,
-                halfWidth: ext.halfWidth,
-                halfHeight: ext.halfHeight
-            });
+            let entry = barAreaEntryPool[poolIndex];
+            if (!entry) {
+                entry = { comp: null, cx: 0, cy: 0, halfWidth: 0, halfHeight: 0 };
+                barAreaEntryPool.push(entry);
+            }
+            entry.comp = comp;
+            entry.cx = centroid.x;
+            entry.cy = centroid.y;
+            entry.halfWidth = ext.halfWidth;
+            entry.halfHeight = ext.halfHeight;
+            barAreaJelliesBuffer.push(entry);
+            poolIndex++;
         }
     }
 
-    return list;
+    // 破棄済みゼリーへの強参照残留を防ぐため、今回未使用のプール要素参照をクリア
+    for (let i = poolIndex; i < barAreaEntryPool.length; i++) {
+        barAreaEntryPool[i].comp = null;
+    }
+
+    return barAreaJelliesBuffer;
+}
+
+/**
+ * 盤面下段またはホップ中にゼリーが1体以上存在するか（プレイヤーが発射操作済みか）を判定する
+ * @param {Matter.World} world
+ * @returns {boolean}
+ */
+function hasAnyNonFloatingJelly(world) {
+    if (!world) return false;
+    const composites = world.composites || Matter.Composite.allComposites(world);
+    for (let i = 0; i < composites.length; i++) {
+        const comp = composites[i];
+        if (comp && comp.label === 'jelly_composite' && !comp.isFloating) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * 出現端（左端／右端）に最も近い待機ゼリーの数値（jellyValue）を取得する
+ * @param {Array<Matter.Composite>} floating - 現在の待機ゼリー配列
+ * @param {string} side - 'left' | 'right'
+ * @returns {number|null}
+ */
+function getEdgeFloatingValue(floating, side) {
+    if (!floating || floating.length === 0) return null;
+    let edgeComp = null;
+    let edgeX = (side === 'left') ? Infinity : -Infinity;
+
+    for (let i = 0; i < floating.length; i++) {
+        const comp = floating[i];
+        const centroid = comp.centroid || getSoftBodyCentroid(comp);
+        if (!centroid) continue;
+        if (side === 'left') {
+            if (centroid.x < edgeX) {
+                edgeX = centroid.x;
+                edgeComp = comp;
+            }
+        } else {
+            if (centroid.x > edgeX) {
+                edgeX = centroid.x;
+                edgeComp = comp;
+            }
+        }
+    }
+
+    return edgeComp ? edgeComp.jellyValue : null;
 }
 
 /**
@@ -258,6 +327,9 @@ function writeGaugeState(gameState, leftRatio, rightRatio) {
 export function initFloatBar(world, gameState) {
     if (!world) return;
 
+    // 開始直後の初回補充で端のゼリーと同数字が供給されて自動合体するケースを回避するためのフラグを初期化
+    isInitialRefillPending = true;
+
     const padX = getSafeBarPaddingX();
     const score = gameState ? gameState.score : 0;
     const count = Math.min(4, FLOAT_BAR.MAX_COUNT || 5);
@@ -321,6 +393,12 @@ export function maintainFloatBar(world, gameState) {
     const hoppingCount = getBarHoppingCount(world);
     const barOwnedCount = floating.length + hoppingCount;
 
+    // プレイヤーが1発でも発射・ホップ済み、またはスコア進行済みなら初回補充回避フラグを解除
+    if (isInitialRefillPending &&
+        ((gameState.score || 0) > 0 || hoppingCount > 0 || floating.length < 4 || hasAnyNonFloatingJelly(world))) {
+        isInitialRefillPending = false;
+    }
+
     // バーが空になってからの経過時間を追跡（ホップ滞空中は空とみなさない）
     if (barOwnedCount === 0) {
         if (gameState.barEmptySince === 0) {
@@ -382,12 +460,27 @@ export function maintainFloatBar(world, gameState) {
     }
 
     if (chosenSide !== null) {
-        const spawnX = chosenSide === 'left' ? leftSpawnX : rightSpawnX;
+        let spawnVal = val;
+        let spawnHalfW = newHalfW;
+
+        // 開始直後の初回補充（プレイヤー未操作状態）で出現端のゼリーと同数字になる場合は別値へ切り替えて自動合体を回避
+        if (isInitialRefillPending) {
+            const edgeVal = getEdgeFloatingValue(floating, chosenSide);
+            if (edgeVal !== null && spawnVal === edgeVal) {
+                spawnVal = (spawnVal === 1) ? 2 : 1;
+                spawnHalfW = getCapsuleHalfExtentsForValue(spawnVal).halfWidth;
+            }
+            isInitialRefillPending = false;
+        }
+
+        const spawnX = (chosenSide === 'left')
+            ? Math.max(FLOAT_BAR.LEFT_SPAWN_X || (padX + spawnHalfW), padX + spawnHalfW)
+            : Math.min(FLOAT_BAR.RIGHT_SPAWN_X || (GAME_WIDTH - padX - spawnHalfW), GAME_WIDTH - padX - spawnHalfW);
         const entryVel = {
             x: chosenSide === 'left' ? entrySpeed : -entrySpeed,
             y: 0
         };
-        const newComp = createSoftBodyJelly(spawnX, FLOAT_BAR.Y, val, entryVel, true, false);
+        const newComp = createSoftBodyJelly(spawnX, FLOAT_BAR.Y, spawnVal, entryVel, true, false);
         Matter.Composite.add(world, newComp);
 
         gameState.lastSpawnSide = chosenSide;
@@ -430,6 +523,7 @@ export function maintainFloatBar(world, gameState) {
         const safeComp = createSoftBodyJelly(bestX, FLOAT_BAR.Y, val, { x: 0, y: 0 }, true, false);
         Matter.Composite.add(world, safeComp);
 
+        isInitialRefillPending = false;
         gameState.lastFloatSpawnTime = now;
         gameState.pendingSpawnValue = null;
         gameState.barEmptySince = 0;

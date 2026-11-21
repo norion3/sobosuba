@@ -1,9 +1,10 @@
 /**
  * sound.js
- * @version v8.4 (Zombie AudioContext Auto-Recovery & Gentle Suikinkutsu Water Audio - Phase 4)
+ * @version v8.5 (Suspended Playback Guard, Grace Recovery Fix & Size-Harmonized Chain Pitch - Phase 2)
  * @changes
- *   - 他画面・別アプリ復帰後の「音量 ON のまま無音」バグを根治するため、5重離脱／異常検知（visibilitychange / pagehide / blur / audioCtx.onstatechange / 300msグレース付き currentTime フリーズ監視）と、touchstart・touchend・mousedown・click の2段構えキャプチャ先行自動ハードリカバリ（#soundToggleBtn 競合回避・非ユーザージェスチャー誤リセット防止・リバーブIR Float32Array キャッシュによる高速再構築）を実装
- *   - 合体・連鎖・連続落下時の耳への優しさと心地よさを引き上げるため、マスターローパス（2600Hz, Q=0.45）・水辺リバーブ（0.58s IR・Dry 80% / Wet 22%・1650Hz LP）へ調整し、playSoundMerge() を 400〜220Hz 黄金帯域・ウェーブペンタトニック旋律・3層純正整数比（完全オクターブ / 完全五度）・等ラウドネス自動補正・連続密度ダッキング・62ms ハープアルペジオ・ノイズ撤廃・10ms 丸アタックへリチューン（周辺効果音も同トーンへ調和）
+ *   - getPlayableAudio() で audioCtx.state !== 'running'（suspended / interrupted 等）の場合は必ず null を返すよう修正し、停止中コンテキストへの発音ノード蓄積・リークおよび復帰時爆音を遮断
+ *   - getPlayableAudio() の suspended / interrupted 検知へコンテキスト生成直後 300ms のグレース期間ガードを追加し、復帰後 touchstart → touchend 間の誤リカバリ再点灯による再破棄ループ・発射音ブツ切りを根治
+ *   - playSoundMerge() の連鎖基準周波数を現在合体サイズ基準周波数（70%）と前連鎖基準（30%）の調和ブレンドへ更新し、大塊と小塊が別箇所で連続合体した際の音程違和感を解消
  * 
  * Web Audio APIを使用した軽量プロシージャル癒し水音サウンドモジュール
  * 
@@ -741,34 +742,42 @@ export function initSound() {
 function getPlayableAudio() {
     if (!soundEnabled || !audioCtx || audioCtx.state === 'closed') return null;
 
+    const nowWallMs = performance.now();
+
     if (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted') {
-        needsAudioRecovery = true;
+        // コンテキスト生成直後 300ms グレース期間内の非同期 resume() 待ちでは誤リカバリを再点灯しない
+        if (nowWallMs - audioCtxCreatedAtMs >= 300) {
+            needsAudioRecovery = true;
+        }
         try {
             const res = audioCtx.resume();
             if (res && typeof res.catch === 'function') {
                 res.catch(() => {});
             }
         } catch (_err) {
-            return null;
+            // 無視
         }
-    } else if (audioCtx.state === 'running') {
-        // 経路 5：ゾンビ AudioContext（state === 'running' なのに currentTime が停止）の検知
-        // コンテキスト生成直後 300ms はグレース期間として除外
-        const nowWallMs = performance.now();
-        if (nowWallMs - audioCtxCreatedAtMs >= 300) {
-            const curAudioTime = audioCtx.currentTime;
-            if (lastClockWallMs > 0) {
-                if ((nowWallMs - lastClockWallMs) >= 180) {
-                    if ((curAudioTime - lastClockAudioTime) < 0.001) {
-                        needsAudioRecovery = true;
-                    }
-                    lastClockWallMs = nowWallMs;
-                    lastClockAudioTime = curAudioTime;
+        // 停止中コンテキストへの発音ノード蓄積・リーク・復帰時爆音を完全遮断
+        return null;
+    }
+
+    if (audioCtx.state !== 'running') return null;
+
+    // 経路 5：ゾンビ AudioContext（state === 'running' なのに currentTime が停止）の検知
+    // コンテキスト生成直後 300ms はグレース期間として除外
+    if (nowWallMs - audioCtxCreatedAtMs >= 300) {
+        const curAudioTime = audioCtx.currentTime;
+        if (lastClockWallMs > 0) {
+            if ((nowWallMs - lastClockWallMs) >= 180) {
+                if ((curAudioTime - lastClockAudioTime) < 0.001) {
+                    needsAudioRecovery = true;
                 }
-            } else {
                 lastClockWallMs = nowWallMs;
                 lastClockAudioTime = curAudioTime;
             }
+        } else {
+            lastClockWallMs = nowWallMs;
+            lastClockAudioTime = curAudioTime;
         }
     }
 
@@ -1031,10 +1040,13 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     const subDuck = 0.50 + 0.50 * densityRatio;  // 0.50 〜 1.00
 
     // 連鎖開始（chainCount === 0）でサイズ基準周波数（400〜220Hz）を記憶し、
+    // 連鎖中は現在合体サイズ（70%）と前連鎖基準（30%）を調和ブレンドして大塊⇔小塊の飛び連鎖でもサイズ感を維持
     // 1〜7連は純正ペンタトニック上昇、8連以降は最高音張り付きを防いで温かい和音帯を波のように往復
     const sizeBaseFreq = 400 - sizeNorm * 180;
     if (safeChain === 0) {
         chainBaseFreq = sizeBaseFreq;
+    } else {
+        chainBaseFreq = sizeBaseFreq * 0.70 + chainBaseFreq * 0.30;
     }
 
     const semitones = (safeChain < PENTATONIC_RISE_SEMITONES.length)

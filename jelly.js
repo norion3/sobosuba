@@ -1,8 +1,12 @@
 /**
  * jelly.js
- * @version v8.0 (Falling Jelly First-Landing Detection for Air Super-Fluid Transition - Phase 3)
+ * @version v8.5 (Floor/Slope Landing Detection, Air-Merge Inheritance, Merge-Time Scoring, Separation Guard & Direct Composite Shockwave - Phase 5)
  * @changes
- *   - handleCollisions() の if (allowCollideSound) の外側へ、落下中ゼリー（!comp.isFloating && !comp.isBarHopping && !comp.hasLanded）の厳密初着地検知（①着地済み下段ゼリー otherComp.hasLanded === true との接触、②天井以外の静的壁・床・45度スロープとの接触かつ落下ゼリー重心 cy > GAME_HEIGHT * 0.45）を追加し、条件成立時に comp.hasLanded = true; comp.landedAt = now; を刻印（collisionStart / collisionActive 双方で漏れゼロ、空中2連射接触や上空バンパー擦りによる誤爆ゼロ）
+ *   - handleCollisions() の静的剛体による初着地検知を floor / corner_slope_left / corner_slope_right に限定し、左右壁バンクショット時の空中誤着地を根治
+ *   - 下段合体時に親2体がともに未着地（!hasLanded）の空中合体であれば startLanded = false を createSoftBodyJelly() へ渡して自然な落下速度を維持するよう修正
+ *   - 合体スコアの確定タイミングを handleCollisions() から handleMerges() 実行時へ移し、戻り値で確定獲得スコアを返却するよう統一（ゲームオーバー時の未合体スコア先行加算を防止）
+ *   - 吸い付き完了時に親2体が大塊の割り込み等で過度に引き離された場合（sepDist > (rA + rB) * 1.35）、単純中点ではなく速度の小さい安定側の親重心へ生成位置を補正する安全処理を追加
+ *   - フィールド内合体の衝撃波処理で Composite.allBodies(world) を world.composites 直接走査へ置換して配列コピーを排除し、フォールバック値（MAX_PARTICLE_VY: 12.0 / MERGE_RADIAL_IMPULSE: 0.86 / 基準半径: 24.0）を最新定数へ同期
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
@@ -49,7 +53,7 @@ let currentChainCount = 0;
  */
 function calcAreaAnticipationDelayMs(value) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384] || JELLY_CONFIG[8192];
-    const radius = config ? config.radius : 21.5;
+    const radius = config ? config.radius : 24.0;
     const area = Math.PI * radius * radius;
     const minMs = EFFECTS.MERGE_ANTICIPATION_MIN_MS || EFFECTS.MERGE_BASE_DELAY_MS || 80;
     const maxMs = EFFECTS.MERGE_ANTICIPATION_MAX_MS || 145;
@@ -64,7 +68,7 @@ function calcAreaAnticipationDelayMs(value) {
  */
 function calcAreaMergeProtectMs(value) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384] || JELLY_CONFIG[8192];
-    const radius = config ? config.radius : 21.5;
+    const radius = config ? config.radius : 24.0;
     const area = Math.PI * radius * radius;
     const minMs = EFFECTS.MERGE_PROTECT_MIN_MS || 680;
     const maxMs = EFFECTS.MERGE_PROTECT_MAX_MS || 1200;
@@ -309,12 +313,12 @@ export function resetMergeQueues() {
 /**
  * 衝突イベントを処理し、落下中ゼリーの初着地検知、同数字ソフトボディの合体キュー登録（吸い付き音含む）、
  * および重心法線接近速度ベースの衝突音・静的壁バウンド音判定を行う
+ * ※本家準拠スコアの確定加算は handleMerges() の合体実行タイミングへ統一（互換のため常に 0 を返却）
  * @param {Object} event - Matter.js の collisionStart / collisionActive イベントオブジェクト
  * @param {boolean} allowCollideSound - 衝突音を鳴らすかどうか（collisionActive 呼び出し時は false 指定可）
- * @returns {number} このフレームで獲得した本家準拠スコア（未合体Soboの初参加分のみ）
+ * @returns {number} 常に 0（確定獲得スコアは handleMerges() 戻り値で返却）
  */
 export function handleCollisions(event, allowCollideSound = true) {
-    let earnedScore = 0;
     const pairs = event.pairs;
     const now = Date.now();
     const minCollideSpeed = (PHYSICS.COLLIDE_SOUND_MIN_SPEED !== undefined) ? PHYSICS.COLLIDE_SOUND_MIN_SPEED : 0.65;
@@ -322,7 +326,6 @@ export function handleCollisions(event, allowCollideSound = true) {
     const pairCooldownMs = PHYSICS.COLLIDE_SOUND_PAIR_COOLDOWN_MS || 450;
     const maxBarMergeValue = FLOAT_BAR.BAR_MERGE_MAX_VALUE || 512;
     const barAttachMaxY = (FLOAT_BAR.HOP_RECATCH_Y_MAX || (FLOAT_BAR.Y + 30)) + 16;
-    const wallLandingMinY = GAME_HEIGHT * 0.45;
 
     for (let i = 0; i < pairs.length; i++) {
         const pair = pairs[i];
@@ -332,7 +335,7 @@ export function handleCollisions(event, allowCollideSound = true) {
 
         // --- 0. 落下中ゼリーの厳密初着地検知（collisionStart / collisionActive 双方で漏れなく判定） ---
         // ①着地済み下段ゼリー（otherComp.hasLanded === true）との接触
-        // ②天井以外の静的壁・床・45度スロープ（isStatic === true && label !== 'ceiling'）との接触 かつ 重心 cy > GAME_HEIGHT * 0.45
+        // ②床または底面45度スロープ（floor / corner_slope_left / corner_slope_right）との接触（左右壁バンクショット除外）
         if (bodyA.label === 'jelly_particle' &&
             bodyB.label === 'jelly_particle' &&
             bodyA.jellyId !== bodyB.jellyId) {
@@ -361,14 +364,14 @@ export function handleCollisions(event, allowCollideSound = true) {
                 staticBody = bodyA;
             }
 
-            if (fallingBody && staticBody && staticBody.label !== 'ceiling') {
+            if (fallingBody && staticBody &&
+                (staticBody.label === 'floor' ||
+                 staticBody.label === 'corner_slope_left' ||
+                 staticBody.label === 'corner_slope_right')) {
                 const comp = fallingBody.parentComposite;
                 if (comp && !comp.isFloating && !comp.isBarHopping && !comp.hasLanded) {
-                    const pos = comp.centroid || getSoftBodyCentroid(comp) || fallingBody.position;
-                    if (pos && pos.y > wallLandingMinY) {
-                        comp.hasLanded = true;
-                        comp.landedAt = now;
-                    }
+                    comp.hasLanded = true;
+                    comp.landedAt = now;
                 }
             }
         }
@@ -440,16 +443,6 @@ export function handleCollisions(event, allowCollideSound = true) {
                             isFloating: isFloatingMerge,
                             executeTime: executeTime
                         });
-
-                        // 【本家完全準拠スコア計算】
-                        // 未合体（hasMerged === false）のSoboが初めて合体に参加した分のみを加算する
-                        // 既に合体済み（hasMerged === true）のSobo同士の合体は盤面総和が変わらないため +0 点
-                        if (!compA.hasMerged) {
-                            earnedScore += compA.jellyValue;
-                        }
-                        if (!compB.hasMerged) {
-                            earnedScore += compB.jellyValue;
-                        }
                     }
                 }
             }
@@ -536,17 +529,20 @@ export function handleCollisions(event, allowCollideSound = true) {
         }
     }
 
-    return earnedScore;
+    return 0;
 }
 
 /**
- * 物理演算の更新(afterUpdate)後に、吸い付きディレイ中の引き寄せおよび安全にソフトボディの追加・削除を行う
+ * 物理演算の更新(afterUpdate)後に、吸い付きディレイ中の引き寄せおよび安全にソフトボディの追加・削除を行い、
+ * このフレームで実際に合体が確定した本家準拠スコア（未合体Soboの初参加分のみ）を返す
  * @param {Matter.World} world - 現在の物理世界
+ * @returns {number} このフレームで合体確定により獲得したスコア
  */
 export function handleMerges(world) {
+    let earnedScore = 0;
     const now = Date.now();
     const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
-    const maxVy = PHYSICS.MAX_PARTICLE_VY || 11.0;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 12.0;
 
     // 1. 「吸い付きの間」ディレイキューをチェックし、待機中は穏やかに引き寄せ、猶予経過で実行キューへ移す
     for (let i = pendingMerges.length - 1; i >= 0; i--) {
@@ -555,14 +551,35 @@ export function handleMerges(world) {
             // 吸い付き時間中の移動・押し合いにも追従できるよう、実行直前の最新重心から生成座標を再計算
             const latestA = getSoftBodyCentroid(pm.compA);
             const latestB = getSoftBodyCentroid(pm.compB);
-            const finalX = (latestA && latestB) ? ((latestA.x + latestB.x) / 2) : pm.x;
-            const finalY = pm.isFloating
-                ? FLOAT_BAR.Y
-                : ((latestA && latestB) ? ((latestA.y + latestB.y) / 2) : pm.y);
 
             // 親2体の平均運動量を継承（空中・押し込み合体時のピタッと停止を解消）
             const velA = getSoftBodyAverageVelocity(pm.compA);
             const velB = getSoftBodyAverageVelocity(pm.compB);
+
+            let finalX = (latestA && latestB) ? ((latestA.x + latestB.x) / 2) : pm.x;
+            let finalY = pm.isFloating
+                ? FLOAT_BAR.Y
+                : ((latestA && latestB) ? ((latestA.y + latestB.y) / 2) : pm.y);
+
+            // 吸い付き中に大塊の割り込み等で親2体が過度に引き離された場合は、
+            // 単純中点（割り込み大塊の中心）を避け、速度の小さい安定側の親重心へ生成位置を補正する
+            if (!pm.isFloating && latestA && latestB) {
+                const rA = pm.compA.targetRadius || 24.0;
+                const rB = pm.compB.targetRadius || 24.0;
+                const sepDist = Math.hypot(latestB.x - latestA.x, latestB.y - latestA.y);
+                if (sepDist > (rA + rB) * 1.35) {
+                    const spdSqA = velA.x * velA.x + velA.y * velA.y;
+                    const spdSqB = velB.x * velB.x + velB.y * velB.y;
+                    if (spdSqA <= spdSqB) {
+                        finalX = latestA.x;
+                        finalY = latestA.y;
+                    } else {
+                        finalX = latestB.x;
+                        finalY = latestB.y;
+                    }
+                }
+            }
+
             const avgVx = (velA.x + velB.x) * 0.5;
             const avgVy = (velA.y + velB.y) * 0.5;
             let inheritedVelocity;
@@ -579,12 +596,26 @@ export function handleMerges(world) {
                 };
             }
 
+            // 下段合体時に親2体がともに未着地（空中合体）なら startLanded = false を継承して自然な落下速度を維持
+            const startLanded = pm.isFloating ? false : Boolean(pm.compA.hasLanded || pm.compB.hasLanded);
+
+            // 【本家完全準拠スコア計算】合体実行確定タイミングで未合体（hasMerged === false）分のみ計上
+            let mergeScore = 0;
+            if (!pm.compA.hasMerged) {
+                mergeScore += pm.compA.jellyValue;
+            }
+            if (!pm.compB.hasMerged) {
+                mergeScore += pm.compB.jellyValue;
+            }
+
             compositesToRemove.push(pm.compA, pm.compB);
             compositesToAdd.push({
                 x: finalX,
                 y: finalY,
                 value: pm.value,
                 isFloating: pm.isFloating,
+                startLanded: startLanded,
+                earnedScore: mergeScore,
                 initialVelocity: inheritedVelocity
             });
             pendingMerges.splice(i, 1);
@@ -608,7 +639,7 @@ export function handleMerges(world) {
     if (compositesToAdd.length > 0) {
         const chainWindowMs = SCORE.CHAIN_WINDOW_MS || 2100;
         const growStartScale = EFFECTS.MERGE_GROW_START_SCALE || 0.78;
-        const baseImpulse = PHYSICS.MERGE_RADIAL_IMPULSE || 1.45;
+        const baseImpulse = PHYSICS.MERGE_RADIAL_IMPULSE || 0.86;
 
         // 一体外枠フレーム（FRAME_WIDTH / TOP_BAR_HEIGHT）の内壁基準クランプ定数
         const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
@@ -619,7 +650,7 @@ export function handleMerges(world) {
             const data = compositesToAdd[i];
             const val = data.value;
             const newConfig = JELLY_CONFIG[val] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384] || JELLY_CONFIG[8192];
-            const newRadius = newConfig ? newConfig.radius : 21.5;
+            const newRadius = newConfig ? newConfig.radius : 24.0;
 
             // 生成座標の内壁基準安全クランプ（上段は横長カプセル実幅基準、下段は縮小スポーン半径基準）
             let spawnX = data.x;
@@ -653,7 +684,8 @@ export function handleMerges(world) {
                 data.initialVelocity || null,
                 data.isFloating,
                 true,
-                growStartScale
+                growStartScale,
+                data.startLanded
             );
 
             // 本家準拠：合体保護時間（680〜1200ms）と真っ白フラッシュ（mergeFlashStart / mergeFlashUntil）を1対1完全同期
@@ -664,6 +696,7 @@ export function handleMerges(world) {
             newJellyComposite.mergeFlashUntil = now + protectionMs;
 
             Composite.add(world, newJellyComposite);
+            earnedScore += data.earnedScore || 0;
 
             // サウンド連携: 連鎖ウィンドウ内であれば連鎖カウントを進めて純正ペンタトニック上昇＋サイズ連動ボディを再生
             if (now - lastMergeSoundTime <= chainWindowMs) {
@@ -675,20 +708,28 @@ export function handleMerges(world) {
             playSoundMerge(currentChainCount, val);
 
             // ==========================================
-            // フィールド内合体時の連鎖膨張インパルス（X/Y独立最大速度上限 MAX_PARTICLE_VX / MAX_PARTICLE_VY 統一）
+            // フィールド内合体時の連鎖膨張インパルス（world.composites 直接走査・X/Y独立最大速度上限統一）
             // ==========================================
             // バー上での事前合体時は待機列を吹き飛ばさないよう衝撃波をスキップする
             if (!data.isFloating) {
                 const effectRadius = newRadius * 2.5; // 影響範囲（自身のサイズの2.5倍程度）
+                const composites = world.composites || [];
 
-                const allBodies = Composite.allBodies(world);
-                for (let j = 0; j < allBodies.length; j++) {
-                    const body = allBodies[j];
+                for (let c = 0; c < composites.length; c++) {
+                    const otherComp = composites[c];
+                    // フィールド内の他ゼリーのみ対象（バー上・ホップ中・自分自身はコンポジット単位で高速除外）
+                    if (!otherComp ||
+                        otherComp.label !== 'jelly_composite' ||
+                        otherComp.jellyId === newJellyComposite.jellyId ||
+                        otherComp.isFloating ||
+                        otherComp.isBarHopping ||
+                        !otherComp.particles) {
+                        continue;
+                    }
 
-                    // フィールド内のソフトボディの構成要素にのみ速度インパルスを加える（バー上・ホップ中・自分自身は除外）
-                    if (body.label === 'jelly_particle' &&
-                        body.jellyId !== newJellyComposite.jellyId &&
-                        (!body.parentComposite || (!body.parentComposite.isFloating && !body.parentComposite.isBarHopping))) {
+                    const otherParticles = otherComp.particles;
+                    for (let j = 0; j < otherParticles.length; j++) {
+                        const body = otherParticles[j];
                         const dx = body.position.x - spawnX;
                         const dy = body.position.y - spawnY;
                         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -708,4 +749,6 @@ export function handleMerges(world) {
         }
         compositesToAdd.length = 0;
     }
+
+    return earnedScore;
 }

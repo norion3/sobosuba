@@ -1,9 +1,10 @@
 /**
  * overlap_solver.js
- * @version v8.1 (Relaxed Normal Velocity Absorption for Wedge Entry & Wave Propagation - Phase 3)
+ * @version v8.5 (Batched Bead Position Push, Zero-Alloc Vector Reuse & Redundant Guard Removal - Phase 10)
  * @changes
- *   - 塊と塊の隙間へ打ち込んだときの押し分け・隙間進入エネルギーと周囲への連動波及を滑らかに伝えるため、resolvePolygonIntrusion() の通常部分侵入時における衝突法線速度吸収率を緩和（侵入ビーズ側: 0.72 → 0.56 / 相手エッジ主ビーズ: 0.55 → 0.40 / 相手エッジ隣接ビーズ: 0.25 → 0.18）
- *   - 内包時の統一方向脱出（Composite Ejection）における速度吸収率（0.72 / 0.55 / 0.25）およびその他ロジックは飛び出し防止のため現行維持
+ *   - resolvePolygonIntrusion() の通常部分侵入時における対称分散排斥（本体 64%＋両隣各 18%、および相手エッジ両端 70%＋外側隣接 30%）で同一ビーズへ重複発生していた Body.setPosition を事前確保バッファへ蓄積し、1ペア処理につきビーズ 1 個あたり最大 1 回へ集約
+ *   - applyClampedPush() / absorbEdgeApproachVelocity() / resolvePolygonIntrusion() 内の Body.setPosition / Body.setVelocity に渡す一時 { x, y } リテラルを事前確保オブジェクト（tempClampPoint / tempVel）へ置換し、毎サブステップの GC 負荷を削減
+ *   - isPointInsidePolygon() 内の数学的に発生しない冗長なゼロ除算ガード（(yj - yi) || 1e-9）を削除
  * 
  * ソフトボディ間の「非侵入（Anti-Overlap）排斥ソルバー」および共通幾何判定を提供するモジュール
  * 
@@ -20,7 +21,12 @@ const Body = Matter.Body;
 // ゼロアロケーション（毎サブステップGC負荷削減）用の作業バッファ
 const tempClampPoint = { x: 0, y: 0 };
 const tempWallCheckPoint = { x: 0, y: 0 };
+const tempVel = { x: 0, y: 0 };
 let insideFlagsBuffer = new Uint8Array(64);
+let pushAccumAX = new Float64Array(64);
+let pushAccumAY = new Float64Array(64);
+let pushAccumBX = new Float64Array(64);
+let pushAccumBY = new Float64Array(64);
 
 /**
  * 1パス内包判定フラグバッファの容量が不足する場合のみ拡張する
@@ -29,6 +35,22 @@ let insideFlagsBuffer = new Uint8Array(64);
 function ensureInsideFlagsCapacity(requiredCount) {
     if (insideFlagsBuffer.length < requiredCount) {
         insideFlagsBuffer = new Uint8Array(requiredCount);
+    }
+}
+
+/**
+ * 通常部分侵入時の対称分散排斥変位を蓄積する事前確保バッファの容量を確保する
+ * @param {number} requiredA
+ * @param {number} requiredB
+ */
+function ensurePushAccumCapacity(requiredA, requiredB) {
+    if (pushAccumAX.length < requiredA) {
+        pushAccumAX = new Float64Array(requiredA);
+        pushAccumAY = new Float64Array(requiredA);
+    }
+    if (pushAccumBX.length < requiredB) {
+        pushAccumBX = new Float64Array(requiredB);
+        pushAccumBY = new Float64Array(requiredB);
     }
 }
 
@@ -62,7 +84,7 @@ export function isPointInsidePolygon(px, py, points, count) {
             const yj = pl.y;
 
             if (((yi > py) !== (yj > py)) &&
-                (px < ((xj - xi) * (py - yi)) / ((yj - yi) || 1e-9) + xi)) {
+                (px < ((xj - xi) * (py - yi)) / (yj - yi) + xi)) {
                 inside = !inside;
             }
         }
@@ -76,7 +98,7 @@ export function isPointInsidePolygon(px, py, points, count) {
             const yj = pl.y;
 
             if (((yi > py) !== (yj > py)) &&
-                (px < ((xj - xi) * (py - yi)) / ((yj - yi) || 1e-9) + xi)) {
+                (px < ((xj - xi) * (py - yi)) / (yj - yi) + xi)) {
                 inside = !inside;
             }
         }
@@ -118,7 +140,7 @@ function applyClampedPush(body, dx, dy, margin) {
         margin,
         tempClampPoint
     );
-    Body.setPosition(body, { x: nextPt.x, y: nextPt.y });
+    Body.setPosition(body, nextPt);
 }
 
 /**
@@ -170,10 +192,9 @@ function absorbEdgeApproachVelocity(body, ux, uy, absorbRatio) {
     // エッジ側ビーズが脱出法線方向（侵入ビーズ側）へ動いている成分が接近速度
     const velDotB = body.velocity.x * ux + body.velocity.y * uy;
     if (velDotB > 0) {
-        Body.setVelocity(body, {
-            x: body.velocity.x - ux * velDotB * absorbRatio,
-            y: body.velocity.y - uy * velDotB * absorbRatio
-        });
+        tempVel.x = body.velocity.x - ux * velDotB * absorbRatio;
+        tempVel.y = body.velocity.y - uy * velDotB * absorbRatio;
+        Body.setVelocity(body, tempVel);
     }
 }
 
@@ -318,10 +339,9 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
                     applyClampedPush(p, ejectUx * pushA, ejectUy * pushA, rA);
                     const velDotA = p.velocity.x * ejectUx + p.velocity.y * ejectUy;
                     if (velDotA < 0) {
-                        Body.setVelocity(p, {
-                            x: p.velocity.x - ejectUx * velDotA * 0.72,
-                            y: p.velocity.y - ejectUy * velDotA * 0.72
-                        });
+                        tempVel.x = p.velocity.x - ejectUx * velDotA * 0.72;
+                        tempVel.y = p.velocity.y - ejectUy * velDotA * 0.72;
+                        Body.setVelocity(p, tempVel);
                     }
                 }
 
@@ -366,8 +386,16 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
     }
 
     // ==========================================
-    // 通常部分侵入時の対称分散排斥（1パス目のキャッシュを参照）
+    // 通常部分侵入時の対称分散排斥（1パス目のキャッシュを参照 ＆ ビーズ毎 1 回の Body.setPosition へ集約）
     // ==========================================
+    ensurePushAccumCapacity(nA, nB);
+    pushAccumAX.fill(0, 0, nA);
+    pushAccumAY.fill(0, 0, nA);
+    pushAccumBX.fill(0, 0, nB);
+    pushAccumBY.fill(0, 0, nB);
+    let hasAnyPushA = false;
+    let hasAnyPushB = false;
+
     for (let i = 0; i < nA; i++) {
         if (insideFlagsBuffer[i] === 0) continue;
 
@@ -464,25 +492,28 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
         const pushA = push * 0.62;
         const pushB = push * 0.38;
 
-        // (A) 侵入ビーズ側も対称分散（本体64% ＋ 両隣ビーズ各18%）で押し戻し、ツノ・クチバシ奇形を根絶
-        const pPrevA = ptsA[(i - 1 + nA) % nA];
-        const pNextA = ptsA[(i + 1) % nA];
+        // (A) 侵入ビーズ側も対称分散（本体64% ＋ 両隣ビーズ各18%）で押し戻し変位を蓄積し、ツノ・クチバシ奇形を根絶
+        const idxPrevA = (i - 1 + nA) % nA;
+        const idxNextA = (i + 1) % nA;
         const mainPushA = pushA * 0.64;
         const sidePushA = pushA * 0.18;
-        applyClampedPush(p, ux * mainPushA, uy * mainPushA, rA);
-        applyClampedPush(pPrevA, ux * sidePushA, uy * sidePushA, rA);
-        applyClampedPush(pNextA, ux * sidePushA, uy * sidePushA, rA);
+        pushAccumAX[i] += ux * mainPushA;
+        pushAccumAY[i] += uy * mainPushA;
+        pushAccumAX[idxPrevA] += ux * sidePushA;
+        pushAccumAY[idxPrevA] += uy * sidePushA;
+        pushAccumAX[idxNextA] += ux * sidePushA;
+        pushAccumAY[idxNextA] += uy * sidePushA;
+        hasAnyPushA = true;
 
         // 双方衝突法線速度吸収（侵入ビーズ側：隙間進入と連動波及を活かすため吸収率を 0.56 へ緩和）
         const velDotA = p.velocity.x * ux + p.velocity.y * uy;
         if (velDotA < 0) {
-            Body.setVelocity(p, {
-                x: p.velocity.x - ux * velDotA * 0.56,
-                y: p.velocity.y - uy * velDotA * 0.56
-            });
+            tempVel.x = p.velocity.x - ux * velDotA * 0.56;
+            tempVel.y = p.velocity.y - uy * velDotA * 0.56;
+            Body.setVelocity(p, tempVel);
         }
 
-        // (B) 相手エッジへの反作用を隣接ビーズへも滑らかに分散（局所的なえぐれ・引きつり防止）
+        // (B) 相手エッジへの反作用を隣接ビーズへも滑らかに分散蓄積（局所的なえぐれ・引きつり防止）
         // あわせて相手エッジ側ビーズの衝突法線接近速度も吸収しジッターを遮断しつつ周囲連動を滑らかに伝達
         const w1 = 1 - bestT;
         const w2 = bestT;
@@ -502,27 +533,57 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
             if (w1 > 0.001) {
                 const m1 = pushB * mainScale * w1;
                 const s1 = pushB * sideScale * w1;
-                applyClampedPush(b1Body, -ux * m1, -uy * m1, rB);
-                applyClampedPush(bPrevBody, -ux * s1, -uy * s1, rB);
+                pushAccumBX[bestIdx1] -= ux * m1;
+                pushAccumBY[bestIdx1] -= uy * m1;
+                pushAccumBX[idxPrev] -= ux * s1;
+                pushAccumBY[idxPrev] -= uy * s1;
+                hasAnyPushB = true;
                 absorbEdgeApproachVelocity(b1Body, ux, uy, 0.40 * w1);
                 absorbEdgeApproachVelocity(bPrevBody, ux, uy, 0.18 * w1);
             }
             if (w2 > 0.001) {
                 const m2 = pushB * mainScale * w2;
                 const s2 = pushB * sideScale * w2;
-                applyClampedPush(b2Body, -ux * m2, -uy * m2, rB);
-                applyClampedPush(bNextBody, -ux * s2, -uy * s2, rB);
+                pushAccumBX[bestIdx2] -= ux * m2;
+                pushAccumBY[bestIdx2] -= uy * m2;
+                pushAccumBX[idxNext] -= ux * s2;
+                pushAccumBY[idxNext] -= uy * s2;
+                hasAnyPushB = true;
                 absorbEdgeApproachVelocity(b2Body, ux, uy, 0.40 * w2);
                 absorbEdgeApproachVelocity(bNextBody, ux, uy, 0.18 * w2);
             }
         } else {
             if (w1 > 0.001) {
-                applyClampedPush(b1Body, -ux * pushB * w1, -uy * pushB * w1, rB);
+                pushAccumBX[bestIdx1] -= ux * pushB * w1;
+                pushAccumBY[bestIdx1] -= uy * pushB * w1;
+                hasAnyPushB = true;
                 absorbEdgeApproachVelocity(b1Body, ux, uy, 0.40 * w1);
             }
             if (w2 > 0.001) {
-                applyClampedPush(b2Body, -ux * pushB * w2, -uy * pushB * w2, rB);
+                pushAccumBX[bestIdx2] -= ux * pushB * w2;
+                pushAccumBY[bestIdx2] -= uy * pushB * w2;
+                hasAnyPushB = true;
                 absorbEdgeApproachVelocity(b2Body, ux, uy, 0.40 * w2);
+            }
+        }
+    }
+
+    // 蓄積した排斥変位を 1 ビーズあたり最大 1 回の Body.setPosition で一括適用
+    if (hasAnyPushA) {
+        for (let i = 0; i < nA; i++) {
+            const dx = pushAccumAX[i];
+            const dy = pushAccumAY[i];
+            if (dx !== 0 || dy !== 0) {
+                applyClampedPush(ptsA[i], dx, dy, rA);
+            }
+        }
+    }
+    if (hasAnyPushB) {
+        for (let i = 0; i < nB; i++) {
+            const dx = pushAccumBX[i];
+            const dy = pushAccumBY[i];
+            if (dx !== 0 || dy !== 0) {
+                applyClampedPush(ptsB[i], dx, dy, rB);
             }
         }
     }

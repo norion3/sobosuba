@@ -1,9 +1,11 @@
 /**
  * softbody.js
- * @version v8.3 (Settled Weight-Offload Buoyancy & v8.3 Fallback Sync - Phase 2)
+ * @version v8.5 (Velocity-Linked Weight-Offload, Air-Merge StartLanded Support, Substep Zero-Alloc & Fallback Sync - Phase 4)
  * @changes
- *   - applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale) へ gravityY / gravityScale を渡し、既存の粒子力ループ内で着地定着後のウェイト・オフロード（!isBarState かつ buoyancyRatio = (1 - SETTLED_GRAVITY_SCALE) * firmness * (1 - effectiveBarBlend) > 0.0001 のとき forceY -= gravityY * gravityScale * buoyancyRatio * pCurr.mass）を適用（追加ループゼロ・GCゼロ・上段待機およびホップ中は 0% 完全保護）
- *   - v8.3 確定定数に合わせて DENSITY_SCALE_EXP（1.45）・SMALL_BEND_BOOST（0.095）・SMALL_RESTORE_MULT（2.0）・SETTLED_GRAVITY_SCALE（0.38）のフォールバック値を同期
+ *   - applyVolumeAndShapeForces() へ速度連動ウェイト・オフロード（PHYSICS.SETTLED_FALL_SPEED_START / SETTLED_FALL_SPEED_FULL による下向き落下時のオフロード滑らか解除）を導入し、多層静止時の底層圧潰防止と空洞発生時の爽快な雪崩・大連鎖を両立
+ *   - createSoftBodyJelly() へ省略可能パラメータ startLanded（既定値 !isFloating）を追加し、下段空中合体時の未着地状態（空中超液体モード・launchedAt フェイルセーフ）継承に対応
+ *   - 毎サブステップ内の一時 { x, y } リテラル（Body.applyForce / Body.setVelocity / Body.setPosition）および computeBodyGeometry() 戻り値オブジェクトを事前確保バッファ（tempForce / tempVec / tempGeom）へ置換し、GC負荷を削減
+ *   - フォールバック値を最新定数へ同期（MAX_PARTICLE_VY: 11.0 → 12.0 / TARGET_AREA_RATIO: 0.98 → 1.02 / baseRadius: 21.5 → 24.0）
  * 
  * ソフトボディ（中空ビーズリング剛体）の生成・物理更新モジュール
  * 
@@ -49,6 +51,9 @@ let jellyIdCounter = 0;
 // ==========================================
 const activeJelliesBuffer = [];
 const tempClampPoint = { x: 0, y: 0 };
+const tempForce = { x: 0, y: 0 };
+const tempVec = { x: 0, y: 0 };
+const tempGeom = { cx: 0, cy: 0, vx: 0, vy: 0, signedArea: 0, perimeter: 0 };
 
 /**
  * 閉じた頂点配列の符号付き面積（靴紐の公式）を算出する
@@ -68,7 +73,7 @@ function computePolygonArea(pts) {
 
 /**
  * 中空ビーズリング型ソフトボディゼリー（Sobo）を生成する
- * 上段待機（isFloating = true）の場合は横長カプセル形状で生成し、下段では円形リング（即定着耐圧）で生成する
+ * 上段待機（isFloating = true）の場合は横長カプセル形状で生成し、下段では円形リング（既定は即定着耐圧、空中合体時は startLanded = false で未着地継承）で生成する
  * @param {number} x - 生成する中心X座標
  * @param {number} y - 生成する中心Y座標
  * @param {number} value - ゼリーの数値 (1, 2, 4, 8...)
@@ -76,9 +81,10 @@ function computePolygonArea(pts) {
  * @param {boolean} isFloating - 上部フロートバー上で無重力浮遊（横長カプセル）させるかどうか
  * @param {boolean} hasMerged - 既に合体に参加済み（スコア加算済み・太字表示）かどうか
  * @param {number} initialScale - 合体時の縮小スポーン開始倍率（通常1.0、合体時0.78等）
+ * @param {boolean} [startLanded=!isFloating] - 下段生成時に最初から着地定着済みとして扱うか（空中合体継承時は false）
  * @returns {Matter.Composite} 生成された中空ビーズリングの複合体
  */
-export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloating = false, hasMerged = false, initialScale = 1.0) {
+export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloating = false, hasMerged = false, initialScale = 1.0, startLanded = !isFloating) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384];
     const radius = config.radius;
     const particleCount = Math.max(16, config.particles || 16);
@@ -93,7 +99,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     const fullRingRadius = Math.max(4, radius - particleRadius);
 
     // 質量スケーリング（大塊の下敷きによる小塊の圧壊・微振動を防止）
-    const baseRadius = (JELLY_CONFIG[1] && JELLY_CONFIG[1].radius) ? JELLY_CONFIG[1].radius : 21.5;
+    const baseRadius = (JELLY_CONFIG[1] && JELLY_CONFIG[1].radius) ? JELLY_CONFIG[1].radius : 24.0;
     const densityExp = (PHYSICS.DENSITY_SCALE_EXP !== undefined) ? PHYSICS.DENSITY_SCALE_EXP : 1.45;
     const scaledDensity = (PHYSICS.DENSITY_PARTICLE || 0.0012) * Math.pow(baseRadius / Math.max(baseRadius, radius), densityExp);
 
@@ -118,7 +124,7 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     const capsuleLocalPoints = computeCapsuleRingPoints(particleCount, capRingHalfH, capRingStraightHalf);
 
     // 円形・カプセルそれぞれの隣接バネ長・1つ飛ばし曲げ長・目標面積を事前算出
-    const targetAreaRatio = (PHYSICS.TARGET_AREA_RATIO !== undefined) ? PHYSICS.TARGET_AREA_RATIO : 0.98;
+    const targetAreaRatio = (PHYSICS.TARGET_AREA_RATIO !== undefined) ? PHYSICS.TARGET_AREA_RATIO : 1.02;
     const circleSegmentLength = 2 * fullRingRadius * Math.sin(Math.PI / particleCount);
     const circleBendLength = 2 * fullRingRadius * Math.sin((2 * Math.PI) / particleCount);
     const circleTargetArea = 0.5 * particleCount * fullRingRadius * fullRingRadius * Math.sin((2 * Math.PI) / particleCount) * targetAreaRatio;
@@ -140,18 +146,21 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     const initialShapeBlend = isFloating ? 1.0 : 0.0;
     const initialCategory = isFloating ? COLLISION_CATEGORY.BAR_FLOATING : COLLISION_CATEGORY.FIELD_JELLY;
     const initialMask = getCollisionMaskForCategory(initialCategory);
+    const isInitiallyLanded = isFloating ? false : Boolean(startLanded);
 
-    // 上段スポーン時は現行上段剛性を完全保護、下段合体生成（!isFloating）時は最初から下段定着耐圧で初期化
+    // 上段スポーン時は現行上段剛性を完全保護、下段定着生成時は下段定着耐圧、下段空中合体生成時は空中超液体剛性で初期化
+    const airSkin = (PHYSICS.AIR_SKIN_STIFFNESS !== undefined) ? PHYSICS.AIR_SKIN_STIFFNESS : 0.25;
+    const airBend = (PHYSICS.AIR_BEND_STIFFNESS !== undefined) ? PHYSICS.AIR_BEND_STIFFNESS : 0.105;
     const settledSkinBase = (PHYSICS.SETTLED_SKIN_STIFFNESS !== undefined) ? PHYSICS.SETTLED_SKIN_STIFFNESS : 0.335;
     const settledBendBase = (PHYSICS.SETTLED_BEND_STIFFNESS !== undefined) ? PHYSICS.SETTLED_BEND_STIFFNESS : 0.135;
     const smallSkinBoost = (PHYSICS.SMALL_SKIN_BOOST !== undefined) ? PHYSICS.SMALL_SKIN_BOOST : 0.065;
     const smallBendBoost = (PHYSICS.SMALL_BEND_BOOST !== undefined) ? PHYSICS.SMALL_BEND_BOOST : 0.095;
     const initialSkinStiffness = isFloating
         ? PHYSICS.SKIN_STIFFNESS
-        : (settledSkinBase + smallSkinBoost * smallBoostFactor);
+        : (isInitiallyLanded ? (settledSkinBase + smallSkinBoost * smallBoostFactor) : airSkin);
     const initialBendStiffness = isFloating
         ? PHYSICS.BEND_STIFFNESS
-        : (settledBendBase + smallBendBoost * smallBoostFactor);
+        : (isInitiallyLanded ? (settledBendBase + smallBendBoost * smallBoostFactor) : airBend);
 
     // ソフトボディ全体をまとめるコンポジット（複合体）
     const jellyComposite = Composite.create({ label: 'jelly_composite' });
@@ -267,12 +276,12 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     jellyComposite.smallBoostFactor = smallBoostFactor;
 
     // 空中超液体 → 下段定着耐圧ライフサイクル管理状態
-    // 下段合体生成（!isFloating）は最初から定着耐圧、上段スポーン（isFloating）は未着地で初期化
-    jellyComposite.hasLanded = !isFloating;
-    jellyComposite.landedAt = isFloating ? 0 : createdAt;
-    jellyComposite.launchedAt = 0;
-    jellyComposite.landedFirmness = isFloating ? 0.0 : 1.0;
-    jellyComposite._lastAppliedFirmness = isFloating ? 0.0 : 1.0;
+    // 下段定着生成時は最初から定着耐圧、上段スポーンおよび下段空中合体生成（startLanded = false）時は未着地で初期化
+    jellyComposite.hasLanded = isInitiallyLanded;
+    jellyComposite.landedAt = isInitiallyLanded ? createdAt : 0;
+    jellyComposite.launchedAt = (!isFloating && !isInitiallyLanded) ? createdAt : 0;
+    jellyComposite.landedFirmness = isInitiallyLanded ? 1.0 : 0.0;
+    jellyComposite._lastAppliedFirmness = isInitiallyLanded ? 1.0 : 0.0;
 
     // 形状・サイズ関連メタデータ（円形 ⇔ 横長カプセル両対応）
     jellyComposite.targetRadius = radius;
@@ -322,8 +331,10 @@ export function createSoftBodyJelly(x, y, value, initialVelocity = null, isFloat
     // 4. 初期速度の付与
     // ==========================================
     if (initialVelocity) {
+        tempVec.x = initVx;
+        tempVec.y = initVy;
         for (let i = 0; i < particles.length; i++) {
-            Body.setVelocity(particles[i], { x: initVx, y: initVy });
+            Body.setVelocity(particles[i], tempVec);
         }
     }
 
@@ -583,11 +594,17 @@ function computeBodyGeometry(comp) {
         comp.aabb.maxY = maxY;
     }
 
-    return { cx, cy, vx, vy, signedArea, perimeter };
+    tempGeom.cx = cx;
+    tempGeom.cy = cy;
+    tempGeom.vx = vx;
+    tempGeom.vy = vy;
+    tempGeom.signedArea = signedArea;
+    tempGeom.perimeter = perimeter;
+    return tempGeom;
 }
 
 /**
- * サブ関数3：穏健なアンチ裏返り自動修復 OR 軽気体バルーン物理（強化非線形バルク内圧＋体積粘性＋異方性最小距離復元＋着地後ウェイト・オフロード）
+ * サブ関数3：穏健なアンチ裏返り自動修復 OR 軽気体バルーン物理（強化非線形バルク内圧＋体積粘性＋異方性最小距離復元＋速度連動ウェイト・オフロード）
  * ※PBD位置ワープおよび真円形状保持（SHAPE_MATCH）は完全撤廃
  */
 function applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale) {
@@ -642,11 +659,10 @@ function applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale) {
             const nextY = pCurr.position.y + (targetY - pCurr.position.y) * 0.45;
             const clampedPt = clampPointToContainer(nextX, nextY, pRadius, tempClampPoint);
 
-            Body.setPosition(pCurr, { x: clampedPt.x, y: clampedPt.y });
-            Body.setVelocity(pCurr, {
-                x: pCurr.velocity.x * 0.55,
-                y: pCurr.velocity.y * 0.55
-            });
+            Body.setPosition(pCurr, clampedPt);
+            tempVec.x = pCurr.velocity.x * 0.55;
+            tempVec.y = pCurr.velocity.y * 0.55;
+            Body.setVelocity(pCurr, tempVec);
         }
         return;
     }
@@ -674,7 +690,7 @@ function applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale) {
         }
     }
 
-    // (C) 強化非線形バルク内圧・体積粘性・異方性最小距離復元・着地後ウェイト・オフロード（空中超液体 ⇔ 下段定着耐圧 ⇔ 上段保護の2段連続補間）
+    // (C) 強化非線形バルク内圧・体積粘性・異方性最小距離復元・速度連動ウェイト・オフロード（空中超液体 ⇔ 下段定着耐圧 ⇔ 上段保護の2段連続補間）
     const isBarState = Boolean(comp.isFloating || comp.isBarHopping);
     const capRingMinRadius = Math.min(ringRadius, (comp.capsuleRingHalfHeight || ringRadius) * curScale);
     const shapeBlend = (comp.shapeBlend !== undefined)
@@ -702,10 +718,21 @@ function applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale) {
     const horizRestoreScale = (PHYSICS.HORIZ_RESTORE_SCALE !== undefined) ? PHYSICS.HORIZ_RESTORE_SCALE : 0.40;
     const anisoBlend = 1 - effectiveBarBlend;
 
-    // 着地定着後の荷重伝達カット（上段待機・ホップ中は isBarState により 0% 完全保護）
+    // 速度連動ウェイト・オフロード：下向き落下速度（centVy）が立ち上がるとオフロードを 0% へ滑らかに解除して雪崩・大連鎖テンポを維持（上段待機・ホップ中は isBarState により 0% 完全保護）
     const settledGravScale = (PHYSICS.SETTLED_GRAVITY_SCALE !== undefined) ? PHYSICS.SETTLED_GRAVITY_SCALE : 0.38;
-    const buoyancyRatio = (!isBarState && gravityY && gravityScale)
-        ? Math.max(0, (1 - settledGravScale) * firmness * (1 - effectiveBarBlend))
+    const fallStart = (PHYSICS.SETTLED_FALL_SPEED_START !== undefined) ? PHYSICS.SETTLED_FALL_SPEED_START : 0.45;
+    const fallFull = (PHYSICS.SETTLED_FALL_SPEED_FULL !== undefined) ? PHYSICS.SETTLED_FALL_SPEED_FULL : 1.6;
+    let fallOffloadFactor = 1.0;
+    if (centVy > fallStart) {
+        if (centVy >= fallFull) {
+            fallOffloadFactor = 0.0;
+        } else {
+            const rawFallT = (centVy - fallStart) / Math.max(0.01, fallFull - fallStart);
+            fallOffloadFactor = 1.0 - (rawFallT * rawFallT * (3 - 2 * rawFallT));
+        }
+    }
+    const buoyancyRatio = (!isBarState && gravityY && gravityScale && fallOffloadFactor > 0.0001)
+        ? Math.max(0, (1 - settledGravScale) * firmness * (1 - effectiveBarBlend) * fallOffloadFactor)
         : 0;
     const offloadAccelY = (buoyancyRatio > 0.0001)
         ? (gravityY * gravityScale * buoyancyRatio)
@@ -800,12 +827,14 @@ function applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale) {
             forceY += radialY * restoreMag;
         }
 
-        // 4. 着地後ウェイト・オフロード（定着した塊の自重の一部を相殺し、下部・小塊への荷重伝達を大幅カット）
+        // 4. 速度連動ウェイト・オフロード（静止定着した塊の自重の一部を相殺し、下部・小塊への荷重伝達を大幅カット）
         if (offloadAccelY > 0) {
             forceY -= offloadAccelY * pCurr.mass;
         }
 
-        Body.applyForce(pCurr, pCurr.position, { x: forceX, y: forceY });
+        tempForce.x = forceX;
+        tempForce.y = forceY;
+        Body.applyForce(pCurr, pCurr.position, tempForce);
     }
 }
 
@@ -872,10 +901,9 @@ function applyAdaptiveSettleDamping(comp, geom, subDeltaMs, substeps) {
         const body = particles[j];
         const relVx = body.velocity.x - centVx;
         const relVy = body.velocity.y - centVy;
-        Body.setVelocity(body, {
-            x: centVx + relVx * stepRelDamp,
-            y: centVy + relVy * stepRelDamp
-        });
+        tempVec.x = centVx + relVx * stepRelDamp;
+        tempVec.y = centVy + relVy * stepRelDamp;
+        Body.setVelocity(body, tempVec);
     }
 }
 
@@ -910,10 +938,9 @@ function clampParticleVelocities(comp, maxVx, maxVy) {
         }
 
         if (changed) {
-            Body.setVelocity(body, {
-                x: clampedVx,
-                y: clampedVy
-            });
+            tempVec.x = clampedVx;
+            tempVec.y = clampedVy;
+            Body.setVelocity(body, tempVec);
         }
     }
 }
@@ -936,7 +963,7 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
         ? subDeltaMs
         : ((1000 / 60) / substeps);
     const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
-    const maxVy = PHYSICS.MAX_PARTICLE_VY || 11.0;
+    const maxVy = PHYSICS.MAX_PARTICLE_VY || 12.0;
 
     // 1フレームあたりの減衰率をサブステップ回数に応じて等価変換
     const stepDampX = Math.pow(FLOAT_BAR.X_DAMPING || 0.986, 1 / substeps);
@@ -961,7 +988,7 @@ export function updateSoftBodies(world, engine, subDeltaMs) {
         // 2.5 斜め下ショットすり抜け保護（AABB完全離脱検知による即解除・bar_motion.js 委譲）
         updateBarGraceState(comp, composites, now);
 
-        // 3. 穏健なアンチ裏返り修復 / 強化非線形バルク内圧・体積粘性・異方性最小距離復元・着地後ウェイト・オフロードの適用
+        // 3. 穏健なアンチ裏返り修復 / 強化非線形バルク内圧・体積粘性・異方性最小距離復元・速度連動ウェイト・オフロードの適用
         applyVolumeAndShapeForces(comp, geom, gravityY, gravityScale);
 
         // 4. 天井非激突 2.5D上段飛び越えホップ（半カプセル水平安定 ＆ 進行方向優先セーフ・リキャッチ・bar_motion.js 委譲）

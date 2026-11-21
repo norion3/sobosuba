@@ -1,8 +1,10 @@
 /**
  * render.js
- * @version v8.4 (Power-Scaled Normal Aim Arrow Visuals - Phase 3)
+ * @version v8.5 (Hop Aim Flag Sync, Arrow/Dot Dark Outline & Font Cache / Scale Save-Restore Optimization - Phase 9)
  * @changes
- *   - drawAimAndHopGuide() の通常ショット（!isHopAim）矢印描画を強弱連動ビジュアルへ更新し、弱〜中帯（AIM_CANCEL_RADIUS → AIM_MAX_DRAG: 22 → 120px）では白（rgba(255,255,255,0.80) → #ffffff）・軸幅 4.6 → 6.0px・先端ヘッド 15 → 19px・起点リング半径 8.5 → 9.5px へ変化し、下方向パワー帯（120 → AIM_MAX_DRAG_DOWN: 170px）では白 → ゴールド（#fde047）→ アンバーオレンジ（#fb923c）へ色ジャンプなしで連続変化しつつ軸幅 6.0 → 8.0px・先端ヘッド 19 → 24px・起点リング半径 9.5 → 10.5px へ伸長するよう実装（ホップ時のシアン矢印・予測ドット・キャンセル／そっと落としガイドは完全不変）
+ *   - drawAimAndHopGuide() のホップ判定を gameState.isHopAim に一本化し、aim.js の角度勾配付きホップ条件と完全一致させた
+ *   - 同色ゼリー上での同化を防ぐため、通常矢印（弱〜中・下方向パワー帯）・起点リング・ホップ矢印・ホップ予測ドットおよび着地リングに細い半透明黒縁取り（rgba(0, 0, 0, 0.72)）を先行描画するよう追加
+ *   - 描画負荷軽減のため、ゼリー数字のフォントサイズを 0.5px 刻みで量子化して生成済みフォント文字列をキャッシュ参照するヘルパー getCachedFontString() を導入し、通常ゼリー（scale === 1.0）における不要な ctx.save / translate / scale / restore を省略
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -15,12 +17,16 @@ import { GAME_WIDTH, GAME_HEIGHT, ACTIVE_THEME, JELLY_CONFIG, EFFECTS, CONTAINER
 import { isPointInsidePolygon } from '/sobosuba/overlap_solver.js?v=7';
 
 // ==========================================
-// ゼロアロケーション（毎フレームGC負荷削減）用事前確保バッファ
+// ゼロアロケーション（毎フレームGC負荷削減）用事前確保バッファ ＆ フォント文字列キャッシュ
 // ==========================================
 const INITIAL_OUTER_POINTS_CAPACITY = 48;
 const outerPointsBuffer = Array.from({ length: INITIAL_OUTER_POINTS_CAPACITY }, () => ({ x: 0, y: 0 }));
 const smoothedPointsBuffer = Array.from({ length: INITIAL_OUTER_POINTS_CAPACITY }, () => ({ x: 0, y: 0 }));
 const hoppingCompositesBuffer = [];
+
+// 0.5px 刻み量子化フォント文字列キャッシュ（毎フレームの文字列結合とグリフキャッシュ再生成を削減）
+const mergedFontCache = new Map();
+const unmergedFontCache = new Map();
 
 // 通常レイヤー「全本体描画 → 全数字最前面描画」2パス分離用の事前確保テキストバッファ
 const INITIAL_DEFERRED_TEXT_CAPACITY = 48;
@@ -35,6 +41,23 @@ const deferredTextBuffer = Array.from({ length: INITIAL_DEFERRED_TEXT_CAPACITY }
     font: ''
 }));
 let deferredTextCount = 0;
+
+/**
+ * フォントサイズを 0.5px 刻みで量子化し、合体済み／未合体別の生成済みフォント文字列をキャッシュから取得する
+ * @param {boolean} isMerged
+ * @param {number} fontSize
+ * @returns {string}
+ */
+function getCachedFontString(isMerged, fontSize) {
+    const halfPxKey = Math.round(fontSize * 2);
+    const cache = isMerged ? mergedFontCache : unmergedFontCache;
+    let fontStr = cache.get(halfPxKey);
+    if (!fontStr) {
+        fontStr = `${isMerged ? '900' : '600'} ${(halfPxKey * 0.5).toFixed(1)}px "Courier New", Courier, monospace`;
+        cache.set(halfPxKey, fontStr);
+    }
+    return fontStr;
+}
 
 /**
  * 事前確保した外縁座標バッファおよびスムージングバッファの容量が不足する場合のみ拡張する
@@ -83,7 +106,9 @@ function drawJellyTextItem(ctx, x, y, angle, scale, valueText, fillStyle, alpha,
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angle);
-    ctx.scale(scale, scale);
+    if (scale !== 1.0) {
+        ctx.scale(scale, scale);
+    }
     ctx.fillStyle = fillStyle;
     ctx.globalAlpha = alpha;
     ctx.font = font;
@@ -554,10 +579,14 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false,
     }
 
     // 6. スライム本体の描画（黒枠先行 stroke → ビビッド色 fill で黒潰れ完全防止）
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.scale(scale, scale);
-    ctx.translate(-cx, -cy);
+    // 通常ゼリー（scale === 1.0）では不要な ctx.save / translate / scale / restore を省略して描画負荷を削減
+    const needsBodyTransform = (scale !== 1.0);
+    if (needsBodyTransform) {
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.scale(scale, scale);
+        ctx.translate(-cx, -cy);
+    }
 
     traceSmoothBlobPath(ctx, smoothedPointsBuffer, n);
 
@@ -616,7 +645,9 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false,
         }
     }
 
-    ctx.restore();
+    if (needsBodyTransform) {
+        ctx.restore();
+    }
 
     // 7. 数字の位置・サイズ算出（下段限定最大内接円探索 ＋ 位置・角度・サイズのデッドゾーン＆ローパス補間）
     // 真っ白フラッシュ中も太字黒文字（コントラスト比 21:1）をそのまま維持して描画
@@ -776,7 +807,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false,
     const isMerged = Boolean(comp.hasMerged);
     const fillStyle = config.text || ACTIVE_THEME.text || '#000000';
     const textAlpha = isMerged ? 1.0 : renderMeta.unmergedAlpha;
-    const fontStr = `${isMerged ? '900' : '600'} ${fontSize.toFixed(1)}px "Courier New", Courier, monospace`;
+    const fontStr = getCachedFontString(isMerged, fontSize);
 
     // 通常レイヤーは全本体描画後に最前面へまとめて描画するが、
     // 後続（手前）ゼリーの物理リング内部に覆われている数字だけは最前面へ透かさず即時描画する
@@ -874,13 +905,14 @@ function drawAimAndHopGuide(ctx, gameState) {
     const dist = Math.sqrt(dx * dx + dy * dy);
     const cancelRadius = PHYSICS.AIM_CANCEL_RADIUS || 22;
     const hasDraggedOut = Boolean(gameState.hasDraggedOut);
-    const hopTriggerDy = (FLOAT_BAR.HOP_TRIGGER_DY !== undefined) ? FLOAT_BAR.HOP_TRIGGER_DY : -16;
-    const isHopAim = Boolean(gameState.isHopAim || (dist >= cancelRadius && dy < hopTriggerDy));
+    // aim.js の角度勾配付きホップ判定と完全一致させるため gameState.isHopAim へ一本化
+    const isHopAim = Boolean(gameState.isHopAim);
+    const darkOutlineColor = 'rgba(0, 0, 0, 0.72)';
 
     ctx.save();
 
     if (dist >= cancelRadius) {
-        // (A) 上段飛び越えホップモード時：シンプルな放物線予測ドット（6〜7点）＆着地リング
+        // (A) 上段飛び越えホップモード時：細い半透明黒縁取り付きの放物線予測ドット（6〜7点）＆着地リング
         if (isHopAim && Array.isArray(gameState.hopPreviewPoints) && gameState.hopPreviewPoints.length > 0) {
             const previewPts = gameState.hopPreviewPoints;
             const ptCount = previewPts.length;
@@ -891,12 +923,23 @@ function drawAimAndHopGuide(ctx, gameState) {
                 const dotAlpha = Math.max(0.28, 0.90 - t * 0.45);
 
                 ctx.beginPath();
+                ctx.arc(pt.x, pt.y, dotRadius + 1.2, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(0, 0, 0, ${(dotAlpha * 0.72).toFixed(3)})`;
+                ctx.fill();
+
+                ctx.beginPath();
                 ctx.arc(pt.x, pt.y, dotRadius, 0, Math.PI * 2);
                 ctx.fillStyle = `rgba(34, 211, 238, ${dotAlpha.toFixed(3)})`;
                 ctx.fill();
             }
 
             const lastPt = previewPts[ptCount - 1];
+            ctx.beginPath();
+            ctx.arc(lastPt.x, lastPt.y, 7.5, 0, Math.PI * 2);
+            ctx.strokeStyle = darkOutlineColor;
+            ctx.lineWidth = 4.4;
+            ctx.stroke();
+
             ctx.beginPath();
             ctx.arc(lastPt.x, lastPt.y, 7.5, 0, Math.PI * 2);
             ctx.strokeStyle = 'rgba(34, 211, 238, 0.72)';
@@ -910,7 +953,7 @@ function drawAimAndHopGuide(ctx, gameState) {
         ctx.fillStyle = isHopAim ? 'rgba(34, 211, 238, 0.16)' : 'rgba(255, 255, 255, 0.16)';
         ctx.fill();
 
-        // (C) 本家準拠：中心起点丸 ＋ 順方向実線矢印
+        // (C) 本家準拠：中心起点丸 ＋ 順方向実線矢印（同色ゼリー上の同化を防ぐ細い半透明黒縁取り先行描画）
         // ホップ時は従来のシアン固定、通常ショット時は引き量に応じた弱〜中（白）→下方向パワー帯（ゴールド→アンバーオレンジ）へ連続変化
         let arrowColor = '#22d3ee';
         let ringRadius = 9.5;
@@ -950,34 +993,62 @@ function drawAimAndHopGuide(ctx, gameState) {
         const endX = originX + dx;
         const endY = originY + dy;
         const angle = Math.atan2(dy, dx);
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        const shaftStartX = originX + cosA * 8;
+        const shaftStartY = originY + sinA * 8;
+        const shaftEndX = endX - cosA * (headLen * 0.55);
+        const shaftEndY = endY - sinA * (headLen * 0.55);
+        const headLeftX = endX - headLen * Math.cos(angle - Math.PI / 6);
+        const headLeftY = endY - headLen * Math.sin(angle - Math.PI / 6);
+        const headRightX = endX - headLen * Math.cos(angle + Math.PI / 6);
+        const headRightY = endY - headLen * Math.sin(angle + Math.PI / 6);
 
-        // 中心起点リング（本家実機画像の起点丸表現）
+        // 先行パス：細い半透明黒縁取り（起点リング → 軸 → 先端ヘッドの順に描画し接合部の黒割り込みを防止）
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = darkOutlineColor;
+
+        ctx.beginPath();
+        ctx.arc(originX, originY, ringRadius, 0, Math.PI * 2);
+        ctx.lineWidth = 5.6;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(shaftStartX, shaftStartY);
+        ctx.lineTo(shaftEndX, shaftEndY);
+        ctx.lineWidth = shaftWidth + 2.6;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(headLeftX, headLeftY);
+        ctx.lineTo(headRightX, headRightY);
+        ctx.closePath();
+        ctx.lineWidth = 2.8;
+        ctx.stroke();
+
+        // 本体パス：中心起点リング（本家実機画像の起点丸表現）
         ctx.beginPath();
         ctx.arc(originX, originY, ringRadius, 0, Math.PI * 2);
         ctx.strokeStyle = arrowColor;
         ctx.lineWidth = 3;
         ctx.stroke();
 
-        // 矢印の軸（強弱連動の実線）
+        // 本体パス：矢印の軸（強弱連動の実線）
         ctx.beginPath();
-        ctx.moveTo(originX + Math.cos(angle) * 8, originY + Math.sin(angle) * 8);
-        ctx.lineTo(endX - Math.cos(angle) * (headLen * 0.55), endY - Math.sin(angle) * (headLen * 0.55));
+        ctx.moveTo(shaftStartX, shaftStartY);
+        ctx.lineTo(shaftEndX, shaftEndY);
         ctx.strokeStyle = arrowColor;
         ctx.lineWidth = shaftWidth;
         ctx.lineCap = 'round';
         ctx.stroke();
 
-        // 矢印の先端（クッキリした三角ヘッド）
+        // 本体パス：矢印の先端（クッキリした三角ヘッド）
         ctx.beginPath();
         ctx.moveTo(endX, endY);
-        ctx.lineTo(
-            endX - headLen * Math.cos(angle - Math.PI / 6),
-            endY - headLen * Math.sin(angle - Math.PI / 6)
-        );
-        ctx.lineTo(
-            endX - headLen * Math.cos(angle + Math.PI / 6),
-            endY - headLen * Math.sin(angle + Math.PI / 6)
-        );
+        ctx.lineTo(headLeftX, headLeftY);
+        ctx.lineTo(headRightX, headRightY);
         ctx.closePath();
         ctx.fillStyle = arrowColor;
         ctx.fill();

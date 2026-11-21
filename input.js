@@ -1,22 +1,30 @@
 /**
  * input.js
- * @version v8.0 (Start Overlay & Sound Button Canvas Input Exclusion - Phase 4)
+ * @version v8.5 (Safe Interruption Cancel, Right-Click Cancel, Input State Reset & Cached Rect Reflow Reduction - Phase 6)
  * @changes
- *   - isIgnoredUITarget(target) の除外対象セレクタに #startOverlay と #soundToggleBtn を追加し、開始画面および音量ボタン上のタップ／クリック操作が Canvas エイム操作へ貫通するのを遮断
+ *   - initInput() へ省略可能な第5引数 onDragCancel を追加し、touchcancel / blur / visibilitychange(hidden) による操作中断時に発射（onDragEnd）ではなく安全キャンセル（onDragCancel）を実行するよう修正
+ *   - PCブラウザ操作向けに、ドラッグ中の右クリック（mousedown button=2 / contextmenu）で即座にエイムをキャンセルする機能を追加
+ *   - ゲームオーバー・リトライ時のポインタ状態残留を防ぐ resetInputState() をエクスポート新設
+ *   - handleDragMove() 内に残存していた v8.4 下方向 170px 拡張と不整合な不要 120px クランプ処理を撤去
+ *   - updateScale() で Canvas の rect（left / top）および X/Y 独立スケールをキャッシュし、ドラッグ移動中の毎フレーム getBoundingClientRect() 強制リフローを削減
  * 
  * タッチ/マウス操作の追従、順方向ダイレクトエイムの座標・ベクトル計算、
  * およびWebKit特有の余白ドラッグ(ラバーバンド)の物理遮断を管理する入力モジュール
  */
 
-import { GAME_WIDTH, GAME_HEIGHT, PHYSICS } from '/sobosuba/constants.js?v=7';
+import { GAME_WIDTH, GAME_HEIGHT } from '/sobosuba/constants.js?v=7';
 
 let canvasElement;
 let scaleX = 1;
 let scaleY = 1;
+let rectLeft = 0;
+let rectTop = 0;
+let hasCachedRect = false;
 
 // ポインタ・ドラッグ操作の現在状態（Sobo横移動時の毎フレーム指先追従用）
 let isDragging = false;
 let activeTouchId = null;
+let suppressNextContextMenu = false;
 let startX = 0;
 let startY = 0;
 let lastCurrentX = 0;
@@ -28,11 +36,13 @@ let lastCurrentY = 0;
  * @param {Function} onDragStart - ドラッグ開始時のコールバック (引数: startX, startY)
  * @param {Function} onDragUpdate - ドラッグ中のコールバック (引数: currentX, currentY, dragVectorX, dragVectorY)
  * @param {Function} onDragEnd - 指を離した（発射／キャンセル）時のコールバック ()
+ * @param {Function|null} [onDragCancel=null] - OS割り込み・アプリ切替・右クリック等で安全キャンセルする際のコールバック ()
  */
-export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
+export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd, onDragCancel = null) {
     canvasElement = canvas;
+    hasCachedRect = false;
 
-    // 初回、ウィンドウリサイズ、およびスマホのvisualViewport変動時にX/Y独立スケールを更新
+    // 初回、ウィンドウリサイズ、およびスマホのvisualViewport変動時に位置・X/Y独立スケールを更新
     window.addEventListener('resize', updateScale);
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', updateScale);
@@ -41,22 +51,22 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
     updateScale();
 
     /**
-     * ブラウザのクライアント座標から、ゲーム内(Canvas論理座標)のX/Y座標を独立スケールで厳密算出
+     * ブラウザのクライアント座標から、ゲーム内(Canvas論理座標)のX/Y座標をキャッシュ済み矩形・独立スケールで算出
+     * @param {number} clientX
+     * @param {number} clientY
+     * @param {boolean} [refreshRect=false] - ドラッグ開始時など最新矩形の再計測が必要な場合のみ true
      */
-    function getRelativePoint(clientX, clientY) {
+    function getRelativePoint(clientX, clientY, refreshRect = false) {
         if (!canvasElement) {
             return { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 2 };
         }
-        const rect = canvasElement.getBoundingClientRect();
-        const curScaleX = rect.width > 0 ? (rect.width / GAME_WIDTH) : scaleX;
-        const curScaleY = rect.height > 0 ? (rect.height / GAME_HEIGHT) : scaleY;
-
-        scaleX = curScaleX;
-        scaleY = curScaleY;
+        if (refreshRect || !hasCachedRect) {
+            updateScale();
+        }
 
         return {
-            x: (clientX - rect.left) / curScaleX,
-            y: (clientY - rect.top) / curScaleY
+            x: (clientX - rectLeft) / (scaleX || 1),
+            y: (clientY - rectTop) / (scaleY || 1)
         };
     }
 
@@ -88,7 +98,7 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
     // 順方向ダイレクトエイム操作の共通関数
     // =========================================================
     function handleDragStart(clientX, clientY) {
-        const pt = getRelativePoint(clientX, clientY);
+        const pt = getRelativePoint(clientX, clientY, true);
         isDragging = true;
         startX = pt.x;
         startY = pt.y;
@@ -99,24 +109,15 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
 
     function handleDragMove(clientX, clientY) {
         if (!isDragging) return;
-        const pt = getRelativePoint(clientX, clientY);
+        const pt = getRelativePoint(clientX, clientY, false);
         const currentX = pt.x;
         const currentY = pt.y;
 
         lastCurrentX = currentX;
         lastCurrentY = currentY;
 
-        let dx = currentX - startX;
-        let dy = currentY - startY;
-
-        // 最大ドラッグ距離の制限（クランプ）
-        const maxDrag = PHYSICS.AIM_MAX_DRAG || PHYSICS.SLINGSHOT_MAX_DRAG || 150;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        if (distance > maxDrag) {
-            const ratio = maxDrag / distance;
-            dx *= ratio;
-            dy *= ratio;
-        }
+        const dx = currentX - startX;
+        const dy = currentY - startY;
 
         onDragUpdate(currentX, currentY, dx, dy);
     }
@@ -129,12 +130,35 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
         onDragEnd();
     }
 
+    function handleDragCancel() {
+        if (!isDragging && activeTouchId === null) return;
+        isDragging = false;
+        activeTouchId = null;
+
+        // 割り込み・右クリック時は絶対に発射させず、安全キャンセルのみを実行
+        if (typeof onDragCancel === 'function') {
+            onDragCancel();
+        }
+    }
+
     // =========================================================
     // 1. マウス操作のバインド (PCブラウザ用)
     // =========================================================
     window.addEventListener('mousedown', (e) => {
         // タッチ操作中、またはUIレイヤー（ゲームオーバー画面のボタン等）へのクリックは無視する
         if (activeTouchId !== null || isIgnoredUITarget(e.target)) return;
+
+        // ドラッグ中の右クリックで即キャンセル（直後のコンテキストメニューも抑止）
+        if (e.button === 2) {
+            if (isDragging) {
+                suppressNextContextMenu = true;
+                handleDragCancel();
+            }
+            return;
+        }
+        if (e.button !== 0) return;
+
+        suppressNextContextMenu = false;
         handleDragStart(e.clientX, e.clientY);
     });
 
@@ -143,9 +167,19 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
         handleDragMove(e.clientX, e.clientY);
     });
 
-    window.addEventListener('mouseup', () => {
-        if (activeTouchId !== null) return;
+    window.addEventListener('mouseup', (e) => {
+        if (activeTouchId !== null || e.button !== 0) return;
         handleDragEnd();
+    });
+
+    window.addEventListener('contextmenu', (e) => {
+        if (isDragging || suppressNextContextMenu) {
+            suppressNextContextMenu = false;
+            e.preventDefault();
+            if (isDragging) {
+                handleDragCancel();
+            }
+        }
     });
 
     // =========================================================
@@ -202,18 +236,17 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
 
         const canceledTouch = findTouchById(e.changedTouches, activeTouchId);
         if (canceledTouch) {
-            activeTouchId = null;
-            handleDragEnd();
+            handleDragCancel();
         }
     });
 
     // =========================================================
-    // 3. OS通知・アプリ切替・タブ非表示時のタッチ操作固着（操作不能化）防止
+    // 3. OS通知・アプリ切替・タブ非表示時の誤発射・タッチ操作固着防止
     // =========================================================
     function handlePointerInterruption() {
         if (activeTouchId === null && !isDragging) return;
-        activeTouchId = null;
-        handleDragEnd();
+        suppressNextContextMenu = false;
+        handleDragCancel();
     }
 
     window.addEventListener('blur', handlePointerInterruption);
@@ -222,6 +255,19 @@ export function initInput(canvas, onDragStart, onDragUpdate, onDragEnd) {
             handlePointerInterruption();
         }
     });
+}
+
+/**
+ * ゲームオーバー・リトライ時にポインタおよびドラッグ追跡状態を安全に初期化する
+ */
+export function resetInputState() {
+    isDragging = false;
+    activeTouchId = null;
+    suppressNextContextMenu = false;
+    startX = 0;
+    startY = 0;
+    lastCurrentX = 0;
+    lastCurrentY = 0;
 }
 
 /**
@@ -240,16 +286,19 @@ export function getPointerState() {
 }
 
 /**
- * CanvasのCSS上での表示サイズと、内部論理座標(GAME_WIDTH / GAME_HEIGHT)とのX/Y独立比率を更新する
- * (動的リサイズ・高解像度DPR描画時にもマウス・タッチ座標のズレを完全に防ぐ)
+ * CanvasのCSS上での表示位置・サイズと、内部論理座標(GAME_WIDTH / GAME_HEIGHT)とのX/Y独立比率を更新・キャッシュする
+ * (動的リサイズ・高解像度DPR描画時にもマウス・タッチ座標のズレとドラッグ中の不要リフローを防止)
  */
 export function updateScale() {
     if (!canvasElement) return;
     const rect = canvasElement.getBoundingClientRect();
+    rectLeft = rect.left;
+    rectTop = rect.top;
     if (rect.width > 0) {
         scaleX = rect.width / GAME_WIDTH;
     }
     if (rect.height > 0) {
         scaleY = rect.height / GAME_HEIGHT;
     }
+    hasCachedRect = true;
 }

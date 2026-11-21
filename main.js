@@ -1,11 +1,11 @@
 /**
  * main.js
- * @version v8.0 (Start Waiting Flow & GRAVITY postMessage Score Reporting - Phase 6)
+ * @version v8.5 (Safe Drag Cancel, Input Reset, Merge-Time Score Sync & Warning Cleanup - Phase 13)
  * @changes
- *   - dom_ui.js からのインポートへ showStartUI / hideStartUI を追加
- *   - GRAVITY ランキング向けスコア送信の正式仕様に準拠した export function reportScoreToGravity(finalScore) を実装（window.parent.postMessage({ type: 'gameOver', score: safeScore }, '*')・Number.isFinite 防御・window.parent !== window 判定・try-catch 保護・旧 AgentSDK 一切不使用）
- *   - gameState へ isWaitingStart および hasReportedScore を追加し、初回起動時のみ開始説明オーバーレイを表示して待機（待機中は背景ゼリーのアイドル物理のみ実行し maintainFloatBar / updateBumpers / 入力操作を停止して勝手スポーン・0点崩壊を防止、リトライ時は即開始）
- *   - ゲームオーバー確定直後に !gameState.hasReportedScore ガードのもとで reportScoreToGravity(finalScoreSnapshot) を厳密に 1 回だけ即時送信するよう実装
+ *   - initInput() へ操作中断・右クリック時の安全キャンセル専用コールバック handleDragCancel（resetAimState(gameState)）を渡すよう追加
+ *   - ポインタ・ドラッグ状態の残留を防ぐため、input.js から resetInputState をインポートし、startGame() およびゲームオーバー確定時に呼び出すよう追加
+ *   - 合体スコア確定タイミングの整合性を確保するため、handleCollisions() 側の先行加算を廃止し、afterUpdate 内の handleMerges(world) 戻り値（合体実行確定時の獲得スコア）をスコアへ反映するよう統合
+ *   - 警告演出の Canvas 側一本化に伴い、dom_ui.js の setWarningEffect インポートおよび毎フレーム呼び出しを削除
  * 
  * sobosuba風パズル（中空ビーズリング・ソフトボディ版）のマスター統合モジュール
  * 
@@ -23,8 +23,8 @@ import { handleCollisions, handleMerges, resetMergeQueues } from '/sobosuba/jell
 import { initFloatBar, maintainFloatBar } from '/sobosuba/floatbar.js?v=7';
 import { resetAimState, syncAimToPointer, startAimDrag, updateAimDrag, endAimDrag } from '/sobosuba/aim.js?v=7';
 import { renderGame } from '/sobosuba/render.js?v=7';
-import { initUI, updateSoundUI, applyViewportSize, getCanvasStageElement, updateScoreUI, showStartUI, hideStartUI, showGameOverUI, hideGameOverUI, setWarningEffect } from '/sobosuba/dom_ui.js?v=7';
-import { initInput, getPointerState, updateScale } from '/sobosuba/input.js?v=7';
+import { initUI, updateSoundUI, applyViewportSize, getCanvasStageElement, updateScoreUI, showStartUI, hideStartUI, showGameOverUI, hideGameOverUI } from '/sobosuba/dom_ui.js?v=7';
+import { initInput, resetInputState, getPointerState, updateScale } from '/sobosuba/input.js?v=7';
 import { isSoundEnabled, toggleSound, playSoundGameOverZap } from '/sobosuba/sound.js?v=7';
 
 // ==========================================
@@ -163,6 +163,7 @@ function startGame(waitForStart = false) {
     gameState.canDrop = true;
     gameState.frameCount = 0;
     resetAimState(gameState);
+    resetInputState();
     gameState.lastFloatSpawnTime = Date.now();
     gameState.barEmptySince = 0;
     gameState.pendingSpawnValue = null;
@@ -185,7 +186,6 @@ function startGame(waitForStart = false) {
     } else {
         hideStartUI();
     }
-    setWarningEffect(false);
 
     // 上部フロートバーへ初期ゼリーを横長カプセル実幅間隔・隣接重複なしで生成
     initFloatBar(world, gameState);
@@ -193,26 +193,26 @@ function startGame(waitForStart = false) {
     // ==========================================
     // Matter.js イベントのバインド
     // ==========================================
-    const applyCollisionScore = (earned) => {
+    const applyMergeScore = (earned) => {
         if (earned > 0) {
-            // 本家完全準拠：未合体Soboが初めて合体に参加した分のみをそのまま加算
+            // 本家完全準拠：未合体Soboが初めて合体に参加した分のみを合体確定時にそのまま加算
             gameState.score += earned;
             updateScoreUI(gameState.score);
         }
     };
 
     Matter.Events.on(engine, 'collisionStart', (event) => {
-        applyCollisionScore(handleCollisions(event, true));
+        handleCollisions(event, true);
     });
 
     // 合体保護期間が明けた直後も接触し続けていた同数字同士を確実に取りこぼさず合体させる
     Matter.Events.on(engine, 'collisionActive', (event) => {
-        applyCollisionScore(handleCollisions(event, false));
+        handleCollisions(event, false);
     });
 
     Matter.Events.on(engine, 'afterUpdate', () => {
-        // 物理演算後に、合体キューに入ったソフトボディの破棄と再構築を安全に行う
-        handleMerges(world);
+        // 物理演算後に、合体キューに入ったソフトボディの破棄と再構築を安全に行い、確定獲得スコアを反映
+        applyMergeScore(handleMerges(world));
     });
 }
 
@@ -239,6 +239,10 @@ function handleDragEnd() {
             if (!gameState.isGameOver) gameState.canDrop = true;
         }, UI.DROP_COOLDOWN_MS);
     }, world);
+}
+
+function handleDragCancel() {
+    resetAimState(gameState);
 }
 
 // ==========================================
@@ -289,6 +293,7 @@ function gameLoop(timestamp) {
                 gameState.isGameOver = true;
                 gameState.canDrop = false;
                 resetAimState(gameState);
+                resetInputState();
 
                 // 両側赤サイドバー全点灯を維持したままザップ音を即座に再生し、550msの静止余韻後にリザルト表示
                 gameState.lastBumperState.leftPressed = true;
@@ -297,7 +302,6 @@ function gameLoop(timestamp) {
                 gameState.lastBumperState.rightPushRatio = 1;
 
                 playSoundGameOverZap();
-                setWarningEffect(true);
 
                 const finalScoreSnapshot = gameState.score;
 
@@ -312,13 +316,9 @@ function gameLoop(timestamp) {
                 gameOverTimer = setTimeout(() => {
                     gameOverTimer = null;
                     if (gameState.isGameOver) {
-                        setWarningEffect(false);
                         showGameOverUI(finalScoreSnapshot);
                     }
                 }, delayMs);
-            } else {
-                // 片側だけ押し込まれた場合は、UIレイヤーに警告エフェクト(赤点滅)を指示
-                setWarningEffect(bumperResult.leftPressed || bumperResult.rightPressed);
             }
         }
     }
@@ -419,7 +419,7 @@ function bootGame() {
     requestAnimationFrame(handleResize);
 
     // 4. 各モジュールの初期化とコールバック登録
-    initInput(canvas, handleDragStart, handleDragUpdate, handleDragEnd);
+    initInput(canvas, handleDragStart, handleDragUpdate, handleDragEnd, handleDragCancel);
 
     // 5. 初回起動時は開始説明カードを表示して待機状態で開始（リトライ時は即開始）
     startGame(true);

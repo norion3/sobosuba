@@ -1,10 +1,9 @@
 /**
  * dom_ui.js
- * @version v8.4 (Dynamic Optical-Center Overlay Vertical Layout - Phase 5)
+ * @version v8.5 (Remove Redundant DOM Warning Overlay & Unify Warning to Canvas - Phase 12)
  * @changes
- *   - 開始説明カード（#startCard）およびゲームオーバーカード（#gameOverCard）へ ID を付与し、margin: auto 0 を廃止して margin: 0; flex-shrink: 0; へ統一するとともに、#startOverlay / #gameOverUI の非対称固定下部余白（padding-bottom: min(215px, 32vh)）を撤廃して justify-content: flex-start 基盤へ刷新
- *   - 実表示高さ・上部ヘッダー下端・Canvas 実領域・カード実高さを自動計測し、視覚的ど真ん中（yTarget = 0.75 * yStage + 0.25 * (H / 2)）へ上下セーフクランプ付きで配置する syncOverlayVerticalLayout() および rAF デバウンス付き scheduleOverlayVerticalLayout() を新設
- *   - showStartUI() / showGameOverUI() で表示直後の同期実行＋次フレーム rAF 再同期を行い、applyViewportSize() でも rAF 予約同期を実行することで、main.js 無変更のまま全スマホサイズ・画面回転時に 1px 精度で中央配置を追従（通常プレイ中のオーバーレイ非表示時は計測負荷ゼロ）
+ *   - v8.4 の視覚的中央配置レイアウトを維持したまま、重い mix-blend-mode: screen を持つ DOM 側 #warningOverlay の重複描画および毎フレーム style.opacity 書込を廃止し、警告演出を Canvas 側（render.js）へ一本化
+ *   - setWarningEffect() は既存呼び出し元とのインポート互換を維持するため空関数として保持
  * 
  * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、開始説明画面、および安全なUI制御を行うモジュール
  * 
@@ -30,7 +29,6 @@ let elStartCard;
 let elGameOverUI;
 let elGameOverCard;
 let elFinalScore;
-let elWarningOverlay;
 let elRetryBtn;
 
 // オーバーレイ動的中央揃え用 rAF 多重予約デバウンスID
@@ -346,7 +344,7 @@ export function mountDOM() {
     `;
     canvasStage.appendChild(canvas);
 
-    // 5. オーバーレイUIレイヤーの生成（警告エフェクト・開始説明カード・ゲームオーバー画面）
+    // 5. オーバーレイUIレイヤーの生成（開始説明カード・ゲームオーバー画面）
     const uiLayer = document.createElement('div');
     uiLayer.id = 'ui-layer';
     uiLayer.style.cssText = `
@@ -363,9 +361,6 @@ export function mountDOM() {
 
     // Tailwindを使わず、GRAVITY WebKit 規格準拠（backdrop-filter不使用・<div>ボタン・実測高さベースの視覚的中央配置）で安全にUIを構築
     uiLayer.innerHTML = `
-        <!-- 警告表示用オーバーレイ -->
-        <div id="warningOverlay" style="position: absolute; inset: 0; background-color: #ef4444; opacity: 0; pointer-events: none; transition: opacity 100ms; mix-blend-mode: screen; z-index: 0;"></div>
-
         <!-- Start Guide Overlay (初回起動時のみ表示・タイトルなし・簡潔3行説明・オーバーレイ全体タップ開始可・動的縦中央配置) -->
         <div id="startOverlay" style="display: none; pointer-events: auto; background-color: rgba(4, 7, 15, 0.68); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx + 12}px); padding-right: 20px; padding-bottom: 20px; padding-left: 20px; box-sizing: border-box; overflow-y: auto; touch-action: none; overscroll-behavior: none; z-index: 45;">
             <div id="startCard" style="width: 100%; max-width: 340px; flex-shrink: 0; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.65), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.5rem, 3.8vh, 2.1rem) clamp(1.25rem, 5vw, 1.75rem); display: flex; flex-direction: column; align-items: center; text-align: center; margin: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
@@ -431,7 +426,6 @@ export function initUI(onRetryCallback, onToggleSoundCallback = null, onStartCal
     elGameOverUI = document.getElementById('gameOverUI');
     elGameOverCard = document.getElementById('gameOverCard');
     elFinalScore = document.getElementById('finalScore');
-    elWarningOverlay = document.getElementById('warningOverlay');
     elRetryBtn = document.getElementById('retryBtn');
 
     // 初期表示はデフォルト OFF を保証
@@ -614,15 +608,8 @@ export function hideGameOverUI() {
 }
 
 /**
- * 左右のバンパーが押し込まれた際の赤色警告エフェクトの表示/非表示
- * @param {boolean} isActive - 警告エフェクトを有効にするかどうか
+ * 互換維持用（警告演出を Canvas 側 render.js へ一本化したため DOM 操作なし）
  */
-export function setWarningEffect(isActive) {
-    if (!elWarningOverlay) return;
-    
-    if (isActive) {
-        elWarningOverlay.style.opacity = '0.25';
-    } else {
-        elWarningOverlay.style.opacity = '0';
-    }
+export function setWarningEffect() {
+    // 互換維持用（警告演出は Canvas 側へ一本化）
 }

@@ -1,9 +1,11 @@
 /**
  * constants.js
- * @version v8.4 (Downward Power-Shot Drag Limit & Vertical Speed Cap Sync - Phase 1)
+ * @version v8.5 (Velocity-Linked Weight-Offload, Hop Slope Guard, Recatch Sync & Bumper Hold Tuning - Phase 1)
  * @changes
- *   - 下方向ショット時のみ矢印を長く引き伸ばして弱・中・強の明確な操作幅を解放するため、PHYSICS.AIM_MAX_DRAG_DOWN（170）を新設（上半円ホップおよび横軸上限は AIM_MAX_DRAG: 120 を維持）
- *   - 下方向フルパワー着地時の速度頭打ちを防ぎつつ1サブステップ最大移動量 3.00px の裏返り・トンネリング完全安全圏を守るため、PHYSICS.MAX_PARTICLE_VY を 11.0 → 12.0 へ更新
+ *   - 下段定着後の空洞発生時に雪崩・連鎖の落下テンポを回復させる速度連動ウェイト・オフロード用定数 PHYSICS.SETTLED_FALL_SPEED_START（0.45）および PHYSICS.SETTLED_FALL_SPEED_FULL（1.6）を新設
+ *   - 横ショット時の2.5Dホップ誤爆を防止するため FLOAT_BAR.HOP_TRIGGER_SLOPE（0.42 ≒ 上向き約23度）を新設し、予測ドット終端との着地位置ズレを抑えるため FLOAT_BAR.HOP_RECATCH_Y_MIN を 92 → 102 へ更新
+ *   - 合体演出（吸い付き＋膨張）中の理不尽な即死を防ぐため BUMPER.GAME_OVER_HOLD_MS を 250 → 450 へ引き上げ
+ *   - v8.4 の視覚的中央配置移行に伴い未使用となった UI.SAFE_BOTTOM_PX のコメントを互換維持用として整理
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -91,6 +93,8 @@ export const JELLY_CONFIG = {
 export const PHYSICS = {
     GRAVITY_Y: 0.66,              // 空中落下テンポと着地後ウェイト・オフロードを両立する基準重力
     SETTLED_GRAVITY_SCALE: 0.38,  // 着地定着後の荷重伝達カット係数（下段への圧潰荷重を大幅に軽減）
+    SETTLED_FALL_SPEED_START: 0.45, // 空洞落下開始時にウェイト・オフロード解除を始める下向き速度閾値（px/frame）
+    SETTLED_FALL_SPEED_FULL: 1.6,   // 下向き落下がこの速度へ達したら通常重力100%へ完全復帰する速度閾値（px/frame）
     SUBSTEPS: 4,                  // 1フレームあたりの物理サブステップ分割数
     RESTITUTION: 0.12,            // 跳ね返りすぎを抑え、隙間へ押し込む力へ変換する低反発係数
     FRICTION: 0.004,              // 塊と塊の隙間へスルスル潜り込む極低摩擦
@@ -226,6 +230,7 @@ export const FLOAT_BAR = {
 
     // 天井非激突 2.5D 上段飛び越えホップ ＆ セーフ・リキャッチ定数（Matter.js 0.20 px/frame 正規化済）
     HOP_TRIGGER_DY: -16,          // 横狙いショットの誤爆を防ぎつつ上向きドラッグでホップへ切替
+    HOP_TRIGGER_SLOPE: 0.42,      // 横ショット帯のホップ誤爆を遮断する最小上向き勾配（-dy > |dx| * 0.42 ≒ 約23度）
     HOP_FORCE_MULTIPLIER: 0.026,  // 互換維持用
     HOP_MIN_UP_SPEED: 5.80,       // 天井非激突（上昇約47px）を保ち1個〜複数個を確実に飛び越える最小上向き初速（px/frame）
     HOP_MAX_UP_SPEED: 6.55,       // 天井非激突（上昇約60px）を保ち大ジャンプする最大上向き初速（px/frame）
@@ -234,7 +239,7 @@ export const FLOAT_BAR = {
     HOP_MAX_SPEED: 11.5,          // 斜め強ホップの合成速度を切り捨てない最大合成初速（px/frame）
     HOP_GRAVITY_SCALE: 1.92,      // 基準重力（0.66）下で現行と同一のホップ軌道・天井非激突を維持する同期重力倍率
     HOP_MIN_AIR_MS: 160,          // 上昇中に誤リキャッチされないための最小滞空時間（ms）
-    HOP_RECATCH_Y_MIN: 92,        // 下降中にバーへ自動再吸着するY範囲下限
+    HOP_RECATCH_Y_MIN: 102,       // 下降中にバーへ自動再吸着するY範囲下限（予測ドット終端とのズレを抑制）
     HOP_RECATCH_Y_MAX: 138,       // 下降中にバーへ自動再吸着するY範囲上限
     HOP_MAX_AIR_MS: 2200,         // 万が一長時間空中に留まった際の安全タイムアウト（ms）
     HOP_POPUP_MAX_SCALE: 1.14,    // ホップ飛行中に手前へ飛び越える立体感の最大拡大率（+14%）
@@ -260,7 +265,7 @@ export const BUMPER = {
     PUSH_THRESHOLD: 9,            // フレーム側へこの距離以上押し込まれたら赤色(ON)判定（px）
     MAX_PUSH: 15,                 // フレーム側へ押し込める最大距離（px）
     CHAMFER_RADIUS: 7,            // 上下端でゼリーが引っ掛かりにくい角丸面取り半径（px）
-    GAME_OVER_HOLD_MS: 250        // 誤爆ゼロの左右同時押し込み確定時間（ms）
+    GAME_OVER_HOLD_MS: 450        // 合体演出中の理不尽即死と誤爆を防ぐ左右同時押し込み確定時間（ms）
 };
 
 // ==========================================
@@ -293,7 +298,7 @@ export const SCORE = {
 export const UI = {
     SAFE_TOP_HEADER_PX: 52,       // GRAVITYアプリ内上部ネイティブボタン帯回避用ヘッダー高さ
     SAFE_TOP_HEADER_BROWSER_PX: 8,// 通常ブラウザ表示時のコンパクトな上部ヘッダー余白
-    SAFE_BOTTOM_PX: 215,          // GRAVITYネイティブ招待ボタンとの干渉を防ぐための下部余白
+    SAFE_BOTTOM_PX: 215,          // 互換維持用（v8.4 の視覚的中央配置移行により現在未使用）
     CANVAS_MARGIN_X: 6,           // 画面左右の最小余白（px）
     CANVAS_MARGIN_BOTTOM: 8,      // 画面下端の最小余白（px）
     MAX_DPR: 2,                   // Retina高精細描画の上限ピクセル比（負荷対策）
