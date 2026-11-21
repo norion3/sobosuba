@@ -1,12 +1,9 @@
 /**
  * bar_motion.js
- * @version v8.5 (Hop Recatch Sync, Multi-Pass Safe Recatch, Large-Tier Ceiling Guard, Zero-Alloc Buffers & Fallback Sync - Phase 7)
+ * @version v8.6 (Plan B: All-Size Hop Ceiling Guard & v8.6 Fallback Sync - Phase 3)
  * @changes
- *   - updateBarHopState() のリキャッチ開始高度フォールバックを FLOAT_BAR.HOP_RECATCH_Y_MIN（102）へ同期し、予測ドット終端との着地位置ズレを解消
- *   - applySafeRecatchSeparation() を事前確保バッファ使用・最大 3 パス（収束時即終了）の連鎖押し分けへ拡張し、バー上 3〜4 個密集時の異数字めり込みを根絶（同数字は即合体維持）
- *   - 値 64 以上の半カプセル半高が大きいゼリーの天井激突を防止するため、getSafeHopMaxUpSpeed() を追加し launchBarHop() で上向き初速を天井非激突上限へ自動制限
- *   - 毎サブステップ／発射・着地処理内の { x, y } リテラルを事前確保バッファ（tempVec / tempForce / tempClampPoint）へ置換し、GC負荷を削減
- *   - フォールバック値を最新定数へ同期（MAX_PARTICLE_VY: 11.0 → 12.0 / HOP_GRAVITY_SCALE: 2.05 → 1.92 / CHANNEL_HALF_HEIGHT: 22 → 25 / 基準半径: 21.5 → 24.0）
+ *   - getSafeHopMaxUpSpeed() の val < 64 早期リターンを解除し、サイズ拡大後の値 16・32 強ホップも含めて全サイズ共通の数式で天井非激突と予測軌道同期を保証
+ *   - v8.6 確定定数に合わせて基準半径フォールバック値を 24.0 → 25.5、FLOAT_BAR.CHANNEL_HALF_HEIGHT フォールバック値を 25 → 26 へ同期
  * 
  * 上段フロートバー上の横長カプセル幾何、通常発射／2.5D上段飛び越えホップ発射API、
  * 斜め下ショットすり抜け保護、セーフ・リキャッチ、および上段無重力レール制御を担うモジュール
@@ -89,8 +86,8 @@ function setSoftBodyCollisionCategory(comp, category, customMask = null) {
  */
 export function getCapsuleHalfExtentsForValue(value) {
     const config = JELLY_CONFIG[value] || JELLY_CONFIG[32768] || JELLY_CONFIG[16384];
-    const radius = config ? config.radius : 24.0;
-    const channelHalfH = FLOAT_BAR.CHANNEL_HALF_HEIGHT || 25;
+    const radius = config ? config.radius : 25.5;
+    const channelHalfH = FLOAT_BAR.CHANNEL_HALF_HEIGHT || 26;
     const maxHalfW = FLOAT_BAR.CAPSULE_MAX_HALF_WIDTH || 110;
 
     // 面積保存（pi * R^2 = pi * H^2 + 4 * H * L）で高さ2Hに収めた横長カプセルの直線半長Lを算出
@@ -250,10 +247,10 @@ function shiftSoftBody(comp, shiftX, shiftY = 0) {
  */
 export function getSoftBodyHalfExtents(jellyComposite) {
     if (!jellyComposite) {
-        return { halfWidth: 24.0, halfHeight: 24.0 };
+        return { halfWidth: 25.5, halfHeight: 25.5 };
     }
 
-    const r = jellyComposite.targetRadius || 24.0;
+    const r = jellyComposite.targetRadius || 25.5;
     const capW = jellyComposite.capsuleHalfWidth || r;
     const capH = jellyComposite.capsuleHalfHeight || r;
     const blend = (jellyComposite.shapeBlend !== undefined)
@@ -281,8 +278,8 @@ export function getSoftBodyHalfExtents(jellyComposite) {
 }
 
 /**
- * 半カプセル半高が大きいゼリー（値 64 以上）のホップ飛行時に、天井へ激突しない上向き初速上限（px/frame 正値）を算出する
- * （値 32 以下は現行上限 FLOAT_BAR.HOP_MAX_UP_SPEED をそのまま維持し、aim.js の予測軌道と 100% 同期する）
+ * 全サイズ共通のホップ飛行時に、半カプセル半高に応じて天井へ激突しない上向き初速上限（px/frame 正値）を算出する
+ * （aim.js の予測軌道と 100% 同期し、サイズ拡大後の値 16・32 強ホップも含めて天井非激突を保証）
  * @param {Matter.Composite|null} jellyComposite - ホップ対象のゼリーコンポジット
  * @returns {number} 天井非激突の上向き初速上限（px/frame）
  */
@@ -290,10 +287,7 @@ export function getSafeHopMaxUpSpeed(jellyComposite) {
     const defaultMaxUp = (FLOAT_BAR.HOP_MAX_UP_SPEED !== undefined) ? FLOAT_BAR.HOP_MAX_UP_SPEED : 6.55;
     if (!jellyComposite) return defaultMaxUp;
 
-    const val = jellyComposite.jellyValue || 1;
-    if (val < 64) return defaultMaxUp;
-
-    const r = jellyComposite.targetRadius || 24.0;
+    const r = jellyComposite.targetRadius || 25.5;
     const capH = jellyComposite.capsuleHalfHeight || r;
     const halfH = (r + capH) * 0.5;
     const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
@@ -418,7 +412,7 @@ export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -5.80 }) {
 
     const hopX = hopVelocity ? (hopVelocity.x || 0) : 0;
     const rawHopY = hopVelocity ? (hopVelocity.y || 0) : -5.80;
-    // 値 64 以上の半カプセル半高が大きいゼリーの上向き初速を天井非激突上限へ自動制限
+    // 全サイズ共通で半カプセル半高に応じた天井非激突上限へ上向き初速を自動制限
     const safeMaxUpSpeed = getSafeHopMaxUpSpeed(jellyComposite);
     const hopY = (rawHopY < -safeMaxUpSpeed) ? -safeMaxUpSpeed : rawHopY;
     const inheritVx = (FLOAT_BAR.HOP_INHERIT_VX !== undefined) ? FLOAT_BAR.HOP_INHERIT_VX : 0.2;
@@ -512,7 +506,7 @@ function applySafeRecatchSeparation(comp, composites, hopDirX = 0) {
 
     const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
     const padX = Math.max(frameW + 4, FLOAT_BAR.PADDING_X || 26);
-    const compHalfW = comp.capsuleHalfWidth || comp.targetRadius || 24.0;
+    const compHalfW = comp.capsuleHalfWidth || comp.targetRadius || 25.5;
     const minCenterX = padX + compHalfW;
     const maxCenterX = GAME_WIDTH - padX - compHalfW;
     const initialForwardDir = (hopDirX > 0.05) ? 1 : ((hopDirX < -0.05) ? -1 : 0);
@@ -542,7 +536,7 @@ function applySafeRecatchSeparation(comp, composites, hopDirX = 0) {
             // 同数字は押し分けず、そのまま接触させて上段即合体を成立させる
             if (other.jellyValue === comp.jellyValue) continue;
 
-            const otherHalfW = other.capsuleHalfWidth || other.targetRadius || 24.0;
+            const otherHalfW = other.capsuleHalfWidth || other.targetRadius || 25.5;
             const requiredDist = compHalfW + otherHalfW + 2;
             const dx = other.centroid.x - comp.centroid.x;
             const absDx = Math.abs(dx);
@@ -618,7 +612,7 @@ function applySafeRecatchSeparation(comp, composites, hopDirX = 0) {
         for (let i = 0; i < floatingCount; i++) {
             const a = recatchFloatingBuffer[i];
             if (a === comp) continue;
-            const halfWA = a.capsuleHalfWidth || a.targetRadius || 24.0;
+            const halfWA = a.capsuleHalfWidth || a.targetRadius || 25.5;
             const minXA = padX + halfWA;
             const maxXA = GAME_WIDTH - padX - halfWA;
 
@@ -628,7 +622,7 @@ function applySafeRecatchSeparation(comp, composites, hopDirX = 0) {
                 // 同数字同士は押し分けず即合体を維持
                 if (a.jellyValue === b.jellyValue) continue;
 
-                const halfWB = b.capsuleHalfWidth || b.targetRadius || 24.0;
+                const halfWB = b.capsuleHalfWidth || b.targetRadius || 25.5;
                 const requiredDist = halfWA + halfWB + 2;
                 const dx = b.centroid.x - a.centroid.x;
                 const absDx = Math.abs(dx);
@@ -680,7 +674,7 @@ function ensureSafeHopLandingAltitude(comp, composites) {
     if (!comp || !comp.centroid || !comp.aabb) return;
 
     const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
-    const compHalfH = comp.capsuleHalfHeight || comp.targetRadius || 24.0;
+    const compHalfH = comp.capsuleHalfHeight || comp.targetRadius || 25.5;
     const minSafeCenterY = topBarH + compHalfH + 2;
     const rA = comp.particleRadius || 4;
     const aA = comp.aabb;
@@ -811,14 +805,14 @@ export function applyFloatBarControl(comp, cx, cy, gravityY, gravityScale, stepD
     const centerX = GAME_WIDTH / 2;
     const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
     const safePadX = Math.max(frameW + 4, FLOAT_BAR.PADDING_X || 26);
-    const halfWidth = comp.capsuleHalfWidth || comp.targetRadius || 24.0;
+    const halfWidth = comp.capsuleHalfWidth || comp.targetRadius || 25.5;
     const barMinX = safePadX + halfWidth;
     const barMaxX = GAME_WIDTH - safePadX - halfWidth;
     const packForce = FLOAT_BAR.PACK_FORCE || 0.00005;
     const curScale = comp.currentGrowScale || 1.0;
 
     // 上下フラット帯（CHANNEL_HALF_HEIGHT）への圧縮フック設定
-    const capRingHalfH = (comp.capsuleRingHalfHeight || Math.max(4, (FLOAT_BAR.CHANNEL_HALF_HEIGHT || 25) - (comp.particleRadius || 4))) * curScale;
+    const capRingHalfH = (comp.capsuleRingHalfHeight || Math.max(4, (FLOAT_BAR.CHANNEL_HALF_HEIGHT || 26) - (comp.particleRadius || 4))) * curScale;
     const channelTopY = targetY - capRingHalfH;
     const channelBottomY = targetY + capRingHalfH;
     const compStiff = (FLOAT_BAR.CHANNEL_COMPRESSION_STIFFNESS !== undefined) ? FLOAT_BAR.CHANNEL_COMPRESSION_STIFFNESS : 0.055;

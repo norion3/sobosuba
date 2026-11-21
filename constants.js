@@ -1,11 +1,11 @@
 /**
  * constants.js
- * @version v8.5 (Velocity-Linked Weight-Offload, Hop Slope Guard, Recatch Sync & Bumper Hold Tuning - Phase 1)
+ * @version v8.6 (Plan B: +6% Size Scaling, Settled Vertical Stretch Constants & Upper Channel Sync - Phase 1)
  * @changes
- *   - 下段定着後の空洞発生時に雪崩・連鎖の落下テンポを回復させる速度連動ウェイト・オフロード用定数 PHYSICS.SETTLED_FALL_SPEED_START（0.45）および PHYSICS.SETTLED_FALL_SPEED_FULL（1.6）を新設
- *   - 横ショット時の2.5Dホップ誤爆を防止するため FLOAT_BAR.HOP_TRIGGER_SLOPE（0.42 ≒ 上向き約23度）を新設し、予測ドット終端との着地位置ズレを抑えるため FLOAT_BAR.HOP_RECATCH_Y_MIN を 92 → 102 へ更新
- *   - 合体演出（吸い付き＋膨張）中の理不尽な即死を防ぐため BUMPER.GAME_OVER_HOLD_MS を 250 → 450 へ引き上げ
- *   - v8.4 の視覚的中央配置移行に伴い未使用となった UI.SAFE_BOTTOM_PX のコメントを互換維持用として整理
+ *   - 難易度を少し引き上げるため JELLY_CONFIG 全16ティアの半径を約 +6%（面積 +12.4%）拡大（1: 25.5 〜 32768: 176.0）
+ *   - 小〜中塊耐圧ブースト基準半径 PHYSICS.SMALL_BOOST_REF_RADIUS を新 128 半径に合わせて 58.5 → 62.0 へ同期
+ *   - 上段バー上の 1（半径 25.5）真円維持および終盤横幅余裕確保のため FLOAT_BAR.CHANNEL_HALF_HEIGHT を 25 → 26 へ同期
+ *   - 下段で動きが落ち着いた塊のみ自然に縦方向へ伸びる静止時縦ストレッチ力場定数（PHYSICS.SETTLE_STRETCH_SPEED_THRESHOLD / SETTLE_STRETCH_RESET_SPEED / SETTLE_STRETCH_DELAY_MS / SETTLE_STRETCH_RAMP_MS / SETTLE_STRETCH_TARGET_ASPECT / SETTLE_STRETCH_ASPECT_SPAN / SETTLE_STRETCH_FORCE_Y / SETTLE_STRETCH_FORCE_X_RATIO）を新設
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -66,25 +66,25 @@ export const COLOR_THEMES = {
 
 export const ACTIVE_THEME = COLOR_THEMES.default;
 
-// 内幅404px（外枠8px考慮）へ最適化したサイズ成長カーブ（空間回収率 34.4%〜36.5% 統一）
+// 内幅404px（外枠8px考慮）へ最適化したサイズ成長カーブ（案B: 半径約+6%拡大・空間回収率 34.1%〜37.2% 統一）
 // 細密ビーズ数（16〜30個）により角丸多角形への液体的な追従性を高める
 export const JELLY_CONFIG = {
-    1:     { color: ACTIVE_THEME.colors[1],     radius: 24.0,  text: ACTIVE_THEME.text, particles: 16 },
-    2:     { color: ACTIVE_THEME.colors[2],     radius: 27.5,  text: ACTIVE_THEME.text, particles: 16 },
-    4:     { color: ACTIVE_THEME.colors[4],     radius: 31.0,  text: ACTIVE_THEME.text, particles: 18 },
-    8:     { color: ACTIVE_THEME.colors[8],     radius: 35.0,  text: ACTIVE_THEME.text, particles: 18 },
-    16:    { color: ACTIVE_THEME.colors[16],    radius: 39.5,  text: ACTIVE_THEME.text, particles: 20 },
-    32:    { color: ACTIVE_THEME.colors[32],    radius: 45.0,  text: ACTIVE_THEME.text, particles: 20 },
-    64:    { color: ACTIVE_THEME.colors[64],    radius: 51.5,  text: ACTIVE_THEME.text, particles: 22 },
-    128:   { color: ACTIVE_THEME.colors[128],   radius: 58.5,  text: ACTIVE_THEME.text, particles: 22 },
-    256:   { color: ACTIVE_THEME.colors[256],   radius: 67.0,  text: ACTIVE_THEME.text, particles: 24 },
-    512:   { color: ACTIVE_THEME.colors[512],   radius: 76.5,  text: ACTIVE_THEME.text, particles: 24 },
-    1024:  { color: ACTIVE_THEME.colors[1024],  radius: 87.5,  text: ACTIVE_THEME.text, particles: 26 },
-    2048:  { color: ACTIVE_THEME.colors[2048],  radius: 100.0, text: ACTIVE_THEME.text, particles: 26 },
-    4096:  { color: ACTIVE_THEME.colors[4096],  radius: 114.0, text: ACTIVE_THEME.text, particles: 28 },
-    8192:  { color: ACTIVE_THEME.colors[8192],  radius: 130.0, text: ACTIVE_THEME.text, particles: 28 },
-    16384: { color: ACTIVE_THEME.colors[16384], radius: 148.0, text: ACTIVE_THEME.text, particles: 30 },
-    32768: { color: ACTIVE_THEME.colors[32768], radius: 166.0, text: ACTIVE_THEME.text, particles: 30 }
+    1:     { color: ACTIVE_THEME.colors[1],     radius: 25.5,  text: ACTIVE_THEME.text, particles: 16 },
+    2:     { color: ACTIVE_THEME.colors[2],     radius: 29.0,  text: ACTIVE_THEME.text, particles: 16 },
+    4:     { color: ACTIVE_THEME.colors[4],     radius: 33.0,  text: ACTIVE_THEME.text, particles: 18 },
+    8:     { color: ACTIVE_THEME.colors[8],     radius: 37.0,  text: ACTIVE_THEME.text, particles: 18 },
+    16:    { color: ACTIVE_THEME.colors[16],    radius: 42.0,  text: ACTIVE_THEME.text, particles: 20 },
+    32:    { color: ACTIVE_THEME.colors[32],    radius: 47.5,  text: ACTIVE_THEME.text, particles: 20 },
+    64:    { color: ACTIVE_THEME.colors[64],    radius: 54.5,  text: ACTIVE_THEME.text, particles: 22 },
+    128:   { color: ACTIVE_THEME.colors[128],   radius: 62.0,  text: ACTIVE_THEME.text, particles: 22 },
+    256:   { color: ACTIVE_THEME.colors[256],   radius: 71.0,  text: ACTIVE_THEME.text, particles: 24 },
+    512:   { color: ACTIVE_THEME.colors[512],   radius: 81.0,  text: ACTIVE_THEME.text, particles: 24 },
+    1024:  { color: ACTIVE_THEME.colors[1024],  radius: 93.0,  text: ACTIVE_THEME.text, particles: 26 },
+    2048:  { color: ACTIVE_THEME.colors[2048],  radius: 106.0, text: ACTIVE_THEME.text, particles: 26 },
+    4096:  { color: ACTIVE_THEME.colors[4096],  radius: 121.0, text: ACTIVE_THEME.text, particles: 28 },
+    8192:  { color: ACTIVE_THEME.colors[8192],  radius: 138.0, text: ACTIVE_THEME.text, particles: 28 },
+    16384: { color: ACTIVE_THEME.colors[16384], radius: 157.0, text: ACTIVE_THEME.text, particles: 30 },
+    32768: { color: ACTIVE_THEME.colors[32768], radius: 176.0, text: ACTIVE_THEME.text, particles: 30 }
 };
 
 // ==========================================
@@ -102,7 +102,7 @@ export const PHYSICS = {
     FRICTION_AIR: 0.0012,         // 極低空気抵抗（SUBSTEPS=4 での4重失速を防ぎ一直線弾道＆揺れを維持）
 
     // 隙間ゼロ高密度・細密中空ビーズリング（柔軟性＋質量スケーリング）
-    DENSITY_PARTICLE: 0.0012,     // 基準半径（24.0px）における外周ビーズ剛体の密度
+    DENSITY_PARTICLE: 0.0012,     // 基準半径（25.5px）における外周ビーズ剛体の密度
     DENSITY_SCALE_EXP: 1.45,      // サイズ間の1ビーズ質量を均等化し、大塊による小塊圧潰を防ぐ密度スケーリング指数
     BEAD_RADIUS_RATIO: 0.18,      // 全体半径に対する細密外周ビーズ半径の基準比率
     BEAD_MIN_OVERLAP_RATIO: 1.35, // 隣接ビーズ直径 >= 1.35 * 辺長 を保証する隙間ゼロ比率
@@ -146,12 +146,22 @@ export const PHYSICS = {
     HORIZ_RESTORE_SCALE: 0.40,    // 下段横方向の復元力緩和倍率（極限自己交差だけ防ぎ自然な縦立ち上がりを許容）
 
     // 小〜中塊（1〜64）下段定着限定・連続耐圧補強定数（128以上および上段フロートバーは加算0）
-    SMALL_BOOST_REF_RADIUS: 58.5,    // ブースト減衰の基準半径（128以上で係数0.0）
+    SMALL_BOOST_REF_RADIUS: 62.0,    // ブースト減衰の基準半径（新128以上で係数0.0）
     SMALL_SKIN_BOOST: 0.065,         // 最小塊（1）下段定着時の皮剛性加算量
     SMALL_BEND_BOOST: 0.095,         // 最小塊（1）下段定着時の曲げ剛性加算量（荷重軽減に合わせ柔らかさとぷっくり感を両立）
     SMALL_PRESSURE_MULT: 1.02,       // 最小塊（1）下段定着時の内圧・体積粘性倍率
     SMALL_RESTORE_MULT: 2.0,         // 最小塊（1）下段定着時の最小距離復元力倍率（荷重軽減に合わせ微緩和）
     SMALL_MIN_DIST_RATIO_BOOST: 0.050,// 最小塊（1）下段定着時の最小距離比率加算量
+
+    // 静止時縦ストレッチ力場定数（下段定着後に動きが落ち着いた塊のみ自然に縦長へ伸びる・3ゾーン速度制御）
+    SETTLE_STRETCH_SPEED_THRESHOLD: 0.75, // 落ち着き加算の重心速度上限（px/frame）
+    SETTLE_STRETCH_RESET_SPEED: 1.35,     // 4倍速解除を発動する衝撃・移動速度閾値（px/frame）
+    SETTLE_STRETCH_DELAY_MS: 180,         // 着地・衝突の余韻を保護するディレイ時間（ms）
+    SETTLE_STRETCH_RAMP_MS: 750,          // Smoothstep で滑らかに立ち上がる時間（ms）
+    SETTLE_STRETCH_TARGET_ASPECT: 1.26,   // 目標外縁縦横比（到達で自動停止）
+    SETTLE_STRETCH_ASPECT_SPAN: 0.26,     // 目標縦横比へのフィードバックランプ幅
+    SETTLE_STRETCH_FORCE_Y: 0.00150,      // 縦方向ストレッチ力係数
+    SETTLE_STRETCH_FORCE_X_RATIO: 0.45,   // 横方向引き締め比率（縦力係数に対する比）
 
     // 周囲連動揺れ解放 ＆ 遅延適応的圧迫ダンピング（一定期間動き続けた後にピタッと静寂化）
     SETTLE_SPEED_THRESHOLD: 0.28, // 全体静止とみなす重心速度閾値（px/frame）
@@ -218,7 +228,7 @@ export const FLOAT_BAR = {
     LAUNCH_GRACE_MIN_SLOPE: 0.22, // 真横当てバー上合体を保護する最小下向き勾配（dy >= 0.22 * |dx|）
 
     // 上段「横長カプセル（ピル）形状」圧縮 ＆ 発射／着地モーフィング定数
-    CHANNEL_HALF_HEIGHT: 25,      // 1(24.0px)が丸く収まり4〜64が横長に伸びるフラット帯半高
+    CHANNEL_HALF_HEIGHT: 26,      // 1(25.5px)が真円のまま収まり4〜64が横長に伸びるフラット帯半高
     CHANNEL_COMPRESSION_STIFFNESS: 0.055, // 定規のような直線を避け、丸みとたわみのある液体感を残す圧縮強度
     CAPSULE_MAX_HALF_WIDTH: 110,  // 上段カプセルの最大半幅上限（px）
     MORPH_DURATION_MS: 160,       // 発射時の「変身の間」（横長カプセル→円形リング復元時間・ms）
