@@ -1,10 +1,10 @@
 /**
  * sound.js
- * @version v8.5 (Suspended Playback Guard, Grace Recovery Fix & Size-Harmonized Chain Pitch - Phase 2)
+ * @version v8.8 (Plan 2 Collide Sound Refinement: Pentatonic Harmony, Density & Post-Merge Ducking - Phase 2)
  * @changes
- *   - getPlayableAudio() で audioCtx.state !== 'running'（suspended / interrupted 等）の場合は必ず null を返すよう修正し、停止中コンテキストへの発音ノード蓄積・リークおよび復帰時爆音を遮断
- *   - getPlayableAudio() の suspended / interrupted 検知へコンテキスト生成直後 300ms のグレース期間ガードを追加し、復帰後 touchstart → touchend 間の誤リカバリ再点灯による再破棄ループ・発射音ブツ切りを根治
- *   - playSoundMerge() の連鎖基準周波数を現在合体サイズ基準周波数（70%）と前連鎖基準（30%）の調和ブレンドへ更新し、大塊と小塊が別箇所で連続合体した際の音程違和感を解消
+ *   - 下段の揺れ衝突音の連続発火密度を抑えるため COLLIDE_THROTTLE_MS を 55 → 120 へ調整
+ *   - 合体音と美しく協和する5音階定数 COLLIDE_PENTATONIC_FREQS（G4 / E4 / D4 / C4 / A3）および連続揺れ密度状態変数 collideDensity（hardResetAudioContext() でのリセット含む）を追加
+ *   - playSoundCollide() へ lastMergeScheduledTime > 0 ガード付き合体直後ダッキング、dtMs 先行計測による連続揺れ指数減衰密度ダッキング、非線形音量カーブ、非線形5音階マッピング、および丸みのあるスイープ（0.90f → 1.00f / 12ms アタック / 70〜105ms 減衰）を適用
  * 
  * Web Audio APIを使用した軽量プロシージャル癒し水音サウンドモジュール
  * 
@@ -40,18 +40,22 @@ let audioCtxCreatedAtMs = 0;
 let lastClockWallMs = 0;
 let lastClockAudioTime = -1;
 
-// 各種スロットリング・連鎖和声・同時合体アルペジオ状態管理
+// 各種スロットリング・連鎖和声・同時合体アルペジオ・連続衝突密度状態管理
 let lastCollideSoundTime = 0;
+let collideDensity = 0;
 let lastAnticipateSoundTime = 0;
 let lastSelectSoundTime = 0;
 let lastMergeScheduledTime = 0;
 let chainBaseFreq = 400;
 
-const COLLIDE_THROTTLE_MS = 55;
+const COLLIDE_THROTTLE_MS = 120;
 const ANTICIPATE_THROTTLE_MS = 35;
 const SELECT_THROTTLE_MS = 40;
 const RECOVERY_COOLDOWN_MS = 250;
 const MASTER_GAIN_LEVEL = 0.92;
+
+// 下段衝突音用の温かいペンタトニック5音階（小塊→大塊：G4 / E4 / D4 / C4 / A3）
+const COLLIDE_PENTATONIC_FREQS = [392.00, 329.63, 293.66, 261.63, 220.00];
 
 // 1〜7連は純正ペンタトニック上昇、8連以降は温かい水琴窟和音帯を波のように優しく往復
 const PENTATONIC_RISE_SEMITONES = [0, 2, 4, 7, 9, 12, 14];
@@ -592,6 +596,7 @@ export function hardResetAudioContext(playConfirm = true) {
         lastClockWallMs = 0;
         lastClockAudioTime = -1;
         lastCollideSoundTime = 0;
+        collideDensity = 0;
         lastAnticipateSoundTime = 0;
         lastSelectSoundTime = 0;
         lastMergeScheduledTime = 0;
@@ -924,8 +929,8 @@ export function playSoundHop() {
 }
 
 /**
- * 接触音（異数字衝突・高速壁/床着地時の静かで耳に優しい水滴音「ぽちゃ」「ころん」「こぽっ」）
- * 連続落下時にも邪魔にならない 440〜230Hz 帯域・7ms 丸アタック・55ms 間引き・ノイズなし純水滴構成
+ * 接触音（異数字衝突・高速壁/床着地時の静かで安らげるペンタトニック水球触れ合い音「とぷん」「こぷ」）
+ * 120ms 間引き・連続揺れ指数減衰密度ダッキング・合体直後ダッキング・5音階協和・12ms 丸アタック・ノイズなし純水滴構成
  * @param {number} [intensity=0.5] - 衝突の強さ（0.0 〜 1.0）
  * @param {number} [jellyValue=4] - 衝突したゼリーの数値（小さいほど高音、大きいほど低音）
  */
@@ -933,31 +938,55 @@ export function playSoundCollide(intensity = 0.5, jellyValue = 4) {
     const audio = getPlayableAudio();
     if (!audio || intensity < 0.1) return;
 
-    // 55ms 以内の連続発火を制限し、連続落下や大合体衝撃波時の同時衝突スパイクを防止
+    // 120ms 以内の連続発火を制限し、下段揺れや衝撃波時の過密連打を防止
     const nowMs = performance.now();
-    if (nowMs - lastCollideSoundTime < COLLIDE_THROTTLE_MS) return;
+    if (lastCollideSoundTime > 0 && (nowMs - lastCollideSoundTime) < COLLIDE_THROTTLE_MS) return;
+
+    // dtMs を先行計測してからタイムスタンプを更新し、連続揺れ密度を指数減衰（時定数 450ms）で追跡
+    const dtMs = (lastCollideSoundTime > 0) ? Math.max(0, nowMs - lastCollideSoundTime) : 10000;
     lastCollideSoundTime = nowMs;
+    collideDensity = collideDensity * Math.exp(-dtMs / 450) + 1;
+    const densityDuck = Math.max(0.45, 1 / (1 + (collideDensity - 1) * 0.35));
 
     const { ctx, graph } = audio;
     const now = ctx.currentTime;
     const clampedIntensity = clamp(Number(intensity) || 0.5, 0.1, 1.0);
     const sizeNorm = getAnySizeNorm(jellyValue); // 0.0(最小) 〜 1.0(最大)
-    const j = pitchJitter(0.015);
+    const j = pitchJitter(0.008);
 
-    // サイズ帯域 440Hz（小）〜 230Hz（大）：0.86f → 1.12f へ 20〜28ms 穏やかに上がり、62〜92ms で静かに消える
-    const baseFreq = (440 - sizeNorm * 210) * j;
-    const sweepDur = 0.020 + sizeNorm * 0.008;
-    const totalDur = 0.062 + sizeNorm * 0.030;
+    // 合体直後・同時合体アルペジオ中のダッキング（起動直後の誤ダッキング防止のため lastMergeScheduledTime > 0 をガード）
+    let mergeDuck = 1.0;
+    if (lastMergeScheduledTime > 0) {
+        const dtMerge = now - lastMergeScheduledTime;
+        if (dtMerge < 0.320) {
+            if (dtMerge <= 0.160) {
+                mergeDuck = 0.35;
+            } else {
+                mergeDuck = 0.35 + ((dtMerge - 0.160) / 0.160) * 0.65;
+            }
+        }
+    }
+
+    // 非線形マッピングでペンタトニック5音階（G4 / E4 / D4 / C4 / A3）へ分配し、0.90f → 1.00f へ穏やかに着地させる
+    const noteIndex = Math.min(
+        COLLIDE_PENTATONIC_FREQS.length - 1,
+        Math.floor(Math.pow(sizeNorm, 0.72) * COLLIDE_PENTATONIC_FREQS.length)
+    );
+    const targetFreq = COLLIDE_PENTATONIC_FREQS[noteIndex] * j;
+    const sweepDur = 0.022 + sizeNorm * 0.008;
+    const totalDur = 0.070 + sizeNorm * 0.035;
 
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(baseFreq * 0.86, now);
-    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.12, now + sweepDur);
+    osc.frequency.setValueAtTime(targetFreq * 0.90, now);
+    osc.frequency.exponentialRampToValueAtTime(targetFreq, now + sweepDur);
 
-    const peakGain = 0.045 + clampedIntensity * 0.075; // 0.045 〜 0.12 の耳に優しい控えめバランス
+    // 非線形音量カーブ（弱接触をさざ波レベルへ落としつつ、しっかりした着地は心地よく残す）
+    const baseGain = 0.018 + Math.pow(clampedIntensity, 1.5) * 0.072;
+    const peakGain = Math.max(0.0002, baseGain * densityDuck * mergeDuck);
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(peakGain, now + 0.007);
+    gain.gain.linearRampToValueAtTime(peakGain, now + 0.012);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + totalDur);
 
     osc.connect(gain);

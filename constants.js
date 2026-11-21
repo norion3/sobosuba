@@ -1,9 +1,8 @@
 /**
  * constants.js
- * @version v8.7 (Plan 2 Adjusted: Bumper Sensitivity & Critical Damping Sync - Phase 1)
+ * @version v8.8 (Plan 2 Collide Sound Refinement: Threshold & Pair Cooldown Tuning - Phase 1)
  * @changes
- *   - ゼリーの形・動きを維持したまま積み上げ側圧でバンパーが自然に押し込まれるよう、PHYSICS.BUMPER_STIFFNESS を 0.0040 → 0.0026、PHYSICS.BUMPER_DAMPING を 0.08 → 0.065（臨界減衰比 0.901 を維持）、PHYSICS.BUMPER_DENSITY を 0.0026 → 0.0022 へ調整
- *   - バンパーの赤点灯（ON）判定および配置高さを適切化するため、BUMPER.PUSH_THRESHOLD を 9 → 7.5、BUMPER.Y_RATIO を 0.30 → 0.32（y=224）へ調整
+ *   - 下段の揺れによる細かな接触音の過剰発火を抑えつつ心地よい着地・衝突音を残すため、PHYSICS.COLLIDE_SOUND_MIN_SPEED を 0.65 → 0.90、PHYSICS.COLLIDE_SOUND_PAIR_COOLDOWN_MS を 450 → 650 へ調整
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -197,9 +196,9 @@ export const PHYSICS = {
     // 合体時膨張インパルス ＆ 重心法線接近速度ベースの衝突音閾値
     MERGE_RADIAL_IMPULSE: 0.86,          // 定着重力（0.251）下でも浮き上がりを防ぎ心地よい波紋を伝える合体インパルス（px/frame）
     MERGE_RADIAL_FORCE: 0.012,           // 互換用
-    COLLIDE_SOUND_MIN_SPEED: 0.65,       // 衝突音を鳴らす最小重心法線接近速度（px/frame）
+    COLLIDE_SOUND_MIN_SPEED: 0.90,       // 下段の細かな揺れ衝突音を抑制する最小重心法線接近速度（px/frame）
     COLLIDE_SOUND_MAX_SPEED: 3.0,        // 衝突音最大強度となる相対速度（px/frame）
-    COLLIDE_SOUND_PAIR_COOLDOWN_MS: 450  // 同一ゼリーペア間の衝突音連打を防ぐクールダウン（ms）
+    COLLIDE_SOUND_PAIR_COOLDOWN_MS: 650  // 同一ゼリーペア間の衝突音連打を防ぐクールダウン（ms）
 };
 
 // ==========================================
