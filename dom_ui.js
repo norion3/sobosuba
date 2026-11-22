@@ -1,9 +1,9 @@
 /**
  * dom_ui.js
- * @version v8.12 (Start Card 4-Line Equal-Style Guide & Single-Line Width Fit - Phase 4)
+ * @version v8.13 (Larger Top HUD Score Digits & Balanced Header Spacing - Phase 1)
  * @changes
- *   - 開始カード #startCard の本文を既存と同等スタイルの並列 4 行構成へ更新し、2 行目へ「長く引くと強ショット・戻すとキャンセル」を追加
- *   - 19 文字化による iPhone Pro Max / PC 幅での末尾 1 文字折り返しを防ぐため、#startCard の左右パディング（clamp(1.1rem, 4.5vw, 1.45rem)）および本文フォントサイズ（clamp(0.80rem, 3.35vw, 0.88rem)）を微調整
+ *   - 上部 HUD の得点数字（#scoreDisplay）をはみ出し・音量ボタン干渉ゼロで大きく見やすくするため、font-size: clamp(1.85rem, 7.8vw, 2.05rem)、font-weight: 800、line-height: 1、letter-spacing: 0.02em、font-variant-numeric: tabular-nums へ更新
+ *   - 拡大した得点数字と左端の音量ボタン・盤面上枠との配置バランスを整えるため、#topHudHeader の padding-bottom を 4px → 6px、#topHudInnerRow の min-height を 30px → 34px、#topScoreWrapper の gap / padding を 8px・2px 14px → 7px・0 10px、Score ラベルへ font-weight: 700 を明示、syncOverlayVerticalLayout() のヘッダー高さフォールバックを + 36 → + 42 へ同期
  * 
  * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、開始説明画面、および安全なUI制御を行うモジュール
  * 
@@ -105,7 +105,7 @@ function syncOverlayVerticalLayout() {
     if (!Number.isFinite(containerH) || containerH <= 0) return;
 
     // 1. 上部ヘッダー下端（#game-container 上端基準）を実測
-    let headerBottom = getOptimalTopHeaderPaddingPx() + 36;
+    let headerBottom = getOptimalTopHeaderPaddingPx() + 42;
     if (elTopHudHeader) {
         const headerRect = elTopHudHeader.getBoundingClientRect();
         if (headerRect.height > 0) {
@@ -293,7 +293,7 @@ export function mountDOM() {
         justify-content: center;
         align-items: center;
         padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx}px);
-        padding-bottom: 4px;
+        padding-bottom: 6px;
         padding-left: 16px;
         padding-right: 16px;
         box-sizing: border-box;
@@ -301,7 +301,7 @@ export function mountDOM() {
         z-index: 60;
     `;
     topHudHeader.innerHTML = `
-        <div id="topHudInnerRow" style="position: relative; width: 100%; max-width: 420px; min-height: 30px; display: flex; justify-content: center; align-items: center; pointer-events: none;">
+        <div id="topHudInnerRow" style="position: relative; width: 100%; max-width: 420px; min-height: 34px; display: flex; justify-content: center; align-items: center; pointer-events: none;">
             <!-- GRAVITY規格: <div> タグによる絵文字不使用のインラインSVG音量ON/OFFボタン（初期OFF・左端非干渉配置） -->
             <div id="soundToggleBtn" role="button" aria-label="音量切り替え" aria-pressed="false" style="position: absolute; left: 0; top: 50%; transform: translateY(-50%); pointer-events: auto; display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 26px; padding: 3px 9px; border-radius: 9999px; border: 1px solid rgba(255, 255, 255, 0.16); background-color: rgba(255, 255, 255, 0.06); color: #9ca3af; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.06em; line-height: 1; cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: manipulation; box-sizing: border-box;">
                 <span id="soundToggleIcon" style="display: inline-flex; align-items: center; justify-content: center; pointer-events: none;">${SVG_SPEAKER_OFF}</span>
@@ -309,9 +309,9 @@ export function mountDOM() {
             </div>
 
             <!-- 絶対中央維持スコア表示（ゲームオーバー表示時は非表示にして中央カードスコアを主役化） -->
-            <div id="topScoreWrapper" style="display: inline-flex; flex-direction: row; align-items: baseline; justify-content: center; gap: 8px; padding: 2px 14px; color: white; font-weight: bold; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); pointer-events: none; transition: opacity 160ms ease;">
-                <span style="font-size: 0.7rem; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.1em; line-height: 1;">Score</span>
-                <span id="scoreDisplay" style="font-feature-settings: 'tnum'; font-size: 1.4rem; line-height: 1.1; color: #60a5fa;">0</span>
+            <div id="topScoreWrapper" style="display: inline-flex; flex-direction: row; align-items: baseline; justify-content: center; gap: 7px; padding: 0 10px; color: white; font-weight: bold; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); pointer-events: none; transition: opacity 160ms ease;">
+                <span style="font-size: 0.7rem; font-weight: 700; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.1em; line-height: 1;">Score</span>
+                <span id="scoreDisplay" style="font-feature-settings: 'tnum'; font-variant-numeric: tabular-nums; font-size: clamp(1.85rem, 7.8vw, 2.05rem); font-weight: 800; line-height: 1; letter-spacing: 0.02em; color: #60a5fa;">0</span>
             </div>
         </div>
     `;
