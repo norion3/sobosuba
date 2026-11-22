@@ -1,10 +1,10 @@
 /**
  * render.js
- * @version v8.5 (Hop Aim Flag Sync, Arrow/Dot Dark Outline & Font Cache / Scale Save-Restore Optimization - Phase 9)
+ * @version v8.9 (Dual-Bumper Warning Distinction, 3-Frame Relative-Offset Inscribed Circle Cache & v8.6 Fallback Sync - Phase 4)
  * @changes
- *   - drawAimAndHopGuide() のホップ判定を gameState.isHopAim に一本化し、aim.js の角度勾配付きホップ条件と完全一致させた
- *   - 同色ゼリー上での同化を防ぐため、通常矢印（弱〜中・下方向パワー帯）・起点リング・ホップ矢印・ホップ予測ドットおよび着地リングに細い半透明黒縁取り（rgba(0, 0, 0, 0.72)）を先行描画するよう追加
- *   - 描画負荷軽減のため、ゼリー数字のフォントサイズを 0.5px 刻みで量子化して生成済みフォント文字列をキャッシュ参照するヘルパー getCachedFontString() を導入し、通常ゼリー（scale === 1.0）における不要な ctx.save / translate / scale / restore を省略
+ *   - drawWarningOverlay() を片側押込（穏やかな点滅：最大 0.075）と両側同時押込（切迫感のある高速点滅：最大 0.22）で差別化し、ゲームオーバー寸前の視認性を向上
+ *   - drawSingleSoftBody() の最大内接円探索へ重心相対オフセットキャッシュ（_cachedTextOffsetX / _cachedTextOffsetY / _cachedTextThickness）と 3 フレーム均等分散間引きを導入し、高速落下時の追従ズレ 0px のまま終盤密集時の描画 CPU 負荷を削減
+ *   - v8.6 定数に合わせてフォールバック値を同期（FLOAT_BAR.CHANNEL_HALF_HEIGHT: 25 → 26 / 基準半径: 21.5 → 25.5）
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -667,89 +667,114 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false,
 
     // 上段待機・ホップ中は横長カプセルでの誤移動を防ぐため探索をスキップし重心中央を維持
     // 下段ゼリー限定で重心がポリゴン外、または重心付近が狭い（< 0.58 * equivalentRadius）場合に最大内接円中心を探索
+    // 重心相対オフセットをキャッシュして 3 フレーム均等分散間引きすることで高速落下時の追従ズレ 0px と終盤負荷削減を両立
     if (!comp.isFloating && !isHopping) {
-        const centroidInside = isPointInsidePolygon(cx, cy, smoothedPointsBuffer, n);
-        const centroidClearanceSq = centroidInside
-            ? computeMinEdgeDistSq(cx, cy, smoothedPointsBuffer, n)
-            : 0;
-        const narrowThresh = equivalentRadius * 0.58;
+        const safeCompIdx = (compIndex >= 0) ? compIndex : 0;
+        const frameCount = (gameState && gameState.frameCount) ? gameState.frameCount : 0;
+        const shouldRefreshTextSearch = (comp._cachedTextOffsetX === undefined) ||
+            (((frameCount + safeCompIdx) % 3) === 0);
 
-        if (!centroidInside || centroidClearanceSq < narrowThresh * narrowThresh) {
-            const halfN = Math.floor(n / 2);
-            let bestX = cx;
-            let bestY = cy;
-            let bestClearSq = -1;
-            let bestCentDistSq = Infinity;
-            let foundInside = false;
+        if (shouldRefreshTextSearch) {
+            let cachedThickness = -1;
+            const centroidInside = isPointInsidePolygon(cx, cy, smoothedPointsBuffer, n);
+            const centroidClearanceSq = centroidInside
+                ? computeMinEdgeDistSq(cx, cy, smoothedPointsBuffer, n)
+                : 0;
+            const narrowThresh = equivalentRadius * 0.58;
 
-            // 候補(a)：重複排除済みの対角中点（0 〜 halfN - 1）
-            for (let j = 0; j < halfN; j++) {
-                const pA = particles[j].position;
-                const pB = particles[j + halfN].position;
-                const mx = (pA.x + pB.x) * 0.5;
-                const my = (pA.y + pB.y) * 0.5;
-                if (!isPointInsidePolygon(mx, my, smoothedPointsBuffer, n)) continue;
+            if (!centroidInside || centroidClearanceSq < narrowThresh * narrowThresh) {
+                const halfN = Math.floor(n / 2);
+                let bestX = cx;
+                let bestY = cy;
+                let bestClearSq = -1;
+                let bestCentDistSq = Infinity;
+                let foundInside = false;
 
-                const clearSq = computeMinEdgeDistSq(mx, my, smoothedPointsBuffer, n);
-                const ddx = mx - cx;
-                const ddy = my - cy;
-                const centDistSq = ddx * ddx + ddy * ddy;
+                // 候補(a)：重複排除済みの対角中点（0 〜 halfN - 1）
+                for (let j = 0; j < halfN; j++) {
+                    const pA = particles[j].position;
+                    const pB = particles[j + halfN].position;
+                    const mx = (pA.x + pB.x) * 0.5;
+                    const my = (pA.y + pB.y) * 0.5;
+                    if (!isPointInsidePolygon(mx, my, smoothedPointsBuffer, n)) continue;
 
-                if (clearSq > bestClearSq + 0.25 ||
-                    (Math.abs(clearSq - bestClearSq) <= 0.25 && centDistSq < bestCentDistSq)) {
-                    bestClearSq = clearSq;
-                    bestCentDistSq = centDistSq;
-                    bestX = mx;
-                    bestY = my;
-                    foundInside = true;
-                }
-            }
+                    const clearSq = computeMinEdgeDistSq(mx, my, smoothedPointsBuffer, n);
+                    const ddx = mx - cx;
+                    const ddy = my - cy;
+                    const centDistSq = ddx * ddx + ddy * ddy;
 
-            // 候補(b)：間引き頂点（step = 2）と重心の中点
-            for (let j = 0; j < n; j += 2) {
-                const p = particles[j].position;
-                const mx = (p.x + cx) * 0.5;
-                const my = (p.y + cy) * 0.5;
-                if (!isPointInsidePolygon(mx, my, smoothedPointsBuffer, n)) continue;
-
-                const clearSq = computeMinEdgeDistSq(mx, my, smoothedPointsBuffer, n);
-                const ddx = mx - cx;
-                const ddy = my - cy;
-                const centDistSq = ddx * ddx + ddy * ddy;
-
-                if (clearSq > bestClearSq + 0.25 ||
-                    (Math.abs(clearSq - bestClearSq) <= 0.25 && centDistSq < bestCentDistSq)) {
-                    bestClearSq = clearSq;
-                    bestCentDistSq = centDistSq;
-                    bestX = mx;
-                    bestY = my;
-                    foundInside = true;
-                }
-            }
-
-            if (foundInside) {
-                // 重心がポリゴン内の場合は 1.18 倍（二乗 1.3924 倍）ヒステリシスを満たす場合のみ移動し振り子振動を防止
-                if (!centroidInside || bestClearSq > centroidClearanceSq * 1.3924) {
-                    targetTextX = bestX;
-                    targetTextY = bestY;
-                    effectiveThickness = Math.sqrt(bestClearSq);
-                }
-            } else if (!centroidInside) {
-                let nearestSq = Infinity;
-                for (let j = 0; j < n; j++) {
-                    const p = particles[j].position;
-                    const ddx = p.x - cx;
-                    const ddy = p.y - cy;
-                    const dSq = ddx * ddx + ddy * ddy;
-                    if (dSq < nearestSq) {
-                        nearestSq = dSq;
-                        targetTextX = p.x;
-                        targetTextY = p.y;
+                    if (clearSq > bestClearSq + 0.25 ||
+                        (Math.abs(clearSq - bestClearSq) <= 0.25 && centDistSq < bestCentDistSq)) {
+                        bestClearSq = clearSq;
+                        bestCentDistSq = centDistSq;
+                        bestX = mx;
+                        bestY = my;
+                        foundInside = true;
                     }
                 }
-                effectiveThickness = Math.min(effectiveThickness, pRadius * 1.4);
+
+                // 候補(b)：間引き頂点（step = 2）と重心の中点
+                for (let j = 0; j < n; j += 2) {
+                    const p = particles[j].position;
+                    const mx = (p.x + cx) * 0.5;
+                    const my = (p.y + cy) * 0.5;
+                    if (!isPointInsidePolygon(mx, my, smoothedPointsBuffer, n)) continue;
+
+                    const clearSq = computeMinEdgeDistSq(mx, my, smoothedPointsBuffer, n);
+                    const ddx = mx - cx;
+                    const ddy = my - cy;
+                    const centDistSq = ddx * ddx + ddy * ddy;
+
+                    if (clearSq > bestClearSq + 0.25 ||
+                        (Math.abs(clearSq - bestClearSq) <= 0.25 && centDistSq < bestCentDistSq)) {
+                        bestClearSq = clearSq;
+                        bestCentDistSq = centDistSq;
+                        bestX = mx;
+                        bestY = my;
+                        foundInside = true;
+                    }
+                }
+
+                if (foundInside) {
+                    // 重心がポリゴン内の場合は 1.18 倍（二乗 1.3924 倍）ヒステリシスを満たす場合のみ移動し振り子振動を防止
+                    if (!centroidInside || bestClearSq > centroidClearanceSq * 1.3924) {
+                        targetTextX = bestX;
+                        targetTextY = bestY;
+                        effectiveThickness = Math.sqrt(bestClearSq);
+                        cachedThickness = effectiveThickness;
+                    }
+                } else if (!centroidInside) {
+                    let nearestSq = Infinity;
+                    for (let j = 0; j < n; j++) {
+                        const p = particles[j].position;
+                        const ddx = p.x - cx;
+                        const ddy = p.y - cy;
+                        const dSq = ddx * ddx + ddy * ddy;
+                        if (dSq < nearestSq) {
+                            nearestSq = dSq;
+                            targetTextX = p.x;
+                            targetTextY = p.y;
+                        }
+                    }
+                    effectiveThickness = Math.min(effectiveThickness, pRadius * 1.4);
+                    cachedThickness = effectiveThickness;
+                }
+            }
+
+            comp._cachedTextOffsetX = targetTextX - cx;
+            comp._cachedTextOffsetY = targetTextY - cy;
+            comp._cachedTextThickness = cachedThickness;
+        } else {
+            targetTextX = cx + comp._cachedTextOffsetX;
+            targetTextY = cy + comp._cachedTextOffsetY;
+            if (comp._cachedTextThickness >= 0) {
+                effectiveThickness = comp._cachedTextThickness;
             }
         }
+    } else if (comp._cachedTextOffsetX !== undefined) {
+        comp._cachedTextOffsetX = undefined;
+        comp._cachedTextOffsetY = undefined;
+        comp._cachedTextThickness = -1;
     }
 
     // (1) 文字位置の安定化：微小振動（< 0.45px）はピタッと固定、高速飛行・落下時は遅延ゼロ追従
@@ -787,7 +812,7 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false,
     const digitScale = valueText.length >= 5 ? 0.58 : (valueText.length >= 4 ? 0.68 : (valueText.length >= 3 ? 0.82 : 1.0));
     // 上段横長カプセル時は縦半高を基準にバランス良く収める
     const refRadius = comp.isFloating
-        ? Math.min(config.radius, (comp.capsuleHalfHeight || FLOAT_BAR.CHANNEL_HALF_HEIGHT || 25) * 1.15)
+        ? Math.min(config.radius, (comp.capsuleHalfHeight || FLOAT_BAR.CHANNEL_HALF_HEIGHT || 26) * 1.15)
         : config.radius;
     const blendedThickness = effectiveThickness * 0.55 + equivalentRadius * 0.45;
     const baseFontSize = Math.max(11.5, refRadius * 0.62 * digitScale);
@@ -876,13 +901,13 @@ function drawAimAndHopGuide(ctx, gameState) {
 
     let originX = gameState.dragStartX;
     let originY = gameState.dragStartY;
-    let selectedHalfH = 25;
+    let selectedHalfH = 26;
 
     if (gameState.selectedJelly) {
         const sel = gameState.selectedJelly;
         selectedHalfH = sel.isFloating
-            ? (sel.capsuleHalfHeight || Math.min(sel.targetRadius || 21.5, FLOAT_BAR.CHANNEL_HALF_HEIGHT || 25))
-            : (sel.targetRadius || 21.5);
+            ? (sel.capsuleHalfHeight || Math.min(sel.targetRadius || 25.5, FLOAT_BAR.CHANNEL_HALF_HEIGHT || 26))
+            : (sel.targetRadius || 25.5);
 
         if (sel.centroid) {
             originX = sel.centroid.x;
@@ -1115,15 +1140,19 @@ function drawAimAndHopGuide(ctx, gameState) {
 }
 
 // ==========================================
-// サブ関数 5：バンパー押し込み時の警告オーバーレイ
+// サブ関数 5：バンパー押し込み時の警告オーバーレイ（片側押込と両側同時押込を差別化）
 // ==========================================
 function drawWarningOverlay(ctx, gameState, bumperState) {
-    if (!bumperState || !gameState) return;
-    if ((bumperState.leftPressed || bumperState.rightPressed) && !gameState.isGameOver) {
-        const alpha = Math.abs(Math.sin(gameState.frameCount * 0.1)) * 0.15;
-        ctx.fillStyle = `rgba(255, 71, 87, ${alpha})`;
-        ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
-    }
+    if (!bumperState || !gameState || gameState.isGameOver) return;
+    const bothPressed = Boolean(bumperState.leftPressed && bumperState.rightPressed);
+    const anyPressed = Boolean(bumperState.leftPressed || bumperState.rightPressed);
+    if (!anyPressed) return;
+
+    const alpha = bothPressed
+        ? (Math.abs(Math.sin(gameState.frameCount * 0.22)) * 0.22)
+        : (Math.abs(Math.sin(gameState.frameCount * 0.09)) * 0.075);
+    ctx.fillStyle = `rgba(255, 71, 87, ${alpha.toFixed(3)})`;
+    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
 }
 
 /**

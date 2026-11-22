@@ -1,10 +1,10 @@
 /**
  * physics.js
- * @version v8.5 (Static Wall/Floor Labels, Engine Event Cleanup & Bumper Density Fallback Sync - Phase 3)
+ * @version v8.9 (Bumper Hold Decay, Zero-Alloc Bumper Buffers & Fallback Sync - Phase 3)
  * @changes
- *   - 落下中ゼリーの壁バンクショット誤着地を防止する判定基盤として、initPhysics() 内の床に label: 'floor'、左右内壁に label: 'wall_left' / 'wall_right' を付与
- *   - リトライ時の旧イベントリスナー残留を防ぐため、initPhysics() 内で Matter.Engine.clear(engine) の直前に Matter.Events.off(engine) を呼び出すよう追加
- *   - bumperOptions の PHYSICS.BUMPER_DENSITY フォールバック値を現行定数に合わせて 0.0035 → 0.0026 へ同期
+ *   - updateBumpers() の左右同時押し込み継続時間 bothPressedDurationMs を、片側でも閾値を割った際に 1 フレーム即 0 リセットするのではなく高速減衰（Math.max(0, bothPressedDurationMs - safeDelta * 2.5)）へ変更し、限界盤面の微振動による判定ブレを解消
+ *   - constrainBumpers() 内の Body.setPosition / Body.setVelocity に渡す一時 { x, y } リテラルを事前確保バッファ（tempBumperPos / tempBumperVel）へ置換し、毎サブステップの GC 負荷を削減
+ *   - v8.5 / v8.7 定数に合わせてフォールバック値を同期（PHYSICS.BUMPER_DENSITY: 0.0026 → 0.0022 / BUMPER.PUSH_THRESHOLD: 9 → 7.5 / BUMPER.GAME_OVER_HOLD_MS: 250 → 450）
  * 
  * Matter.jsを用いた物理世界の初期化、壁の生成、固定タイムステップ・サブステップ駆動、および
  * ゲームオーバー条件となる「左右のサイド判定ボタン（バンパースイッチ）」を構築・制御するモジュール
@@ -31,6 +31,10 @@ const ALL_JELLY_MASK =
     COLLISION_CATEGORY.FIELD_JELLY |
     COLLISION_CATEGORY.BAR_FLOATING |
     COLLISION_CATEGORY.BAR_HOPPING;
+
+// ゼロアロケーション（毎サブステップGC負荷削減）用の作業バッファ
+const tempBumperPos = { x: 0, y: 0 };
+const tempBumperVel = { x: 0, y: 0 };
 
 // 物理世界の状態を保持
 export let engine;
@@ -213,7 +217,7 @@ export function initPhysics() {
         friction: PHYSICS.FRICTION,
         frictionStatic: PHYSICS.FRICTION_STATIC,
         restitution: 0.15,
-        density: PHYSICS.BUMPER_DENSITY || 0.0026,
+        density: PHYSICS.BUMPER_DENSITY || 0.0022,
         chamfer: { radius: chamferRadius },
         label: 'bumper',
         // 下段の FIELD_JELLY のみと衝突し、壁や上段待機・ホップ中ゼリーとは干渉しないフィルタ設定
@@ -264,21 +268,29 @@ function constrainBumpers() {
     }
 
     const maxPush = BUMPER.MAX_PUSH || 15;
-    const threshold = Math.max(1, BUMPER.PUSH_THRESHOLD || 9);
+    const threshold = Math.max(1, BUMPER.PUSH_THRESHOLD || 7.5);
 
     // 左バンパー：フレーム側（左）への最大押し込み量〜休止位置の範囲にX座標をクランプ
     const clampedLeftX = Math.max(restXLeft - maxPush, Math.min(restXLeft, leftBumper.position.x));
     const leftVelX = (clampedLeftX !== leftBumper.position.x) ? 0 : leftBumper.velocity.x;
-    Body.setPosition(leftBumper, { x: clampedLeftX, y: bumperY });
+    tempBumperPos.x = clampedLeftX;
+    tempBumperPos.y = bumperY;
+    Body.setPosition(leftBumper, tempBumperPos);
     Body.setAngle(leftBumper, 0);
-    Body.setVelocity(leftBumper, { x: leftVelX, y: 0 });
+    tempBumperVel.x = leftVelX;
+    tempBumperVel.y = 0;
+    Body.setVelocity(leftBumper, tempBumperVel);
 
     // 右バンパー：休止位置〜フレーム側（右）への最大押し込み量の範囲にX座標をクランプ
     const clampedRightX = Math.max(restXRight, Math.min(restXRight + maxPush, rightBumper.position.x));
     const rightVelX = (clampedRightX !== rightBumper.position.x) ? 0 : rightBumper.velocity.x;
-    Body.setPosition(rightBumper, { x: clampedRightX, y: bumperY });
+    tempBumperPos.x = clampedRightX;
+    tempBumperPos.y = bumperY;
+    Body.setPosition(rightBumper, tempBumperPos);
     Body.setAngle(rightBumper, 0);
-    Body.setVelocity(rightBumper, { x: rightVelX, y: 0 });
+    tempBumperVel.x = rightVelX;
+    tempBumperVel.y = 0;
+    Body.setVelocity(rightBumper, tempBumperVel);
 
     // フレーム側へ押し込まれた変位量・押し込み率（枠内赤点灯サイドバー連動用）・閾値判定を算出
     const leftPush = Math.max(0, restXLeft - clampedLeftX);
@@ -350,10 +362,10 @@ export function updateBumpers(steppedMs) {
     if (state.leftPressed && state.rightPressed) {
         bothPressedDurationMs += safeDelta;
     } else {
-        bothPressedDurationMs = 0;
+        bothPressedDurationMs = Math.max(0, bothPressedDurationMs - safeDelta * 2.5);
     }
 
-    const holdMs = BUMPER.GAME_OVER_HOLD_MS || 250;
+    const holdMs = BUMPER.GAME_OVER_HOLD_MS || 450;
     const isGameOverTriggered = bothPressedDurationMs >= holdMs;
 
     return {

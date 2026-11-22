@@ -1,11 +1,10 @@
 /**
  * aim.js
- * @version v8.5 (Hop Slope Guard, Idle-Hold Drift Prevention, Preview Recatch & Large-Tier Ceiling Sync - Phase 8)
+ * @version v8.9 (Hop Preview Air-Damping Fix, Zero-Alloc Preview Pool & v8.6 Radius Fallback Sync - Phase 1)
  * @changes
- *   - ホップ自動切替条件へ角度勾配（FLOAT_BAR.HOP_TRIGGER_SLOPE || 0.42）を追加した共通判定ヘルパー isHopDirection() を導入し、横ショット時の意図せぬ 2.5D ホップ誤爆を防止
- *   - ドラッグ開始直後（!hasDraggedOut かつポインタ自身の移動距離が AIM_CANCEL_RADIUS 未満の間）はゼリー横移動に dragOffsetX / dragOffsetY を追従吸収させ、移動中ゼリーを長押し様子見した際に勝手に逆方向へ矢印が伸びる問題を解消
- *   - updateHopPreviewPoints() へ bar_motion.js の getSafeHopMaxUpSpeed() による値 64 以上の天井非激突初速制限と HOP_RECATCH_Y_MIN（102）基準のリキャッチ終端高度を適用し、実物理と予測軌道を 100% 同期
- *   - フォールバック値を最新定数へ同期（HOP_GRAVITY_SCALE: 1.35 → 1.92 / RESTITUTION: 0.16 → 0.12 / 基準半径: 21.5 → 24.0）
+ *   - updateHopPreviewPoints() の 1 サブステップあたりの空気抵抗減衰式を Matter.js v0.20 の timeScale 固定刻み積分と一致させ（1 - frictionAir * timeScale）、長距離ホップ時の水平予測着地ズレを解消
+ *   - ホップ軌道プレビューのサンプリング点生成を事前確保 7 点プール（hopPreviewPointPool）へ置換し、ドラッグ中の毎フレーム一時オブジェクト生成（GC負荷）を削減
+ *   - v8.6 サイズ拡大定数に合わせて基準半径フォールバック値を 24.0 → 25.5 へ同期
  * 
  * 上段フロートバーのゼリー選択、360度順方向ダイレクトエイム、
  * 天井非激突2.5D上段飛び越えホップ自動切替および放物線軌道プレビュー計算を担う操作モジュール
@@ -23,11 +22,12 @@ import { getFloatingJellies } from '/sobosuba/floatbar.js?v=7';
 import { ensureAudioRunning, playSoundSelect, playSoundShoot, playSoundHop } from '/sobosuba/sound.js?v=7';
 
 // ==========================================
-// ホップ軌道プレビュー計算用の事前確保スクラッチバッファ（GC負荷削減）
+// ホップ軌道プレビュー計算用の事前確保スクラッチバッファ＆点プール（GC負荷削減）
 // ==========================================
 const HOP_PREVIEW_DOT_COUNT = 7;
 const hopTraceScratchX = [];
 const hopTraceScratchY = [];
+const hopPreviewPointPool = Array.from({ length: HOP_PREVIEW_DOT_COUNT }, () => ({ x: 0, y: 0 }));
 
 /**
  * ドラッグベクトルが「2.5D上段飛び越えホップ」発動条件（キャンセル半径外 ＆ 上向き閾値 ＆ 角度勾配）を満たすか判定する
@@ -201,7 +201,7 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     }
 
     // ホップ飛行中は半カプセル（shapeBlend = 0.5）を維持するため、半カプセル実半幅・実半高と内壁座標で反射判定
-    const r = selected.targetRadius || 24.0;
+    const r = selected.targetRadius || 25.5;
     const capW = selected.capsuleHalfWidth || r;
     const capH = selected.capsuleHalfHeight || r;
     const halfW = (r + capW) * 0.5;
@@ -222,7 +222,7 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     const hopGravScale = (FLOAT_BAR.HOP_GRAVITY_SCALE !== undefined) ? FLOAT_BAR.HOP_GRAVITY_SCALE : 1.92;
     const subAccY = gravityY * gravityScale * hopGravScale * subDelta * subDelta;
     const subAccVy = subAccY / timeScale;
-    const airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012);
+    const airDamp = 1 - (PHYSICS.FRICTION_AIR || 0.0012) * timeScale;
     const wallRestitution = (PHYSICS.RESTITUTION !== undefined) ? PHYSICS.RESTITUTION : 0.12;
     const minAirSteps = Math.ceil((FLOAT_BAR.HOP_MIN_AIR_MS || 160) / subDelta);
     const targetBarY = FLOAT_BAR.Y;
@@ -269,14 +269,14 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
     const total = hopTraceScratchX.length;
     if (total === 0) return;
 
-    // 放物線軌道から均等に7点（末尾は必ず予測着地位置）をサンプリング
+    // 放物線軌道から均等に7点（末尾は必ず予測着地位置）を事前確保プールでサンプリング
     const dotCount = Math.min(HOP_PREVIEW_DOT_COUNT, total);
     for (let k = 1; k <= dotCount; k++) {
         const idx = Math.min(total - 1, Math.max(0, Math.round((k / dotCount) * (total - 1))));
-        out.push({
-            x: hopTraceScratchX[idx],
-            y: hopTraceScratchY[idx]
-        });
+        const pt = hopPreviewPointPool[k - 1];
+        pt.x = hopTraceScratchX[idx];
+        pt.y = hopTraceScratchY[idx];
+        out.push(pt);
     }
 }
 
@@ -435,8 +435,8 @@ export function startAimDrag(world, gameState, startX, startY) {
         if (!centroid) continue;
 
         const ext = getSoftBodyHalfExtents(comp);
-        const halfW = ext.halfWidth || comp.targetRadius || 24.0;
-        const halfH = ext.halfHeight || comp.targetRadius || 24.0;
+        const halfW = ext.halfWidth || comp.targetRadius || 25.5;
+        const halfH = ext.halfHeight || comp.targetRadius || 25.5;
         const straightHalf = Math.max(0, halfW - halfH);
 
         // 横長カプセルの水平中心線分上における最近傍点を算出
