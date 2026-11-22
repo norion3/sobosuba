@@ -1,11 +1,8 @@
 /**
  * jelly.js
- * @version v8.9 (Prevent Landed-Jelly Bar Warp Merge, Wall Bounce Threshold Cleanup, Zero-Alloc Buffers & Fallback Sync - Phase 2)
+ * @version v8.11 (Sync Pending Merge Execute Time with Wall-Clock Shift - Phase 2)
  * @changes
- *   - 上段合体条件へ neitherLanded（!compA.hasLanded && !compB.hasLanded）を追加し、横ショットバー上合体・ホップ着地合体を維持したまま下段定着済み巨大ゼリーの上段ワープ吸い上げを防止
- *   - 静的壁・床・スロープとのバウンド音判定のデッドコードを整理し、実効閾値（vn >= 2.4）へ整合
- *   - 吸い付き引き寄せ・退避シフト・合体衝撃波内の Body.setPosition / Body.setVelocity および平均速度算出を事前確保バッファ（tempVel / tempAvgVelA / tempAvgVelB / tempClampPoint）へ置換
- *   - v8.6 / v8.8 定数に合わせてフォールバック値を同期（COLLIDE_SOUND_MIN_SPEED: 0.65 → 0.90 / COLLIDE_SOUND_PAIR_COOLDOWN_MS: 450 → 650 / 基準半径: 24.0 → 25.5）
+ *   - handleMerges() の吸い付き完了時刻判定を compA / compB の mergePreGlowUntil と同期（Math.max(pm.executeTime, (pm.compA && pm.compA.mergePreGlowUntil) || 0, (pm.compB && pm.compB.mergePreGlowUntil) || 0)）し、iPhone バックグラウンド復帰時の壁時計シフトと吸い付きディレイを完全同期
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
@@ -556,7 +553,12 @@ export function handleMerges(world) {
     // 1. 「吸い付きの間」ディレイキューをチェックし、待機中は穏やかに引き寄せ、猶予経過で実行キューへ移す
     for (let i = pendingMerges.length - 1; i >= 0; i--) {
         const pm = pendingMerges[i];
-        if (now >= pm.executeTime) {
+        const executeTime = Math.max(
+            pm.executeTime,
+            (pm.compA && pm.compA.mergePreGlowUntil) || 0,
+            (pm.compB && pm.compB.mergePreGlowUntil) || 0
+        );
+        if (now >= executeTime) {
             // 吸い付き時間中の移動・押し合いにも追従できるよう、実行直前の最新重心から生成座標を再計算
             const latestA = getSoftBodyCentroid(pm.compA);
             const latestB = getSoftBodyCentroid(pm.compB);

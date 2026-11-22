@@ -1,9 +1,9 @@
 /**
  * render.js
- * @version v8.10 (Time-Based 120Hz ProMotion Pulse & Both-Pressed Ratio Urgency Border - Phase 7)
+ * @version v8.11 (Game-Over Afterglow Static Red Border & Result-Screen Inscribed Circle Skip - Phase 3)
  * @changes
- *   - iPhone 120Hz ProMotion 駆動時の点滅 2 倍速化および位相暴走を防ぐため、drawSoftBodies() の共鳴ハイライトおよび drawWarningOverlay() の赤点滅を performance.now() * 0.001 の定数角周波数（10.8 / 5.4 / 13.2 rad/s）へ統一
- *   - drawWarningOverlay() へ bumperState.bothPressedRatio 連動の切迫演出（赤フラッシュ濃度上昇 ＋ 内壁クリップによる外枠・LED 非干渉の赤ボーダーグロウ＆滑らか減衰）を追加
+ *   - drawWarningOverlay() でゲームオーバー余韻中（gameState.isGameOver === true）の即リターンを改め、点滅を止めて真っ赤な内壁ボーダー（固定アルファ 0.75・線幅 12px・内壁クリップ）＋ 薄い赤ティント（0.12）を静かに保持するよう変更し、確定瞬間の突然消灯および main.js 側 bothPressedRatio = 1 のデッド代入を解消
+ *   - drawSingleSoftBody() の最大内接円探索へ !isGameOver ガードを追加し、初回キャッシュ生成を保証したままリザルト静止中の不要な 3 フレーム再探索をスキップして省電力性を向上
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -667,11 +667,13 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false,
     // 上段待機・ホップ中は横長カプセルでの誤移動を防ぐため探索をスキップし重心中央を維持
     // 下段ゼリー限定で重心がポリゴン外、または重心付近が狭い（< 0.58 * equivalentRadius）場合に最大内接円中心を探索
     // 重心相対オフセットをキャッシュして 3 フレーム均等分散間引きすることで高速落下時の追従ズレ 0px と終盤負荷削減を両立
+    // ゲームオーバー静止中は初回キャッシュ生成を保証しつつ再探索をスキップして省電力化
     if (!comp.isFloating && !isHopping) {
         const safeCompIdx = (compIndex >= 0) ? compIndex : 0;
         const frameCount = (gameState && gameState.frameCount) ? gameState.frameCount : 0;
+        const isGameOver = Boolean(gameState && gameState.isGameOver);
         const shouldRefreshTextSearch = (comp._cachedTextOffsetX === undefined) ||
-            (((frameCount + safeCompIdx) % 3) === 0);
+            (!isGameOver && (((frameCount + safeCompIdx) % 3) === 0));
 
         if (shouldRefreshTextSearch) {
             let cachedThickness = -1;
@@ -1141,29 +1143,33 @@ function drawAimAndHopGuide(ctx, gameState) {
 }
 
 // ==========================================
-// サブ関数 5：バンパー押し込み時の警告オーバーレイ（時間ベース定数角周波数 ＆ bothPressedRatio 連動切迫演出）
+// サブ関数 5：バンパー押し込み時の警告オーバーレイ（時間ベース定数角周波数 ＆ bothPressedRatio 連動切迫演出 ＆ ゲームオーバー余韻静止保持）
 // ==========================================
 function drawWarningOverlay(ctx, gameState, bumperState) {
-    if (!bumperState || !gameState || gameState.isGameOver) return;
+    if (!bumperState || !gameState) return;
+    const isGameOver = Boolean(gameState.isGameOver);
     const bothPressed = Boolean(bumperState.leftPressed && bumperState.rightPressed);
     const anyPressed = Boolean(bumperState.leftPressed || bumperState.rightPressed);
     const bothPressedRatio = Math.max(0, Math.min(1, Number(bumperState.bothPressedRatio) || 0));
     if (!anyPressed && bothPressedRatio <= 0.05) return;
 
     // 60Hz / 120Hz ProMotion いずれでも一定リズムを保つ時間ベース定数角周波数（片側 5.4 / 両側 13.2 rad/s）
-    const timeSec = performance.now() * 0.001;
-    const urgentPulse = Math.abs(Math.sin(timeSec * 13.2));
+    // ゲームオーバー余韻中は点滅を止め、静かな赤ティント（0.12）と内壁赤ボーダー（固定アルファ 0.75）を保持
+    const timeSec = isGameOver ? 0 : (performance.now() * 0.001);
+    const urgentPulse = isGameOver ? 1 : Math.abs(Math.sin(timeSec * 13.2));
 
-    // (A) 画面赤フラッシュ（片側は穏やか、両側同時押込時は bothPressedRatio に連動して濃度上昇）
-    if (anyPressed) {
-        const flashAlpha = bothPressed
-            ? (urgentPulse * (0.14 + bothPressedRatio * 0.12) + bothPressedRatio * 0.06)
-            : (Math.abs(Math.sin(timeSec * 5.4)) * 0.075);
+    // (A) 画面赤フラッシュ（片側は穏やか、両側同時押込時は bothPressedRatio に連動して濃度上昇、ゲームオーバー余韻中は 0.12 固定）
+    if (anyPressed || isGameOver) {
+        const flashAlpha = isGameOver
+            ? 0.12
+            : (bothPressed
+                ? (urgentPulse * (0.14 + bothPressedRatio * 0.12) + bothPressedRatio * 0.06)
+                : (Math.abs(Math.sin(timeSec * 5.4)) * 0.075));
         ctx.fillStyle = `rgba(255, 71, 87, ${flashAlpha.toFixed(3)})`;
         ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
     }
 
-    // (B) 両側同時押込の切迫感を示す内壁赤ボーダーグロウ（内壁クリップで外枠・LEDと 0.000px 重なりなし・高速減衰時も滑らか消灯）
+    // (B) 両側同時押込の切迫感を示す内壁赤ボーダーグロウ（内壁クリップで外枠・LEDと 0.000px 重なりなし・ゲームオーバー余韻中は固定アルファ 0.75 保持）
     if (bothPressedRatio > 0.05) {
         const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
         const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
@@ -1173,9 +1179,14 @@ function drawWarningOverlay(ctx, gameState, bumperState) {
         const innerTop = topBarH;
         const innerBottom = GAME_HEIGHT - frameW;
 
-        const fadeFactor = Math.max(0, Math.min(1, (bothPressedRatio - 0.05) / 0.95));
-        const borderPulse = 0.72 + 0.28 * urgentPulse;
-        const borderAlpha = fadeFactor * (0.35 + 0.55 * bothPressedRatio) * borderPulse;
+        let borderAlpha;
+        if (isGameOver) {
+            borderAlpha = 0.75;
+        } else {
+            const fadeFactor = Math.max(0, Math.min(1, (bothPressedRatio - 0.05) / 0.95));
+            const borderPulse = 0.72 + 0.28 * urgentPulse;
+            borderAlpha = fadeFactor * (0.35 + 0.55 * bothPressedRatio) * borderPulse;
+        }
 
         ctx.save();
         ctx.beginPath();

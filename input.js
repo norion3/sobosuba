@@ -1,12 +1,8 @@
 /**
  * input.js
- * @version v8.5 (Safe Interruption Cancel, Right-Click Cancel, Input State Reset & Cached Rect Reflow Reduction - Phase 6)
+ * @version v8.11 (Zero-Alloc Pointer State Snapshot - Phase 5)
  * @changes
- *   - initInput() へ省略可能な第5引数 onDragCancel を追加し、touchcancel / blur / visibilitychange(hidden) による操作中断時に発射（onDragEnd）ではなく安全キャンセル（onDragCancel）を実行するよう修正
- *   - PCブラウザ操作向けに、ドラッグ中の右クリック（mousedown button=2 / contextmenu）で即座にエイムをキャンセルする機能を追加
- *   - ゲームオーバー・リトライ時のポインタ状態残留を防ぐ resetInputState() をエクスポート新設
- *   - handleDragMove() 内に残存していた v8.4 下方向 170px 拡張と不整合な不要 120px クランプ処理を撤去
- *   - updateScale() で Canvas の rect（left / top）および X/Y 独立スケールをキャッシュし、ドラッグ移動中の毎フレーム getBoundingClientRect() 強制リフローを削減
+ *   - getPointerState() の戻り値を事前確保オブジェクト（pointerStateSnapshot）のインプレース再利用へ変更し、ドラッグ中の毎フレーム一時オブジェクト生成（GC負荷）をゼロ化
  * 
  * タッチ/マウス操作の追従、順方向ダイレクトエイムの座標・ベクトル計算、
  * およびWebKit特有の余白ドラッグ(ラバーバンド)の物理遮断を管理する入力モジュール
@@ -29,6 +25,15 @@ let startX = 0;
 let startY = 0;
 let lastCurrentX = 0;
 let lastCurrentY = 0;
+
+// ドラッグ中毎フレームのGC負荷を削減する事前確保ポインタ状態スナップショット
+const pointerStateSnapshot = {
+    isDragging: false,
+    startX: 0,
+    startY: 0,
+    currentX: 0,
+    currentY: 0
+};
 
 /**
  * 入力管理モジュールの初期化
@@ -271,18 +276,17 @@ export function resetInputState() {
 }
 
 /**
- * 現在のポインタ論理座標とドラッグ状態を返す
+ * 現在のポインタ論理座標とドラッグ状態を返す（事前確保スナップショット再利用によるゼロアロケーション）
  * （指を静止させた状態でSoboがバー上を横移動した際も、毎フレーム指先方向へ矢印を追従させるために使用）
  * @returns {{ isDragging: boolean, startX: number, startY: number, currentX: number, currentY: number }}
  */
 export function getPointerState() {
-    return {
-        isDragging,
-        startX,
-        startY,
-        currentX: lastCurrentX,
-        currentY: lastCurrentY
-    };
+    pointerStateSnapshot.isDragging = isDragging;
+    pointerStateSnapshot.startX = startX;
+    pointerStateSnapshot.startY = startY;
+    pointerStateSnapshot.currentX = lastCurrentX;
+    pointerStateSnapshot.currentY = lastCurrentY;
+    return pointerStateSnapshot;
 }
 
 /**

@@ -1,10 +1,8 @@
 /**
  * overlap_solver.js
- * @version v8.5 (Batched Bead Position Push, Zero-Alloc Vector Reuse & Redundant Guard Removal - Phase 10)
+ * @version v8.11 (Immediate AABB & Centroid Sync After Partial Intrusion Push - Phase 4)
  * @changes
- *   - resolvePolygonIntrusion() の通常部分侵入時における対称分散排斥（本体 64%＋両隣各 18%、および相手エッジ両端 70%＋外側隣接 30%）で同一ビーズへ重複発生していた Body.setPosition を事前確保バッファへ蓄積し、1ペア処理につきビーズ 1 個あたり最大 1 回へ集約
- *   - applyClampedPush() / absorbEdgeApproachVelocity() / resolvePolygonIntrusion() 内の Body.setPosition / Body.setVelocity に渡す一時 { x, y } リテラルを事前確保オブジェクト（tempClampPoint / tempVel）へ置換し、毎サブステップの GC 負荷を削減
- *   - isPointInsidePolygon() 内の数学的に発生しない冗長なゼロ除算ガード（(yj - yi) || 1e-9）を削除
+ *   - resolvePolygonIntrusion() の通常部分侵入排斥で変位を適用した直後（hasAnyPushA / hasAnyPushB）に syncCompositeCentroidAndAABB() を呼び出し、直後の逆方向判定および後続ペア判定が即座に最新の AABB・重心を参照するよう修正
  * 
  * ソフトボディ間の「非侵入（Anti-Overlap）排斥ソルバー」および共通幾何判定を提供するモジュール
  * 
@@ -568,7 +566,7 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
         }
     }
 
-    // 蓄積した排斥変位を 1 ビーズあたり最大 1 回の Body.setPosition で一括適用
+    // 蓄積した排斥変位を 1 ビーズあたり最大 1 回の Body.setPosition で一括適用し、AABB・重心を即同期
     if (hasAnyPushA) {
         for (let i = 0; i < nA; i++) {
             const dx = pushAccumAX[i];
@@ -577,6 +575,7 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
                 applyClampedPush(ptsA[i], dx, dy, rA);
             }
         }
+        syncCompositeCentroidAndAABB(compA);
     }
     if (hasAnyPushB) {
         for (let i = 0; i < nB; i++) {
@@ -586,6 +585,7 @@ function resolvePolygonIntrusion(compA, compB, stiffness, maxPush, slop) {
                 applyClampedPush(ptsB[i], dx, dy, rB);
             }
         }
+        syncCompositeCentroidAndAABB(compB);
     }
 }
 

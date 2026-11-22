@@ -1,9 +1,9 @@
 /**
  * floatbar.js
- * @version v8.10 (Safety-Spawn Safe Altitude & Zero-Alloc Gauge State Return - Phase 5)
+ * @version v8.11 (Spawn Edge Margin Optimization & Make-Room Drift for Split-Gap Bar Refill - Phase 1)
  * @changes
- *   - セーフティスポーン時に出現候補 X 幅と重なる下段ゼリー最上端を避ける安全高度補正（[topBarH + newHalfH + 2, FLOAT_BAR.Y]）を追加し、高積み上げ時の重なり暴発を防止
- *   - writeGaugeState() の毎フレーム新規オブジェクト生成を削減し、gameState.spawnerGauges または事前確保バッファ（fallbackGaugeState）をそのまま返却するよう変更
+ *   - 待機ゼリーの定常余白（PADDING_X: 26）を維持したまま、左右スポーナー専用の端マージン getSafeSpawnPaddingX()（frameW + 6 = 14px）を導入し、スポーナー基準座標および calcSpawnClearance() の壁チェックを統一
+ *   - バー上に空きがあるのに中央寄せで左右に分断されて補充が止まる現象を解消するため、道開けスライド（Make-Room Drift）を追加（performance.now() 60Hz 正規化・実効幅総幅チェック・物理接触余裕マージン・バー上 isMerging 停止ガード・退避先下段ゼリー境界チェック・!gameState.isDragging ガード・activeDriftSide 一方向ロック・事前確保 tempDriftVel・initFloatBar() での状態リセット）
  * 
  * 上部フロートバーのゼリー生成・出現テーブル・左右2点クリアランス検知スポーナー・
  * セーフティスポーンおよび上枠スポーナーゲージ進捗管理を担うモジュール
@@ -25,9 +25,14 @@ const floatingJelliesBuffer = [];
 const barAreaJelliesBuffer = [];
 const barAreaEntryPool = [];
 const fallbackGaugeState = { leftGaugeRatio: 0, rightGaugeRatio: 0 };
+const tempDriftVel = { x: 0, y: 0 };
 
 // ゲーム開始直後の初回補充（プレイヤー未操作時の端同数字自動合体回避）フラグ
 let isInitialRefillPending = false;
+
+// 道開けスライド（Make-Room Drift）の一方向ロックおよび時間正規化状態
+let activeDriftSide = null;
+let lastDriftTimeMs = 0;
 
 /**
  * 一体外枠フレーム（FRAME_WIDTH）およびバンパー面基準（FLOAT_BAR.PADDING_X）と同期した
@@ -37,6 +42,16 @@ let isInitialRefillPending = false;
 function getSafeBarPaddingX() {
     const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
     return Math.max(frameW + 4, FLOAT_BAR.PADDING_X || 26);
+}
+
+/**
+ * 左右スポーナー専用の安全な端マージン（内壁 + 6px = 14px）を返す
+ * （待機ゼリーの定常保持余白 getSafeBarPaddingX() は変えず、左右出現可能幅のみを適正化）
+ * @returns {number}
+ */
+function getSafeSpawnPaddingX() {
+    const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
+    return frameW + 6;
 }
 
 // ==========================================
@@ -238,9 +253,9 @@ function getEdgeFloatingValue(floating, side) {
  * @returns {number} 最小クリアランス（px、負値は重なりを意味する）
  */
 function calcSpawnClearance(spawnX, newHalfW, newHalfH, barAreaJellies) {
-    const padX = getSafeBarPaddingX();
-    const minX = padX + newHalfW;
-    const maxX = GAME_WIDTH - padX - newHalfW;
+    const spawnPadX = getSafeSpawnPaddingX();
+    const minX = spawnPadX + newHalfW;
+    const maxX = GAME_WIDTH - spawnPadX - newHalfW;
     if (spawnX < minX - 1 || spawnX > maxX + 1) return -Infinity;
 
     let minClearance = Infinity;
@@ -316,6 +331,178 @@ function writeGaugeState(gameState, leftRatio, rightRatio) {
     return fallbackGaugeState;
 }
 
+/**
+ * 中央寄せで空きスペースが左右に分断されて補充が止まった際、
+ * 物理的に収まる場合のみ既存の待機ゼリー群を反対側へ穏やかにスライドさせて道を開ける（Make-Room Drift）
+ * （60Hz/120Hz ProMotion 時間正規化・バー上 isMerging 停止・退避先下段ゼリー境界停止・高速移動非減速ガード付き）
+ */
+function applyMakeRoomDrift(
+    floating,
+    barAreaJellies,
+    gameState,
+    leftSpawnX,
+    rightSpawnX,
+    leftClearance,
+    rightClearance,
+    newHalfW,
+    newHalfH,
+    clearanceMargin,
+    padX,
+    spawnPadX
+) {
+    const floatingCount = floating.length;
+    if (floatingCount === 0 || gameState.isDragging) {
+        activeDriftSide = null;
+        lastDriftTimeMs = 0;
+        return;
+    }
+
+    const channelHalfH = FLOAT_BAR.CHANNEL_HALF_HEIGHT || 26;
+    const leftSpawnRightEdge = leftSpawnX + newHalfW;
+    const rightSpawnLeftEdge = rightSpawnX - newHalfW;
+
+    let sumFloatingWidth = 0;
+    let leftFieldOpen = true;
+    let rightFieldOpen = true;
+    let rightFieldEdge = GAME_WIDTH - padX;
+    let leftFieldEdge = padX;
+
+    for (let i = 0; i < barAreaJellies.length; i++) {
+        const entry = barAreaJellies[i];
+        const comp = entry.comp;
+        if (!comp) continue;
+
+        // バー領域で合体吸い付き中（isMerging）のゼリーがある間は総幅ズレ防止のため道開けを停止
+        if (comp.isMerging) {
+            activeDriftSide = null;
+            lastDriftTimeMs = 0;
+            return;
+        }
+
+        if (comp.isFloating) {
+            sumFloatingWidth += entry.halfWidth * 2;
+            continue;
+        }
+
+        if (comp.isBarHopping) continue;
+
+        // 下段ゼリーによる左右スポーン位置の閉塞判定
+        const dyField = Math.abs(FLOAT_BAR.Y - entry.cy);
+        const vertGap = dyField - (newHalfH + entry.halfHeight);
+
+        const leftHorizGap = Math.abs(leftSpawnX - entry.cx) - (newHalfW + entry.halfWidth);
+        if (Math.max(leftHorizGap, vertGap) < clearanceMargin) {
+            leftFieldOpen = false;
+        }
+
+        const rightHorizGap = Math.abs(rightSpawnX - entry.cx) - (newHalfW + entry.halfWidth);
+        if (Math.max(rightHorizGap, vertGap) < clearanceMargin) {
+            rightFieldOpen = false;
+        }
+
+        // 退避先のバー高さ帯へ突き出ている下段ゼリーの境界を計測し、押し付けを防止
+        if (dyField < (channelHalfH + entry.halfHeight + 2)) {
+            if (entry.cx > leftSpawnRightEdge) {
+                const candidateRight = entry.cx - entry.halfWidth - 2;
+                if (candidateRight < rightFieldEdge) {
+                    rightFieldEdge = candidateRight;
+                }
+            }
+            if (entry.cx < rightSpawnLeftEdge) {
+                const candidateLeft = entry.cx + entry.halfWidth + 2;
+                if (candidateLeft > leftFieldEdge) {
+                    leftFieldEdge = candidateLeft;
+                }
+            }
+        }
+    }
+
+    const effectiveRightEdge = Math.min(GAME_WIDTH - padX, rightFieldEdge);
+    const effectiveLeftEdge = Math.max(padX, leftFieldEdge);
+
+    // 物理接触余裕マージン（(floatingCount - 1) * 4 + 6）を含めた必要総幅で収容可否を判定
+    const requiredTotalWidth = sumFloatingWidth + newHalfW * 2 + clearanceMargin + (floatingCount - 1) * 4 + 6;
+    const canMakeRoomLeft = leftFieldOpen && requiredTotalWidth <= (effectiveRightEdge - spawnPadX);
+    const canMakeRoomRight = rightFieldOpen && requiredTotalWidth <= ((GAME_WIDTH - spawnPadX) - effectiveLeftEdge);
+
+    if (!canMakeRoomLeft && !canMakeRoomRight) {
+        activeDriftSide = null;
+        lastDriftTimeMs = 0;
+        return;
+    }
+
+    // 一方向ロック（往復バタつきゼロ）：既存方向が有効なら維持、無効なら空きが広い側または交互側を選択
+    if (activeDriftSide === 'left' && !canMakeRoomLeft) {
+        activeDriftSide = null;
+    } else if (activeDriftSide === 'right' && !canMakeRoomRight) {
+        activeDriftSide = null;
+    }
+
+    if (activeDriftSide === null) {
+        if (canMakeRoomLeft && canMakeRoomRight) {
+            if (Math.abs(leftClearance - rightClearance) > 12) {
+                activeDriftSide = leftClearance > rightClearance ? 'left' : 'right';
+            } else {
+                activeDriftSide = gameState.lastSpawnSide === 'left' ? 'right' : 'left';
+            }
+        } else {
+            activeDriftSide = canMakeRoomLeft ? 'left' : 'right';
+        }
+    }
+
+    // performance.now() による 60Hz / 120Hz ProMotion 時間正規化（上限 33.333ms クランプ）
+    const nowPerf = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? performance.now()
+        : Date.now();
+    const dtMs = (lastDriftTimeMs > 0)
+        ? Math.max(0, Math.min(33.333, nowPerf - lastDriftTimeMs))
+        : (1000 / 60);
+    lastDriftTimeMs = nowPerf;
+    const stepScale = dtMs / (1000 / 60);
+
+    const driftDir = (activeDriftSide === 'left') ? 1 : -1;
+    const driftAccel = 0.075 * stepScale;
+    const maxDriftSpeed = 1.35;
+
+    for (let i = 0; i < floatingCount; i++) {
+        const comp = floating[i];
+        if (!comp || !comp.particles || comp.particles.length === 0) continue;
+
+        const centroid = comp.centroid || getSoftBodyCentroid(comp);
+        if (!centroid) continue;
+
+        const ext = getSoftBodyHalfExtents(comp);
+        const compHalfW = ext.halfWidth || comp.capsuleHalfWidth || comp.targetRadius || 25.5;
+
+        // 反対端または下段ゼリー境界へ到達済みのゼリーは加速対象から除外
+        if (driftDir > 0) {
+            if (centroid.x + compHalfW >= effectiveRightEdge - 1) continue;
+        } else {
+            if (centroid.x - compHalfW <= effectiveLeftEdge + 1) continue;
+        }
+
+        const pts = comp.particles;
+        for (let j = 0; j < pts.length; j++) {
+            const p = pts[j];
+            const vx = p.velocity.x;
+            // 既に同方向へ maxDriftSpeed 以上で移動中の場合は逆ブレーキを掛けない
+            if (driftDir > 0) {
+                if (vx < maxDriftSpeed) {
+                    tempDriftVel.x = Math.min(maxDriftSpeed, vx + driftAccel);
+                    tempDriftVel.y = p.velocity.y;
+                    Matter.Body.setVelocity(p, tempDriftVel);
+                }
+            } else {
+                if (vx > -maxDriftSpeed) {
+                    tempDriftVel.x = Math.max(-maxDriftSpeed, vx - driftAccel);
+                    tempDriftVel.y = p.velocity.y;
+                    Matter.Body.setVelocity(p, tempDriftVel);
+                }
+            }
+        }
+    }
+}
+
 // ==========================================
 // 初期配置 ＆ 毎フレーム補充メンテナンス
 // ==========================================
@@ -328,8 +515,10 @@ function writeGaugeState(gameState, leftRatio, rightRatio) {
 export function initFloatBar(world, gameState) {
     if (!world) return;
 
-    // 開始直後の初回補充で端のゼリーと同数字が供給されて自動合体するケースを回避するためのフラグを初期化
+    // 開始直後の初回補充回避フラグおよび道開けスライド状態を初期化
     isInitialRefillPending = true;
+    activeDriftSide = null;
+    lastDriftTimeMs = 0;
 
     const padX = getSafeBarPaddingX();
     const score = gameState ? gameState.score : 0;
@@ -376,7 +565,8 @@ export function initFloatBar(world, gameState) {
 }
 
 /**
- * 本家準拠：左右2箇所のスポーナーが内壁・バンパー面基準の横長実幅ベースで空き距離（クリアランス）を検知して補充し、
+ * 本家準拠：左右2箇所のスポーナーが内壁基準の横長実幅ベースで空き距離（クリアランス）を検知して補充し、
+ * 中央寄せによる空き分断時は穏やかな道開けスライドで補充を促す。
  * 両端閉塞かつバーが空の状態が続いた場合はセーフティスポーンで詰みを防ぐ。
  * あわせて上枠描画用の左右スポーナー黒ゲージ進捗率（leftGaugeRatio / rightGaugeRatio）を算出・返却する。
  * @param {Matter.World} world - Matter.jsの物理世界
@@ -385,11 +575,14 @@ export function initFloatBar(world, gameState) {
  */
 export function maintainFloatBar(world, gameState) {
     if (!world || !gameState || gameState.isGameOver) {
+        activeDriftSide = null;
+        lastDriftTimeMs = 0;
         return writeGaugeState(gameState, 0, 0);
     }
 
     const now = Date.now();
     const padX = getSafeBarPaddingX();
+    const spawnPadX = getSafeSpawnPaddingX();
     const floating = getFloatingJellies(world);
     const hoppingCount = getBarHoppingCount(world);
     const barOwnedCount = floating.length + hoppingCount;
@@ -427,9 +620,9 @@ export function maintainFloatBar(world, gameState) {
 
     const barAreaJellies = getBarAreaJellies(world, newHalfH);
 
-    // 左右2点スポーナーの基準X座標（内壁8px＋バンパー面回避の safePadX と横長実半幅を考慮）
-    const leftSpawnX = Math.max(FLOAT_BAR.LEFT_SPAWN_X || (padX + newHalfW), padX + newHalfW);
-    const rightSpawnX = Math.min(FLOAT_BAR.RIGHT_SPAWN_X || (GAME_WIDTH - padX - newHalfW), GAME_WIDTH - padX - newHalfW);
+    // 左右2点スポーナーの基準X座標（スポーン専用端マージン spawnPadX = 14px と横長実半幅基準）
+    const leftSpawnX = spawnPadX + newHalfW;
+    const rightSpawnX = GAME_WIDTH - spawnPadX - newHalfW;
 
     const leftClearance = calcSpawnClearance(leftSpawnX, newHalfW, newHalfH, barAreaJellies);
     const rightClearance = calcSpawnClearance(rightSpawnX, newHalfW, newHalfH, barAreaJellies);
@@ -438,8 +631,10 @@ export function maintainFloatBar(world, gameState) {
     let leftGaugeRatio = computeSpawnerGaugeRatio(leftClearance, clearanceMargin, newHalfW, delayRatio, isAtCapacity);
     let rightGaugeRatio = computeSpawnerGaugeRatio(rightClearance, clearanceMargin, newHalfW, delayRatio, isAtCapacity);
 
-    // 上限到達中または供給ディレイ（ゲージの間）未経過時はゲージ更新のみ行って終了
+    // 上限到達中または供給ディレイ（ゲージの間）未経過時は道開けを解除しゲージ更新のみ行って終了
     if (isAtCapacity || elapsedSinceLastSpawn < spawnDelayMs) {
+        activeDriftSide = null;
+        lastDriftTimeMs = 0;
         return writeGaugeState(gameState, leftGaugeRatio, rightGaugeRatio);
     }
 
@@ -475,8 +670,8 @@ export function maintainFloatBar(world, gameState) {
         }
 
         const spawnX = (chosenSide === 'left')
-            ? Math.max(FLOAT_BAR.LEFT_SPAWN_X || (padX + spawnHalfW), padX + spawnHalfW)
-            : Math.min(FLOAT_BAR.RIGHT_SPAWN_X || (GAME_WIDTH - padX - spawnHalfW), GAME_WIDTH - padX - spawnHalfW);
+            ? (spawnPadX + spawnHalfW)
+            : (GAME_WIDTH - spawnPadX - spawnHalfW);
         const entryVel = {
             x: chosenSide === 'left' ? entrySpeed : -entrySpeed,
             y: 0
@@ -484,6 +679,8 @@ export function maintainFloatBar(world, gameState) {
         const newComp = createSoftBodyJelly(spawnX, FLOAT_BAR.Y, spawnVal, entryVel, true, false);
         Matter.Composite.add(world, newComp);
 
+        activeDriftSide = null;
+        lastDriftTimeMs = 0;
         gameState.lastSpawnSide = chosenSide;
         gameState.lastFloatSpawnTime = now;
         gameState.pendingSpawnValue = null;
@@ -496,6 +693,27 @@ export function maintainFloatBar(world, gameState) {
             rightGaugeRatio = 0;
         }
         return writeGaugeState(gameState, leftGaugeRatio, rightGaugeRatio);
+    }
+
+    // 左右どちらも空き不足だが待機ゼリーがありホップ中でない場合、収容可能なら穏やかな道開けスライドを実行
+    if (floating.length > 0 && hoppingCount === 0) {
+        applyMakeRoomDrift(
+            floating,
+            barAreaJellies,
+            gameState,
+            leftSpawnX,
+            rightSpawnX,
+            leftClearance,
+            rightClearance,
+            newHalfW,
+            newHalfH,
+            clearanceMargin,
+            padX,
+            spawnPadX
+        );
+    } else {
+        activeDriftSide = null;
+        lastDriftTimeMs = 0;
     }
 
     // ==========================================
@@ -550,6 +768,8 @@ export function maintainFloatBar(world, gameState) {
         const safeComp = createSoftBodyJelly(bestX, safeSpawnY, val, { x: 0, y: 0 }, true, false);
         Matter.Composite.add(world, safeComp);
 
+        activeDriftSide = null;
+        lastDriftTimeMs = 0;
         isInitialRefillPending = false;
         gameState.lastFloatSpawnTime = now;
         gameState.pendingSpawnValue = null;
