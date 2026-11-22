@@ -1,8 +1,8 @@
 /**
  * constants.js
- * @version v8.10 (Bar-Launch Grace Threshold & Slope Tuning - Phase 2)
+ * @version v8.13 (High-Tier Radius Taper for 16384 Reachability - Revised Plan B' Monotonic - Phase 1)
  * @changes
- *   - 真横ショットでの隣押し・バー上合体保護と浅い端狙い斜め下ショットでのすり抜け保護を両立するため、FLOAT_BAR.LAUNCH_GRACE_MIN_DY を -2 → 6、FLOAT_BAR.LAUNCH_GRACE_MIN_SLOPE を 0.22 → 0.12 へ更新
+ *   - 序盤〜中盤の難易度・物理挙動・つぶれにくさを完全維持（1〜128 の半径・ビーズ数は不変）したまま 16384 へ現実的に到達できるよう、JELLY_CONFIG の 256〜32768 の半径を完全単調テーパー（68.5 / 74.0 / 79.5 / 85.0 / 90.5 / 96.0 / 101.5 / 107.0）へ最適化し、ビーズ数（particles）も同サイズ帯の座屈耐性に合わせて 24〜26 へ同期
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -63,8 +63,8 @@ export const COLOR_THEMES = {
 
 export const ACTIVE_THEME = COLOR_THEMES.default;
 
-// 内幅404px（外枠8px考慮）へ最適化したサイズ成長カーブ（案B: 半径約+6%拡大・空間回収率 34.1%〜37.2% 統一）
-// 細密ビーズ数（16〜30個）により角丸多角形への液体的な追従性を高める
+// 内幅404px（外枠8px考慮）へ最適化したサイズ成長カーブ（1〜128: 現行維持 / 256〜32768: 改訂案B'完全単調テーパーで16384到達対応）
+// 細密ビーズ数（16〜26個）により角丸多角形への液体的な追従性と座屈耐性を両立
 export const JELLY_CONFIG = {
     1:     { color: ACTIVE_THEME.colors[1],     radius: 25.5,  text: ACTIVE_THEME.text, particles: 16 },
     2:     { color: ACTIVE_THEME.colors[2],     radius: 29.0,  text: ACTIVE_THEME.text, particles: 16 },
@@ -74,14 +74,14 @@ export const JELLY_CONFIG = {
     32:    { color: ACTIVE_THEME.colors[32],    radius: 47.5,  text: ACTIVE_THEME.text, particles: 20 },
     64:    { color: ACTIVE_THEME.colors[64],    radius: 54.5,  text: ACTIVE_THEME.text, particles: 22 },
     128:   { color: ACTIVE_THEME.colors[128],   radius: 62.0,  text: ACTIVE_THEME.text, particles: 22 },
-    256:   { color: ACTIVE_THEME.colors[256],   radius: 71.0,  text: ACTIVE_THEME.text, particles: 24 },
-    512:   { color: ACTIVE_THEME.colors[512],   radius: 81.0,  text: ACTIVE_THEME.text, particles: 24 },
-    1024:  { color: ACTIVE_THEME.colors[1024],  radius: 93.0,  text: ACTIVE_THEME.text, particles: 26 },
-    2048:  { color: ACTIVE_THEME.colors[2048],  radius: 106.0, text: ACTIVE_THEME.text, particles: 26 },
-    4096:  { color: ACTIVE_THEME.colors[4096],  radius: 121.0, text: ACTIVE_THEME.text, particles: 28 },
-    8192:  { color: ACTIVE_THEME.colors[8192],  radius: 138.0, text: ACTIVE_THEME.text, particles: 28 },
-    16384: { color: ACTIVE_THEME.colors[16384], radius: 157.0, text: ACTIVE_THEME.text, particles: 30 },
-    32768: { color: ACTIVE_THEME.colors[32768], radius: 176.0, text: ACTIVE_THEME.text, particles: 30 }
+    256:   { color: ACTIVE_THEME.colors[256],   radius: 68.5,  text: ACTIVE_THEME.text, particles: 24 },
+    512:   { color: ACTIVE_THEME.colors[512],   radius: 74.0,  text: ACTIVE_THEME.text, particles: 24 },
+    1024:  { color: ACTIVE_THEME.colors[1024],  radius: 79.5,  text: ACTIVE_THEME.text, particles: 24 },
+    2048:  { color: ACTIVE_THEME.colors[2048],  radius: 85.0,  text: ACTIVE_THEME.text, particles: 24 },
+    4096:  { color: ACTIVE_THEME.colors[4096],  radius: 90.5,  text: ACTIVE_THEME.text, particles: 26 },
+    8192:  { color: ACTIVE_THEME.colors[8192],  radius: 96.0,  text: ACTIVE_THEME.text, particles: 26 },
+    16384: { color: ACTIVE_THEME.colors[16384], radius: 101.5, text: ACTIVE_THEME.text, particles: 26 },
+    32768: { color: ACTIVE_THEME.colors[32768], radius: 107.0, text: ACTIVE_THEME.text, particles: 26 }
 };
 
 // ==========================================
