@@ -1,8 +1,8 @@
 /**
  * jelly.js
- * @version v8.11 (Sync Pending Merge Execute Time with Wall-Clock Shift - Phase 2)
+ * @version v8.12 (Optional Merge Notification Callback for Water-Ripple Effect - Phase 1)
  * @changes
- *   - handleMerges() の吸い付き完了時刻判定を compA / compB の mergePreGlowUntil と同期（Math.max(pm.executeTime, (pm.compA && pm.compA.mergePreGlowUntil) || 0, (pm.compB && pm.compB.mergePreGlowUntil) || 0)）し、iPhone バックグラウンド復帰時の壁時計シフトと吸い付きディレイを完全同期
+ *   - handleMerges(world, onMergeCallback = null) へ省略可能な合体確定通知コールバック引数を追加し、合体確定時に (spawnX, spawnY, newRadius, val, currentChainCount, data.isFloating) を通知するよう拡張（新規 export なし・既存呼び出し互換維持）
  * 
  * ソフトボディゼリー（Sobo）の合体・成長ロジックを管理するモジュール
  * 
@@ -542,9 +542,10 @@ export function handleCollisions(event, allowCollideSound = true) {
  * 物理演算の更新(afterUpdate)後に、吸い付きディレイ中の引き寄せおよび安全にソフトボディの追加・削除を行い、
  * このフレームで実際に合体が確定した本家準拠スコア（未合体Soboの初参加分のみ）を返す
  * @param {Matter.World} world - 現在の物理世界
+ * @param {Function|null} [onMergeCallback=null] - 合体確定時の演出通知コールバック (spawnX, spawnY, newRadius, val, chainCount, isFloating)
  * @returns {number} このフレームで合体確定により獲得したスコア
  */
-export function handleMerges(world) {
+export function handleMerges(world, onMergeCallback = null) {
     let earnedScore = 0;
     const now = Date.now();
     const maxVx = PHYSICS.MAX_PARTICLE_VX || 10.5;
@@ -717,6 +718,11 @@ export function handleMerges(world) {
             }
             lastMergeSoundTime = now;
             playSoundMerge(currentChainCount, val);
+
+            // 合体確定時の演出コールバック通知（大塊・連鎖時の極控えめ水紋リング等）
+            if (typeof onMergeCallback === 'function') {
+                onMergeCallback(spawnX, spawnY, newRadius, val, currentChainCount, data.isFloating);
+            }
 
             // ==========================================
             // フィールド内合体時の連鎖膨張インパルス（world.composites 直接走査・X/Y独立最大速度上限統一）

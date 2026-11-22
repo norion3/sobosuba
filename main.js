@@ -1,11 +1,9 @@
 /**
  * main.js
- * @version v8.10 (Background Wall-Clock Timer Shift, Both-Pressed Ratio & Zero-Alloc Bumper State - Phase 6)
+ * @version v8.12 (Cooldown Pending-Touch Catch & Zero-Alloc Merge Water-Ripple Pool - Phase 2)
  * @changes
- *   - constants.js?v=7 から BUMPER, FLOAT_BAR をインポート追加
- *   - iPhone バックグラウンド／スリープ復帰時（wallGapMs > 200）に stepPhysics() 直前でアクティブ進行中のタイマーのみ厳密選別シフトする壁時計補正関数 shiftActiveTimersForBackgroundGap() を追加（startGame() での lastWallTimeMs = 0 リセット含む）
- *   - updateBumpers() の同時押込経過時間から bothPressedRatio（0.0〜1.0）を算出し、gameState.lastBumperState および事前確保 renderBumperState をインプレース更新するよう変更（毎フレームの一時オブジェクト生成を削減）
- *   - ゲームオーバー判定コメントの旧数値（250ms）を現行定数（450ms）へ同期
+ *   - 高速連射時のクールダウン（220ms）中・上段選択帯限定の先行タッチ自動キャッチ（hasPendingTouch / pendingTapX / pendingTapY）を追加し、クールダウン明け直後に押し直し不要でシームレスにエイム開始できるよう改善（短押し離脱・キャンセル・ゲームオーバー・リトライ時は即クリア）
+ *   - 大塊作成（512+）および 3 連鎖以上（chainCount >= 2）時の極控えめな純白水紋リング用に、固定 8 要素ゼロアロケーションプール（gameState.mergeRipples）と triggerMergeRipple()・壁時計シフト対応・startGame() リセットを追加し、handleMerges(world, triggerMergeRipple) へ接続
  * 
  * sobosuba風パズル（中空ビーズリング・ソフトボディ版）のマスター統合モジュール
  * 
@@ -39,6 +37,15 @@ let lastFrameTime = 0;
 let lastWallTimeMs = 0;
 let dropCooldownTimer = null;
 let gameOverTimer = null;
+
+// 高速連射時のクールダウン中・上段選択帯限定の先行タッチ予約状態
+let hasPendingTouch = false;
+let pendingTapX = 0;
+let pendingTapY = 0;
+
+// 大塊・3連鎖時の極控えめ水紋リング用 固定8要素ゼロアロケーションプール管理
+const MERGE_RIPPLE_POOL_SIZE = 8;
+let nextMergeRippleIndex = 0;
 
 // 描画モジュールへ渡すバンパー状態の事前確保バッファ（毎フレームの一時オブジェクト生成削減）
 const renderBumperState = {
@@ -85,6 +92,20 @@ const gameState = {
     dragVectorX: 0,
     dragVectorY: 0,
 
+    // 大塊（512+）・3連鎖以上時の極控えめ水紋リング固定プール（ゼロアロケーション）
+    mergeRipples: Array.from({ length: MERGE_RIPPLE_POOL_SIZE }, () => ({
+        active: false,
+        x: 0,
+        y: 0,
+        startRadius: 0,
+        endRadius: 0,
+        startTime: 0,
+        durationMs: 480,
+        maxAlpha: 0.40,
+        startLineWidth: 2.6,
+        endLineWidth: 0.7
+    })),
+
     // 描画用バンパー最新状態キャッシュ（左右枠内の赤点灯サイドバー ＆ 両側同時押込切迫演出連動用）
     lastBumperState: {
         leftPressed: false,
@@ -94,6 +115,81 @@ const gameState = {
         bothPressedRatio: 0
     }
 };
+
+// ==========================================
+// 極控えめ水紋リング（大塊 512+ ＆ 3連鎖以上）プール管理
+// ==========================================
+/**
+ * 水紋リングプールを初期化する（ゲーム開始・リトライ時）
+ */
+function resetMergeRipples() {
+    nextMergeRippleIndex = 0;
+    const ripples = gameState.mergeRipples;
+    for (let i = 0; i < ripples.length; i++) {
+        ripples[i].active = false;
+    }
+}
+
+/**
+ * 合体確定コールバック：大塊作成（512+）または 3 連鎖以上（chainCount >= 2）時に
+ * 固定 8 要素プールへ水紋リングをゼロアロケーションで登録する
+ * @param {number} spawnX - 合体生成X座標
+ * @param {number} spawnY - 合体生成Y座標
+ * @param {number} newRadius - 合体生成ゼリーの基準半径
+ * @param {number} val - 合体後の数値
+ * @param {number} chainCount - 現在の連鎖回数（0始まり、2以上＝3連鎖以上）
+ */
+function triggerMergeRipple(spawnX, spawnY, newRadius, val, chainCount) {
+    if (val < 512 && chainCount < 2) return;
+
+    const ripples = gameState.mergeRipples;
+    const now = Date.now();
+    let slot = null;
+
+    // まず非アクティブまたは期限切れスロットを優先再利用
+    for (let i = 0; i < ripples.length; i++) {
+        const cand = ripples[i];
+        if (!cand.active || (now - cand.startTime) >= cand.durationMs) {
+            slot = cand;
+            break;
+        }
+    }
+    // 全スロット使用中の場合はリングバッファ順で最古枠を上書き
+    if (!slot) {
+        slot = ripples[nextMergeRippleIndex];
+        nextMergeRippleIndex = (nextMergeRippleIndex + 1) % ripples.length;
+    }
+
+    const r = Math.max(16, Number(newRadius) || 25.5);
+    slot.active = true;
+    slot.x = spawnX;
+    slot.y = spawnY;
+    slot.startRadius = r * 0.85;
+    slot.startTime = now;
+
+    if (val >= 1024) {
+        // 超大塊（1024+）
+        slot.endRadius = r * 2.15;
+        slot.durationMs = 540;
+        slot.maxAlpha = 0.46;
+        slot.startLineWidth = 3.0;
+        slot.endLineWidth = 0.8;
+    } else if (val >= 512) {
+        // 大塊（512）
+        slot.endRadius = r * 1.95;
+        slot.durationMs = 480;
+        slot.maxAlpha = 0.40;
+        slot.startLineWidth = 2.6;
+        slot.endLineWidth = 0.7;
+    } else {
+        // 3 連鎖以上（val < 512）
+        slot.endRadius = r * 1.85;
+        slot.durationMs = 460;
+        slot.maxAlpha = 0.34;
+        slot.startLineWidth = 2.2;
+        slot.endLineWidth = 0.6;
+    }
+}
 
 // ==========================================
 // iPhone バックグラウンド／スリープ復帰時のアクティブ進行中タイマー壁時計補正
@@ -115,6 +211,14 @@ function shiftActiveTimersForBackgroundGap(gapMs, prevWallMs) {
     const spawnDelayMs = Math.max(1, FLOAT_BAR.SPAWN_DELAY_MS || 260);
     if (gameState.lastFloatSpawnTime > 0 && (prevWallMs - gameState.lastFloatSpawnTime) < spawnDelayMs) {
         gameState.lastFloatSpawnTime += gapMs;
+    }
+
+    const ripples = gameState.mergeRipples;
+    for (let i = 0; i < ripples.length; i++) {
+        const rp = ripples[i];
+        if (rp.active && (rp.startTime + rp.durationMs) > prevWallMs) {
+            rp.startTime += gapMs;
+        }
     }
 
     if (!world || !world.composites) return;
@@ -240,6 +344,10 @@ function startGame(waitForStart = false) {
     gameState.hasReportedScore = false;
     gameState.canDrop = true;
     gameState.frameCount = 0;
+    hasPendingTouch = false;
+    pendingTapX = 0;
+    pendingTapY = 0;
+    resetMergeRipples();
     resetAimState(gameState);
     resetInputState();
     gameState.lastFloatSpawnTime = Date.now();
@@ -289,16 +397,29 @@ function startGame(waitForStart = false) {
     });
 
     Matter.Events.on(engine, 'afterUpdate', () => {
-        // 物理演算後に、合体キューに入ったソフトボディの破棄と再構築を安全に行い、確定獲得スコアを反映
-        applyMergeScore(handleMerges(world));
+        // 物理演算後に、合体キューに入ったソフトボディの破棄と再構築を安全に行い、確定獲得スコアと水紋演出を反映
+        applyMergeScore(handleMerges(world, triggerMergeRipple));
     });
 }
 
 // ==========================================
-// 入力イベント橋渡し（開始待機2重ガード ＋ aim.js へ委譲 ＆ 発射クールダウン管理）
+// 入力イベント橋渡し（開始待機2重ガード ＋ クールダウン先行タッチ予約 ＋ aim.js へ委譲 ＆ 発射クールダウン管理）
 // ==========================================
 function handleDragStart(startX, startY) {
     if (gameState.isWaitingStart) return;
+
+    // 発射クールダウン中の上段選択帯タップのみ先行予約し、クールダウン明けフレームで自動キャッチする
+    if (!gameState.canDrop) {
+        const maxSelectY = FLOAT_BAR.Y + (FLOAT_BAR.TAP_SELECT_Y_MARGIN || 75);
+        if (!gameState.isGameOver && startY <= maxSelectY) {
+            hasPendingTouch = true;
+            pendingTapX = startX;
+            pendingTapY = startY;
+        }
+        return;
+    }
+
+    hasPendingTouch = false;
     startAimDrag(world, gameState, startX, startY);
 }
 
@@ -308,6 +429,7 @@ function handleDragUpdate(currentX, currentY) {
 }
 
 function handleDragEnd() {
+    hasPendingTouch = false;
     if (gameState.isWaitingStart) return;
     endAimDrag(gameState, () => {
         gameState.canDrop = false;
@@ -320,6 +442,7 @@ function handleDragEnd() {
 }
 
 function handleDragCancel() {
+    hasPendingTouch = false;
     resetAimState(gameState);
 }
 
@@ -356,6 +479,21 @@ function gameLoop(timestamp) {
 
         // 開始画面待機中は勝手なスポーン・勝手合体（0点崩壊）・誤ゲームオーバーを防止するためゲーム進行監視を停止
         if (!gameState.isWaitingStart) {
+            // 1.5 クールダウン中に先行タッチされた指が押されたままクールダウン明けを迎えた場合、自動で上段ゼリーをキャッチ
+            if (hasPendingTouch && gameState.canDrop && !gameState.isDragging) {
+                hasPendingTouch = false;
+                const ptr = getPointerState();
+                if (ptr && ptr.isDragging) {
+                    let caught = startAimDrag(world, gameState, pendingTapX, pendingTapY);
+                    if (!caught) {
+                        const maxSelectY = FLOAT_BAR.Y + (FLOAT_BAR.TAP_SELECT_Y_MARGIN || 75);
+                        if (ptr.currentY <= maxSelectY) {
+                            startAimDrag(world, gameState, ptr.currentX, ptr.currentY);
+                        }
+                    }
+                }
+            }
+
             // 2. ドラッグ中に選択Soboがバー上で横移動した場合も、毎フレーム指先方向へ矢印・軌道予測を追従
             if (gameState.isDragging) {
                 const ptr = getPointerState();
@@ -381,6 +519,7 @@ function gameLoop(timestamp) {
             if (bumperResult.isGameOverTriggered) {
                 gameState.isGameOver = true;
                 gameState.canDrop = false;
+                hasPendingTouch = false;
                 resetAimState(gameState);
                 resetInputState();
 

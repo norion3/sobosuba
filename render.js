@@ -1,9 +1,8 @@
 /**
  * render.js
- * @version v8.11 (Game-Over Afterglow Static Red Border & Result-Screen Inscribed Circle Skip - Phase 3)
+ * @version v8.12 (Subtle Pure-White Merge Water-Ripple Rendering - Phase 3)
  * @changes
- *   - drawWarningOverlay() でゲームオーバー余韻中（gameState.isGameOver === true）の即リターンを改め、点滅を止めて真っ赤な内壁ボーダー（固定アルファ 0.75・線幅 12px・内壁クリップ）＋ 薄い赤ティント（0.12）を静かに保持するよう変更し、確定瞬間の突然消灯および main.js 側 bothPressedRatio = 1 のデッド代入を解消
- *   - drawSingleSoftBody() の最大内接円探索へ !isGameOver ガードを追加し、初回キャッシュ生成を保証したままリザルト静止中の不要な 3 フレーム再探索をスキップして省電力性を向上
+ *   - 大塊作成（512+）および 3 連鎖以上時の極控えめな純白水紋リングを描画する drawMergeRipples(ctx, gameState) を追加（45度スロープ含む内壁ポリゴンクリップ・負経過時間ガード・easeOutCubic 拡散＆二乗減衰・非アクティブ時 Canvas 呼び出し 0 回）し、renderGame() の drawSoftBodies() 直後へ組み込み
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -894,6 +893,78 @@ function drawSoftBodies(ctx, composites, gameState) {
 }
 
 // ==========================================
+// サブ関数 3.5：大塊作成（512+）・3連鎖以上時の極控えめ純白水紋リング（内壁クリップ・非アクティブ時コスト 0ms）
+// ==========================================
+function drawMergeRipples(ctx, gameState) {
+    if (!gameState || !Array.isArray(gameState.mergeRipples)) return;
+    const ripples = gameState.mergeRipples;
+    const len = ripples.length;
+    if (len === 0) return;
+
+    const now = Date.now();
+    let hasActiveRipple = false;
+    for (let i = 0; i < len; i++) {
+        const rp = ripples[i];
+        if (!rp || !rp.active) continue;
+        const duration = Math.max(1, rp.durationMs || 480);
+        const elapsed = Math.max(0, now - rp.startTime);
+        if (elapsed >= duration) {
+            rp.active = false;
+            continue;
+        }
+        hasActiveRipple = true;
+    }
+    if (!hasActiveRipple) return;
+
+    const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
+    const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
+    const cut = CONTAINER.CORNER_CUT_SIZE;
+    const innerLeft = frameW;
+    const innerRight = GAME_WIDTH - frameW;
+    const innerTop = topBarH;
+    const innerBottom = GAME_HEIGHT - frameW;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(innerLeft, innerTop);
+    ctx.lineTo(innerLeft, innerBottom - cut);
+    ctx.lineTo(innerLeft + cut, innerBottom);
+    ctx.lineTo(innerRight - cut, innerBottom);
+    ctx.lineTo(innerRight, innerBottom - cut);
+    ctx.lineTo(innerRight, innerTop);
+    ctx.closePath();
+    ctx.clip();
+
+    for (let i = 0; i < len; i++) {
+        const rp = ripples[i];
+        if (!rp || !rp.active) continue;
+
+        const duration = Math.max(1, rp.durationMs || 480);
+        const elapsed = Math.max(0, now - rp.startTime);
+        if (elapsed >= duration) {
+            rp.active = false;
+            continue;
+        }
+
+        const t = elapsed / duration;
+        const invT = 1 - t;
+        const ease = 1 - invT * invT * invT; // easeOutCubic
+        const radius = rp.startRadius + (rp.endRadius - rp.startRadius) * ease;
+        const alpha = rp.maxAlpha * invT * invT; // 二乗減衰
+        if (alpha <= 0.005 || radius <= 0.5) continue;
+
+        const lineWidth = rp.startLineWidth + (rp.endLineWidth - rp.startLineWidth) * ease;
+        ctx.beginPath();
+        ctx.arc(rp.x, rp.y, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
+        ctx.lineWidth = lineWidth;
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+// ==========================================
 // サブ関数 4：順方向ダイレクトエイム矢印（中心起点白丸＆強弱連動太矢印）・ホップ予測ドット・オフセットガイド
 // ==========================================
 function drawAimAndHopGuide(ctx, gameState) {
@@ -1234,6 +1305,9 @@ export function renderGame(ctx, world, gameState, bumperState) {
 
     // 3. ソフトボディ本体（通常レイヤー全本体 → 通常レイヤー非遮蔽数字最前面 → ホップ最前面レイヤー）
     drawSoftBodies(ctx, composites, gameState);
+
+    // 3.5 大塊作成（512+）・3連鎖以上時の極控えめ純白水紋リング
+    drawMergeRipples(ctx, gameState);
 
     // 4. 順方向ダイレクトエイム矢印・ホップ予測ドット・オフセットガイド
     drawAimAndHopGuide(ctx, gameState);

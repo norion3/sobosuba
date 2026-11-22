@@ -1,9 +1,9 @@
 /**
  * dom_ui.js
- * @version v8.5 (Remove Redundant DOM Warning Overlay & Unify Warning to Canvas - Phase 12)
+ * @version v8.12 (Start Card 4-Line Equal-Style Guide & Single-Line Width Fit - Phase 4)
  * @changes
- *   - v8.4 の視覚的中央配置レイアウトを維持したまま、重い mix-blend-mode: screen を持つ DOM 側 #warningOverlay の重複描画および毎フレーム style.opacity 書込を廃止し、警告演出を Canvas 側（render.js）へ一本化
- *   - setWarningEffect() は既存呼び出し元とのインポート互換を維持するため空関数として保持
+ *   - 開始カード #startCard の本文を既存と同等スタイルの並列 4 行構成へ更新し、2 行目へ「長く引くと強ショット・戻すとキャンセル」を追加
+ *   - 19 文字化による iPhone Pro Max / PC 幅での末尾 1 文字折り返しを防ぐため、#startCard の左右パディング（clamp(1.1rem, 4.5vw, 1.45rem)）および本文フォントサイズ（clamp(0.80rem, 3.35vw, 0.88rem)）を微調整
  * 
  * 動的DOMマウント、HTML要素の更新、スコア表示、音量トグルUI、開始説明画面、および安全なUI制御を行うモジュール
  * 
@@ -361,13 +361,14 @@ export function mountDOM() {
 
     // Tailwindを使わず、GRAVITY WebKit 規格準拠（backdrop-filter不使用・<div>ボタン・実測高さベースの視覚的中央配置）で安全にUIを構築
     uiLayer.innerHTML = `
-        <!-- Start Guide Overlay (初回起動時のみ表示・タイトルなし・簡潔3行説明・オーバーレイ全体タップ開始可・動的縦中央配置) -->
+        <!-- Start Guide Overlay (初回起動時のみ表示・タイトルなし・簡潔4行説明・オーバーレイ全体タップ開始可・動的縦中央配置) -->
         <div id="startOverlay" style="display: none; pointer-events: auto; background-color: rgba(4, 7, 15, 0.68); position: absolute; inset: 0; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: calc(env(safe-area-inset-top, 0px) + ${topPaddingPx + 12}px); padding-right: 20px; padding-bottom: 20px; padding-left: 20px; box-sizing: border-box; overflow-y: auto; touch-action: none; overscroll-behavior: none; z-index: 45;">
-            <div id="startCard" style="width: 100%; max-width: 340px; flex-shrink: 0; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.65), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.5rem, 3.8vh, 2.1rem) clamp(1.25rem, 5vw, 1.75rem); display: flex; flex-direction: column; align-items: center; text-align: center; margin: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
+            <div id="startCard" style="width: 100%; max-width: 340px; flex-shrink: 0; background-color: rgba(10, 16, 28, 0.92); border: 1px solid rgba(56, 189, 248, 0.28); border-radius: 22px; box-shadow: 0 20px 44px rgba(0, 0, 0, 0.65), 0 0 24px rgba(56, 189, 248, 0.10); padding: clamp(1.5rem, 3.8vh, 2.1rem) clamp(1.1rem, 4.5vw, 1.45rem); display: flex; flex-direction: column; align-items: center; text-align: center; margin: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none;">
                 <p style="color: #38bdf8; font-size: clamp(1.15rem, 4.8vw, 1.4rem); font-weight: 800; letter-spacing: 0.05em; line-height: 1.3; margin: 0 0 clamp(0.95rem, 2.6vh, 1.35rem) 0;">同じ数字をくっつけよう</p>
 
-                <div style="display: flex; flex-direction: column; gap: clamp(0.45rem, 1.4vh, 0.68rem); color: #e2e8f0; font-size: clamp(0.84rem, 3.5vw, 0.96rem); font-weight: 500; line-height: 1.5; letter-spacing: 0.02em; margin: 0 0 clamp(1.25rem, 3.2vh, 1.7rem) 0;">
+                <div style="display: flex; flex-direction: column; gap: clamp(0.45rem, 1.4vh, 0.68rem); color: #e2e8f0; font-size: clamp(0.80rem, 3.35vw, 0.88rem); font-weight: 500; line-height: 1.5; letter-spacing: 0.02em; margin: 0 0 clamp(1.25rem, 3.2vh, 1.7rem) 0;">
                     <p style="margin: 0;">引いて発射・タップでそっと落とす</p>
+                    <p style="margin: 0;">長く引くと強ショット・戻すとキャンセル</p>
                     <p style="margin: 0;">上へ引くと となりの塊を飛びこえ</p>
                     <p style="margin: 0;">左右の赤いボタンが押されると終了</p>
                 </div>
