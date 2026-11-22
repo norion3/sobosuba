@@ -1,10 +1,8 @@
 /**
  * aim.js
- * @version v8.9 (Hop Preview Air-Damping Fix, Zero-Alloc Preview Pool & v8.6 Radius Fallback Sync - Phase 1)
+ * @version v8.10 (Bar-Launch Grace Fallback Sync - Phase 3)
  * @changes
- *   - updateHopPreviewPoints() の 1 サブステップあたりの空気抵抗減衰式を Matter.js v0.20 の timeScale 固定刻み積分と一致させ（1 - frictionAir * timeScale）、長距離ホップ時の水平予測着地ズレを解消
- *   - ホップ軌道プレビューのサンプリング点生成を事前確保 7 点プール（hopPreviewPointPool）へ置換し、ドラッグ中の毎フレーム一時オブジェクト生成（GC負荷）を削減
- *   - v8.6 サイズ拡大定数に合わせて基準半径フォールバック値を 24.0 → 25.5 へ同期
+ *   - v8.10 定数更新に合わせて shouldEnableBarLaunchGrace() 内のフォールバック値を LAUNCH_GRACE_MIN_DY: -2 → 6、LAUNCH_GRACE_MIN_SLOPE: 0.22 → 0.12 へ同期
  * 
  * 上段フロートバーのゼリー選択、360度順方向ダイレクトエイム、
  * 天井非激突2.5D上段飛び越えホップ自動切替および放物線軌道プレビュー計算を担う操作モジュール
@@ -282,7 +280,7 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
 
 /**
  * 端狙い・斜め下ショット時に隣カプセル角の引っ掛かりを防ぐすり抜け保護（useBarGrace）を有効にすべきか判定する
- * （dy >= LAUNCH_GRACE_MIN_DY (-2) であり、かつ進行方向すぐ隣に同数字がいない場合のみ true）
+ * （dy >= LAUNCH_GRACE_MIN_DY (6) かつ dy >= LAUNCH_GRACE_MIN_SLOPE (0.12) * |dx| であり、かつ進行方向すぐ隣に同数字がいない場合のみ true）
  * @param {Matter.Composite} selected - 発射する選択ゼリー
  * @param {{ x: number, y: number }} safeAim - クランプ済みドラッグベクトル
  * @param {Matter.World|null} world - 物理世界（同数字隣接判定用）
@@ -291,13 +289,13 @@ export function updateHopPreviewPoints(engine, gameState, selected, centroid, ho
 function shouldEnableBarLaunchGrace(selected, safeAim, world) {
     if (!selected || !safeAim) return false;
 
-    const minDy = (FLOAT_BAR.LAUNCH_GRACE_MIN_DY !== undefined) ? FLOAT_BAR.LAUNCH_GRACE_MIN_DY : -2;
-    const minSlope = (FLOAT_BAR.LAUNCH_GRACE_MIN_SLOPE !== undefined) ? FLOAT_BAR.LAUNCH_GRACE_MIN_SLOPE : 0.22;
+    const minDy = (FLOAT_BAR.LAUNCH_GRACE_MIN_DY !== undefined) ? FLOAT_BAR.LAUNCH_GRACE_MIN_DY : 6;
+    const minSlope = (FLOAT_BAR.LAUNCH_GRACE_MIN_SLOPE !== undefined) ? FLOAT_BAR.LAUNCH_GRACE_MIN_SLOPE : 0.12;
 
     if (safeAim.y < minDy) {
         return false;
     }
-    // LAUNCH_GRACE_MIN_DY が正値指定の場合のみ従来の下向き勾配制限を適用（-2 緩和時は浅い端狙いも保護）
+    // LAUNCH_GRACE_MIN_DY が正値指定の場合のみ下向き勾配制限を適用（真横当てバー上合体を保護）
     if (minDy > 0 && safeAim.y < minSlope * Math.abs(safeAim.x)) {
         return false;
     }

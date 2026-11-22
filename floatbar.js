@@ -1,8 +1,9 @@
 /**
  * floatbar.js
- * @version v8.7 (Plan 2 Adjusted: Earlier Mid/Late Spawn Table Scaling - Phase 2)
+ * @version v8.10 (Safety-Spawn Safe Altitude & Zero-Alloc Gauge State Return - Phase 5)
  * @changes
- *   - ゼリーの形・動きおよび最大出現数字（16）を維持したまま適当落としでの自動掃除を抑えるため、generateNextValue() のスコア帯および出現確率を補正済み案 2 へ更新（序盤 0〜39 は現行同一、中盤前倒し 40 で 4・160 で 8・450 で 16 解禁、1400〜 で比率段階引き上げ、終盤 3500〜 は 1:12% / 2:20% / 4:26% / 8:23% / 16:19%）
+ *   - セーフティスポーン時に出現候補 X 幅と重なる下段ゼリー最上端を避ける安全高度補正（[topBarH + newHalfH + 2, FLOAT_BAR.Y]）を追加し、高積み上げ時の重なり暴発を防止
+ *   - writeGaugeState() の毎フレーム新規オブジェクト生成を削減し、gameState.spawnerGauges または事前確保バッファ（fallbackGaugeState）をそのまま返却するよう変更
  * 
  * 上部フロートバーのゼリー生成・出現テーブル・左右2点クリアランス検知スポーナー・
  * セーフティスポーンおよび上枠スポーナーゲージ進捗管理を担うモジュール
@@ -23,6 +24,7 @@ import {
 const floatingJelliesBuffer = [];
 const barAreaJelliesBuffer = [];
 const barAreaEntryPool = [];
+const fallbackGaugeState = { leftGaugeRatio: 0, rightGaugeRatio: 0 };
 
 // ゲーム開始直後の初回補充（プレイヤー未操作時の端同数字自動合体回避）フラグ
 let isInitialRefillPending = false;
@@ -289,7 +291,7 @@ function computeSpawnerGaugeRatio(clearance, requiredMargin, newHalfW, delayRati
 }
 
 /**
- * gameState.spawnerGauges へ左右ゲージ進捗率をインプレース反映して返す
+ * gameState.spawnerGauges へ左右ゲージ進捗率をインプレース反映して返す（ゼロアロケーション）
  * @param {Object} gameState
  * @param {number} leftRatio
  * @param {number} rightRatio
@@ -306,12 +308,12 @@ function writeGaugeState(gameState, leftRatio, rightRatio) {
             gameState.spawnerGauges.leftGaugeRatio = clampedL;
             gameState.spawnerGauges.rightGaugeRatio = clampedR;
         }
+        return gameState.spawnerGauges;
     }
 
-    return {
-        leftGaugeRatio: clampedL,
-        rightGaugeRatio: clampedR
-    };
+    fallbackGaugeState.leftGaugeRatio = clampedL;
+    fallbackGaugeState.rightGaugeRatio = clampedR;
+    return fallbackGaugeState;
 }
 
 // ==========================================
@@ -519,7 +521,33 @@ export function maintainFloatBar(world, gameState) {
             }
         }
 
-        const safeComp = createSoftBodyJelly(bestX, FLOAT_BAR.Y, val, { x: 0, y: 0 }, true, false);
+        // 高積み上げ時の重なり暴発を防ぐため、出現候補 X 幅と重なる下段ゼリー最上端を避ける安全高度へ補正
+        const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
+        const minSafeY = topBarH + newHalfH + 2;
+        let safeSpawnY = FLOAT_BAR.Y;
+        const composites = world.composites || Matter.Composite.allComposites(world);
+        let minFieldTopY = Infinity;
+
+        for (let i = 0; i < composites.length; i++) {
+            const other = composites[i];
+            if (!other || other.label !== 'jelly_composite' ||
+                other.isFloating || other.isBarHopping || !other.aabb) {
+                continue;
+            }
+            const aB = other.aabb;
+            const rB = other.particleRadius || 4;
+            if (!(bestX + newHalfW < aB.minX - rB || bestX - newHalfW > aB.maxX + rB)) {
+                const topY = aB.minY - rB;
+                if (topY < minFieldTopY) {
+                    minFieldTopY = topY;
+                }
+            }
+        }
+        if (isFinite(minFieldTopY)) {
+            safeSpawnY = Math.max(minSafeY, Math.min(FLOAT_BAR.Y, minFieldTopY - newHalfH - 2));
+        }
+
+        const safeComp = createSoftBodyJelly(bestX, safeSpawnY, val, { x: 0, y: 0 }, true, false);
         Matter.Composite.add(world, safeComp);
 
         isInitialRefillPending = false;

@@ -1,10 +1,9 @@
 /**
  * sound.js
- * @version v8.8 (Plan 2 Collide Sound Refinement: Pentatonic Harmony, Density & Post-Merge Ducking - Phase 2)
+ * @version v8.10 (Natural Water-Drop Merge Envelope & Clean Reverb Tail Tuning - Phase 1)
  * @changes
- *   - 下段の揺れ衝突音の連続発火密度を抑えるため COLLIDE_THROTTLE_MS を 55 → 120 へ調整
- *   - 合体音と美しく協和する5音階定数 COLLIDE_PENTATONIC_FREQS（G4 / E4 / D4 / C4 / A3）および連続揺れ密度状態変数 collideDensity（hardResetAudioContext() でのリセット含む）を追加
- *   - playSoundCollide() へ lastMergeScheduledTime > 0 ガード付き合体直後ダッキング、dtMs 先行計測による連続揺れ指数減衰密度ダッキング、非線形音量カーブ、非線形5音階マッピング、および丸みのあるスイープ（0.90f → 1.00f / 12ms アタック / 70〜105ms 減衰）を適用
+ *   - playSoundMerge() の「ぽわぁ〜ん」とした固定音程残響を解消し自然な水滴・水球合体音へ整えるため、層1（アタック 4.5〜6.5ms・スイープ 0.78f→1.16f / 28〜42ms・減衰 115〜175ms・基準ピーク 0.205〜0.235）、層2（アタック 6〜8ms・スイープ 0.86→1.00・減衰 75〜120ms・基準ピーク 0.022〜0.070）、層3（遅延 30〜44ms・アタック 3.5ms・スイープ 0.80→1.00 / 18ms・減衰 52〜72ms・係数 0.16）へ調整
+ *   - 長時間プレイ時の残響蓄積を抑えつつ清らかな水辺の響きを保つため、createWaterReverbIR() の duration を 0.58 → 0.40、ensureAudioGraph() の dryGain を 0.80 → 0.85・wetGain を 0.22 → 0.15 へ微調整
  * 
  * Web Audio APIを使用した軽量プロシージャル癒し水音サウンドモジュール
  * 
@@ -151,7 +150,7 @@ function clearAudioGraphCache() {
 }
 
 /**
- * 静かな水辺リバーブ用のステレオ 0.58 秒 指数減衰インパルス応答（IR）バッファを生成する
+ * 静かな水辺リバーブ用のステレオ 0.40 秒 指数減衰インパルス応答（IR）バッファを生成する
  * 生データ（Float32Array）をサンプルレート単位でキャッシュし、再構築時のタップ遅延を < 0.2ms へ抑える
  * @param {AudioContext} ctx
  * @returns {AudioBuffer|null}
@@ -159,7 +158,7 @@ function clearAudioGraphCache() {
 function createWaterReverbIR(ctx) {
     try {
         const sampleRate = ctx.sampleRate || 44100;
-        const duration = 0.58;
+        const duration = 0.40;
         const length = Math.max(2048, Math.floor(sampleRate * duration));
 
         if (cachedReverbSampleRate !== sampleRate ||
@@ -214,7 +213,7 @@ function createWaterReverbIR(ctx) {
 
 /**
  * 現在の AudioContext に紐づくマスターチェイン
- * （合流入力 → Dry 80% ＋ Wet 22% 水辺リバーブ [0.58s IR → Lowpass 1650Hz] → Master Lowpass 2600Hz → 高速ソフトリミッター → MasterGain）
+ * （合流入力 → Dry 85% ＋ Wet 15% 水辺リバーブ [0.40s IR → Lowpass 1650Hz] → Master Lowpass 2600Hz → 高速ソフトリミッター → MasterGain）
  * および 0.25 秒分の共有ホワイトノイズバッファを 1対1 で構築・取得する
  * @param {AudioContext} ctx
  * @returns {{ input: AudioNode, masterGain: GainNode, noiseBuffer: AudioBuffer|null } | null}
@@ -243,9 +242,9 @@ function ensureAudioGraph(ctx) {
         lp.frequency.setValueAtTime(2600, now);
         lp.Q.setValueAtTime(0.45, now);
 
-        // 2. パラレル Dry（80%）＋ Wet（22%：静かな水辺リバーブ → 1650Hz ローパス）
+        // 2. パラレル Dry（85%）＋ Wet（15%：静かな水辺リバーブ → 1650Hz ローパス）
         const dryGain = ctx.createGain();
-        dryGain.gain.setValueAtTime(0.80, now);
+        dryGain.gain.setValueAtTime(0.85, now);
         inputBus.connect(dryGain);
         dryGain.connect(lp);
 
@@ -261,7 +260,7 @@ function ensureAudioGraph(ctx) {
                 wetFilter.Q.setValueAtTime(0.5, now);
 
                 const wetGain = ctx.createGain();
-                wetGain.gain.setValueAtTime(0.22, now);
+                wetGain.gain.setValueAtTime(0.15, now);
 
                 inputBus.connect(convolver);
                 convolver.connect(wetFilter);
@@ -1037,9 +1036,9 @@ export function playSoundMergeAnticipate(sizeValue = 4) {
 }
 
 /**
- * 合体音（耳に優しいせせらぎ・水琴窟ASMR合成「ぽろんっ…ぴく」／大塊「こぽぉんっ…ぽろ」）
+ * 合体音（耳に優しい水滴・水球ASMR合成「ぽくんっ…ぴく」／大塊「こぽっ…ぽろ」）
  * 400〜220Hz 黄金帯域・ウェーブペンタトニック旋律・3層純正整数比（完全オクターブ/完全五度）・
- * 等ラウドネス自動補正・連続密度ダッキング・62ms ハープアルペジオ・ノイズ撤廃・10ms 丸アタック
+ * 等ラウドネス自動補正・連続密度ダッキング・62ms ハープアルペジオ・ノイズ撤廃・サイズ連動丸アタック
  * @param {number} [chainCount=0] - 現在の連鎖回数（0始まり）
  * @param {number} [mergedValue=4] - 合体後に生成されたゼリーの数値（省略時は互換デフォルト 4）
  */
@@ -1084,13 +1083,14 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     const pitchRatio = Math.pow(2, semitones / 12);
     const f = chainBaseFreq * pitchRatio * j;
 
-    // --- 層 1：主水滴（純サイン波：24〜38ms で 0.82f → 1.18f へ穏やかに上昇、10ms 丸アタック、等ラウドネス補正） ---
-    const sweepDur = 0.024 + sizeNorm * 0.014;
-    const decayDur = 0.180 + sizeNorm * 0.120;
-    const mainStartFreq = Math.max(150, f * 0.82);
-    const mainEndFreq = Math.min(1180, f * 1.18);
+    // --- 層 1：主水滴（純サイン波：28〜42ms で 0.78f → 1.16f へ上昇、4.5〜6.5ms サイズ連動アタック、115〜175ms 減衰） ---
+    const sweepDur = 0.028 + sizeNorm * 0.014;
+    const decayDur = 0.115 + sizeNorm * 0.060;
+    const mainAttack = 0.0045 + sizeNorm * 0.0020;
+    const mainStartFreq = Math.max(150, f * 0.78);
+    const mainEndFreq = Math.min(1180, f * 1.16);
     const loudnessComp = clamp(Math.pow(420 / Math.max(420, mainEndFreq), 0.55), 0.56, 1.0);
-    const mainPeak = (0.255 + sizeNorm * 0.035) * loudnessComp * mainDuck;
+    const mainPeak = (0.205 + sizeNorm * 0.030) * loudnessComp * mainDuck;
 
     const mainOsc = ctx.createOscillator();
     const mainGain = ctx.createGain();
@@ -1099,7 +1099,7 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     mainOsc.frequency.exponentialRampToValueAtTime(mainEndFreq, startTime + sweepDur);
 
     mainGain.gain.setValueAtTime(0.0001, startTime);
-    mainGain.gain.linearRampToValueAtTime(mainPeak, startTime + 0.010);
+    mainGain.gain.linearRampToValueAtTime(mainPeak, startTime + mainAttack);
     mainGain.gain.exponentialRampToValueAtTime(0.0001, startTime + decayDur);
 
     mainOsc.connect(mainGain);
@@ -1111,17 +1111,18 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
 
     // --- 層 2：水底ボディ（純正整数比：mainEndFreq >= 310Hz は完全オクターブ 1:2、未満は純正完全五度下 2:3 で濁りゼロ） ---
     const bodyFreq = (mainEndFreq >= 310) ? (mainEndFreq * 0.5) : (mainEndFreq * (2 / 3));
-    const bodyDur = 0.165 + sizeNorm * 0.115;
-    const bodyPeak = (0.030 + sizeNorm * 0.065) * loudnessComp * mainDuck;
+    const bodyDur = 0.075 + sizeNorm * 0.045;
+    const bodyAttack = 0.006 + sizeNorm * 0.002;
+    const bodyPeak = (0.022 + sizeNorm * 0.048) * loudnessComp * mainDuck;
 
     const bodyOsc = ctx.createOscillator();
     const bodyGain = ctx.createGain();
     bodyOsc.type = 'sine';
-    bodyOsc.frequency.setValueAtTime(bodyFreq * 0.92, startTime);
+    bodyOsc.frequency.setValueAtTime(bodyFreq * 0.86, startTime);
     bodyOsc.frequency.exponentialRampToValueAtTime(bodyFreq, startTime + sweepDur * 0.95);
 
     bodyGain.gain.setValueAtTime(0.0001, startTime);
-    bodyGain.gain.linearRampToValueAtTime(bodyPeak, startTime + 0.012);
+    bodyGain.gain.linearRampToValueAtTime(bodyPeak, startTime + bodyAttack);
     bodyGain.gain.exponentialRampToValueAtTime(0.0001, startTime + bodyDur);
 
     bodyOsc.connect(bodyGain);
@@ -1131,14 +1132,14 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     bodyOsc.start(startTime);
     bodyOsc.stop(startTime + bodyDur + 0.02);
 
-    // --- 層 3：2次小雫（40〜58ms 遅れ：主音到達の純正完全五度上 1.5倍・連続密度ダッキング連動・高域ノイズなし） ---
-    const subDelay = 0.040 + sizeNorm * 0.018;
+    // --- 層 3：2次小雫（30〜44ms 遅れ：主音到達の純正完全五度上 1.5倍・連続密度ダッキング連動・高域ノイズなし） ---
+    const subDelay = 0.030 + sizeNorm * 0.014;
     const subStart = startTime + subDelay;
     const subSweep = 0.018;
-    const subDur = 0.068 + sizeNorm * 0.026;
+    const subDur = 0.052 + sizeNorm * 0.020;
     const subEndFreq = Math.min(1650, mainEndFreq * 1.5);
-    const subStartFreq = subEndFreq * 0.84;
-    const subPeak = mainPeak * 0.18 * subDuck;
+    const subStartFreq = subEndFreq * 0.80;
+    const subPeak = mainPeak * 0.16 * subDuck;
 
     const subOsc = ctx.createOscillator();
     const subGain = ctx.createGain();
@@ -1147,7 +1148,7 @@ export function playSoundMerge(chainCount = 0, mergedValue = 4) {
     subOsc.frequency.exponentialRampToValueAtTime(subEndFreq, subStart + subSweep);
 
     subGain.gain.setValueAtTime(0.0001, subStart);
-    subGain.gain.linearRampToValueAtTime(subPeak, subStart + 0.006);
+    subGain.gain.linearRampToValueAtTime(subPeak, subStart + 0.0035);
     subGain.gain.exponentialRampToValueAtTime(0.0001, subStart + subDur);
 
     subOsc.connect(subGain);

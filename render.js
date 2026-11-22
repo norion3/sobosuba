@@ -1,10 +1,9 @@
 /**
  * render.js
- * @version v8.9 (Dual-Bumper Warning Distinction, 3-Frame Relative-Offset Inscribed Circle Cache & v8.6 Fallback Sync - Phase 4)
+ * @version v8.10 (Time-Based 120Hz ProMotion Pulse & Both-Pressed Ratio Urgency Border - Phase 7)
  * @changes
- *   - drawWarningOverlay() を片側押込（穏やかな点滅：最大 0.075）と両側同時押込（切迫感のある高速点滅：最大 0.22）で差別化し、ゲームオーバー寸前の視認性を向上
- *   - drawSingleSoftBody() の最大内接円探索へ重心相対オフセットキャッシュ（_cachedTextOffsetX / _cachedTextOffsetY / _cachedTextThickness）と 3 フレーム均等分散間引きを導入し、高速落下時の追従ズレ 0px のまま終盤密集時の描画 CPU 負荷を削減
- *   - v8.6 定数に合わせてフォールバック値を同期（FLOAT_BAR.CHANNEL_HALF_HEIGHT: 25 → 26 / 基準半径: 21.5 → 25.5）
+ *   - iPhone 120Hz ProMotion 駆動時の点滅 2 倍速化および位相暴走を防ぐため、drawSoftBodies() の共鳴ハイライトおよび drawWarningOverlay() の赤点滅を performance.now() * 0.001 の定数角周波数（10.8 / 5.4 / 13.2 rad/s）へ統一
+ *   - drawWarningOverlay() へ bumperState.bothPressedRatio 連動の切迫演出（赤フラッシュ濃度上昇 ＋ 内壁クリップによる外枠・LED 非干渉の赤ボーダーグロウ＆滑らか減衰）を追加
  * 
  * ソフトボディの中空ビーズリングを滑らかなスライムとして描画するレンダリングモジュール
  * 
@@ -849,7 +848,9 @@ function drawSingleSoftBody(ctx, comp, gameState, renderMeta, deferText = false,
 function drawSoftBodies(ctx, composites, gameState) {
     if (!composites || composites.length === 0) return;
 
-    const pulseWave = 0.5 + 0.5 * Math.sin(gameState.frameCount * 0.18);
+    // 60Hz / 120Hz ProMotion いずれでも一定リズムを保つ時間ベース定数角周波数（10.8 rad/s）
+    const timeSec = performance.now() * 0.001;
+    const pulseWave = 0.5 + 0.5 * Math.sin(timeSec * 10.8);
     const isAiming = Boolean(gameState.isDragging && !gameState.isGameOver && gameState.selectedJelly);
 
     const renderMeta = {
@@ -1140,19 +1141,59 @@ function drawAimAndHopGuide(ctx, gameState) {
 }
 
 // ==========================================
-// サブ関数 5：バンパー押し込み時の警告オーバーレイ（片側押込と両側同時押込を差別化）
+// サブ関数 5：バンパー押し込み時の警告オーバーレイ（時間ベース定数角周波数 ＆ bothPressedRatio 連動切迫演出）
 // ==========================================
 function drawWarningOverlay(ctx, gameState, bumperState) {
     if (!bumperState || !gameState || gameState.isGameOver) return;
     const bothPressed = Boolean(bumperState.leftPressed && bumperState.rightPressed);
     const anyPressed = Boolean(bumperState.leftPressed || bumperState.rightPressed);
-    if (!anyPressed) return;
+    const bothPressedRatio = Math.max(0, Math.min(1, Number(bumperState.bothPressedRatio) || 0));
+    if (!anyPressed && bothPressedRatio <= 0.05) return;
 
-    const alpha = bothPressed
-        ? (Math.abs(Math.sin(gameState.frameCount * 0.22)) * 0.22)
-        : (Math.abs(Math.sin(gameState.frameCount * 0.09)) * 0.075);
-    ctx.fillStyle = `rgba(255, 71, 87, ${alpha.toFixed(3)})`;
-    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+    // 60Hz / 120Hz ProMotion いずれでも一定リズムを保つ時間ベース定数角周波数（片側 5.4 / 両側 13.2 rad/s）
+    const timeSec = performance.now() * 0.001;
+    const urgentPulse = Math.abs(Math.sin(timeSec * 13.2));
+
+    // (A) 画面赤フラッシュ（片側は穏やか、両側同時押込時は bothPressedRatio に連動して濃度上昇）
+    if (anyPressed) {
+        const flashAlpha = bothPressed
+            ? (urgentPulse * (0.14 + bothPressedRatio * 0.12) + bothPressedRatio * 0.06)
+            : (Math.abs(Math.sin(timeSec * 5.4)) * 0.075);
+        ctx.fillStyle = `rgba(255, 71, 87, ${flashAlpha.toFixed(3)})`;
+        ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+    }
+
+    // (B) 両側同時押込の切迫感を示す内壁赤ボーダーグロウ（内壁クリップで外枠・LEDと 0.000px 重なりなし・高速減衰時も滑らか消灯）
+    if (bothPressedRatio > 0.05) {
+        const frameW = (CONTAINER.FRAME_WIDTH !== undefined) ? CONTAINER.FRAME_WIDTH : 8;
+        const topBarH = (CONTAINER.TOP_BAR_HEIGHT !== undefined) ? CONTAINER.TOP_BAR_HEIGHT : 12;
+        const cut = CONTAINER.CORNER_CUT_SIZE;
+        const innerLeft = frameW;
+        const innerRight = GAME_WIDTH - frameW;
+        const innerTop = topBarH;
+        const innerBottom = GAME_HEIGHT - frameW;
+
+        const fadeFactor = Math.max(0, Math.min(1, (bothPressedRatio - 0.05) / 0.95));
+        const borderPulse = 0.72 + 0.28 * urgentPulse;
+        const borderAlpha = fadeFactor * (0.35 + 0.55 * bothPressedRatio) * borderPulse;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(innerLeft, innerTop);
+        ctx.lineTo(innerLeft, innerBottom - cut);
+        ctx.lineTo(innerLeft + cut, innerBottom);
+        ctx.lineTo(innerRight - cut, innerBottom);
+        ctx.lineTo(innerRight, innerBottom - cut);
+        ctx.lineTo(innerRight, innerTop);
+        ctx.closePath();
+        ctx.clip();
+
+        ctx.strokeStyle = `rgba(255, 30, 70, ${borderAlpha.toFixed(3)})`;
+        ctx.lineWidth = 4 + bothPressedRatio * 8;
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+        ctx.restore();
+    }
 }
 
 /**
@@ -1160,7 +1201,7 @@ function drawWarningOverlay(ctx, gameState, bumperState) {
  * @param {CanvasRenderingContext2D} ctx - 描画先のCanvasコンテキスト
  * @param {Object} world - Matter.jsの物理世界
  * @param {Object} gameState - 現在のゲーム状態
- * @param {Object} bumperState - バンパーの状態と実体 (leftBumper, rightBumper, leftPressed, rightPressed, leftPushRatio, rightPushRatio)
+ * @param {Object} bumperState - バンパーの状態と実体 (leftBumper, rightBumper, leftPressed, rightPressed, leftPushRatio, rightPushRatio, bothPressedRatio)
  */
 export function renderGame(ctx, world, gameState, bumperState) {
     // 0. Retina（DPR）高精細解像度対応：実Canvas解像度と論理サイズ（GAME_WIDTH x GAME_HEIGHT）を自動同期

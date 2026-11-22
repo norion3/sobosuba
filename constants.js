@@ -1,8 +1,8 @@
 /**
  * constants.js
- * @version v8.8 (Plan 2 Collide Sound Refinement: Threshold & Pair Cooldown Tuning - Phase 1)
+ * @version v8.10 (Bar-Launch Grace Threshold & Slope Tuning - Phase 2)
  * @changes
- *   - 下段の揺れによる細かな接触音の過剰発火を抑えつつ心地よい着地・衝突音を残すため、PHYSICS.COLLIDE_SOUND_MIN_SPEED を 0.65 → 0.90、PHYSICS.COLLIDE_SOUND_PAIR_COOLDOWN_MS を 450 → 650 へ調整
+ *   - 真横ショットでの隣押し・バー上合体保護と浅い端狙い斜め下ショットでのすり抜け保護を両立するため、FLOAT_BAR.LAUNCH_GRACE_MIN_DY を -2 → 6、FLOAT_BAR.LAUNCH_GRACE_MIN_SLOPE を 0.22 → 0.12 へ更新
  * 
  * sobosuba風パズルの物理パラメータ、ゼリーの定義、UIセーフエリア等の定数モジュール
  * v7.x/v8.x改修対象モジュールから絶対パス（/sobosuba/constants.js?v=7）でインポートして使用されます。
@@ -221,8 +221,8 @@ export const FLOAT_BAR = {
 
     // 斜め下ショット時の隣カプセル角引っ掛かり防止（AABB離脱までの一時すり抜け保護）
     LAUNCH_BAR_GRACE_MAX_MS: 220, // AABB離脱待ちすり抜け保護の安全上限時間（ms）
-    LAUNCH_GRACE_MIN_DY: -2,      // 浅い角度の端狙いショットでも隣カプセル失速を防ぐ下向き発動条件（px）
-    LAUNCH_GRACE_MIN_SLOPE: 0.22, // 真横当てバー上合体を保護する最小下向き勾配（dy >= 0.22 * |dx|）
+    LAUNCH_GRACE_MIN_DY: 6,       // 真横ショット保護と浅い端狙い斜め下ショット保護を両立する下向き発動条件（px）
+    LAUNCH_GRACE_MIN_SLOPE: 0.12, // 真横当てバー上合体を保護しつつ浅い斜め下ショットを通す最小下向き勾配（dy >= 0.12 * |dx|）
 
     // 上段「横長カプセル（ピル）形状」圧縮 ＆ 発射／着地モーフィング定数
     CHANNEL_HALF_HEIGHT: 26,      // 1(25.5px)が真円のまま収まり4〜64が横長に伸びるフラット帯半高

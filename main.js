@@ -1,11 +1,11 @@
 /**
  * main.js
- * @version v8.5 (Safe Drag Cancel, Input Reset, Merge-Time Score Sync & Warning Cleanup - Phase 13)
+ * @version v8.10 (Background Wall-Clock Timer Shift, Both-Pressed Ratio & Zero-Alloc Bumper State - Phase 6)
  * @changes
- *   - initInput() へ操作中断・右クリック時の安全キャンセル専用コールバック handleDragCancel（resetAimState(gameState)）を渡すよう追加
- *   - ポインタ・ドラッグ状態の残留を防ぐため、input.js から resetInputState をインポートし、startGame() およびゲームオーバー確定時に呼び出すよう追加
- *   - 合体スコア確定タイミングの整合性を確保するため、handleCollisions() 側の先行加算を廃止し、afterUpdate 内の handleMerges(world) 戻り値（合体実行確定時の獲得スコア）をスコアへ反映するよう統合
- *   - 警告演出の Canvas 側一本化に伴い、dom_ui.js の setWarningEffect インポートおよび毎フレーム呼び出しを削除
+ *   - constants.js?v=7 から BUMPER, FLOAT_BAR をインポート追加
+ *   - iPhone バックグラウンド／スリープ復帰時（wallGapMs > 200）に stepPhysics() 直前でアクティブ進行中のタイマーのみ厳密選別シフトする壁時計補正関数 shiftActiveTimersForBackgroundGap() を追加（startGame() での lastWallTimeMs = 0 リセット含む）
+ *   - updateBumpers() の同時押込経過時間から bothPressedRatio（0.0〜1.0）を算出し、gameState.lastBumperState および事前確保 renderBumperState をインプレース更新するよう変更（毎フレームの一時オブジェクト生成を削減）
+ *   - ゲームオーバー判定コメントの旧数値（250ms）を現行定数（450ms）へ同期
  * 
  * sobosuba風パズル（中空ビーズリング・ソフトボディ版）のマスター統合モジュール
  * 
@@ -16,7 +16,7 @@
  */
 
 import Matter from 'https://esm.sh/matter-js';
-import { GAME_WIDTH, GAME_HEIGHT, UI } from '/sobosuba/constants.js?v=7';
+import { GAME_WIDTH, GAME_HEIGHT, UI, BUMPER, FLOAT_BAR } from '/sobosuba/constants.js?v=7';
 import { initPhysics, stepPhysics, updateBumpers, leftBumper, rightBumper } from '/sobosuba/physics.js?v=7';
 import { updateSoftBodies } from '/sobosuba/softbody.js?v=7';
 import { handleCollisions, handleMerges, resetMergeQueues } from '/sobosuba/jelly.js?v=7';
@@ -36,8 +36,20 @@ let canvas;
 let ctx;
 let isBooted = false;
 let lastFrameTime = 0;
+let lastWallTimeMs = 0;
 let dropCooldownTimer = null;
 let gameOverTimer = null;
+
+// 描画モジュールへ渡すバンパー状態の事前確保バッファ（毎フレームの一時オブジェクト生成削減）
+const renderBumperState = {
+    leftBumper: null,
+    rightBumper: null,
+    leftPressed: false,
+    rightPressed: false,
+    leftPushRatio: 0,
+    rightPushRatio: 0,
+    bothPressedRatio: 0
+};
 
 const gameState = {
     score: 0,
@@ -73,14 +85,80 @@ const gameState = {
     dragVectorX: 0,
     dragVectorY: 0,
 
-    // 描画用バンパー最新状態キャッシュ（左右枠内の赤点灯サイドバー連動用）
+    // 描画用バンパー最新状態キャッシュ（左右枠内の赤点灯サイドバー ＆ 両側同時押込切迫演出連動用）
     lastBumperState: {
         leftPressed: false,
         rightPressed: false,
         leftPushRatio: 0,
-        rightPushRatio: 0
+        rightPushRatio: 0,
+        bothPressedRatio: 0
     }
 };
+
+// ==========================================
+// iPhone バックグラウンド／スリープ復帰時のアクティブ進行中タイマー壁時計補正
+// ==========================================
+/**
+ * バックグラウンド離脱・スリープ復帰等で壁時計が大きく飛んだ際（wallGapMs > 200ms）、
+ * 離脱直前（prevWallMs）時点でアクティブ進行中だったタイマーのみを gapMs 分シフトして
+ * 空中強制着地・ホップ強制ワープ・既終了フラッシュ復活を防止する
+ * @param {number} gapMs - 経過した壁時計ギャップ（ms）
+ * @param {number} prevWallMs - 離脱直前フレームの壁時計時刻（ms）
+ */
+function shiftActiveTimersForBackgroundGap(gapMs, prevWallMs) {
+    if (gapMs <= 0) return;
+
+    if (gameState.barEmptySince > 0) {
+        gameState.barEmptySince += gapMs;
+    }
+
+    const spawnDelayMs = Math.max(1, FLOAT_BAR.SPAWN_DELAY_MS || 260);
+    if (gameState.lastFloatSpawnTime > 0 && (prevWallMs - gameState.lastFloatSpawnTime) < spawnDelayMs) {
+        gameState.lastFloatSpawnTime += gapMs;
+    }
+
+    if (!world || !world.composites) return;
+    const composites = world.composites;
+
+    for (let i = 0; i < composites.length; i++) {
+        const comp = composites[i];
+        if (!comp || comp.label !== 'jelly_composite') continue;
+
+        if (comp.isGrowing && comp.createdAt > 0) {
+            comp.createdAt += gapMs;
+        }
+        if (comp.isMorphing && comp.morphStartTime > 0) {
+            comp.morphStartTime += gapMs;
+        }
+        if (!comp.hasLanded && comp.launchedAt > 0) {
+            comp.launchedAt += gapMs;
+        }
+        if (comp.hasLanded && (comp.landedFirmness === undefined || comp.landedFirmness < 0.999) && comp.landedAt > 0) {
+            comp.landedAt += gapMs;
+        }
+        if (comp.barGraceActive && comp.barGraceStartTime > 0) {
+            comp.barGraceStartTime += gapMs;
+        }
+        if (comp.isBarHopping && comp.hopStartTime > 0) {
+            comp.hopStartTime += gapMs;
+        }
+        if (comp.mergeProtectedUntil && comp.mergeProtectedUntil > prevWallMs) {
+            comp.mergeProtectedUntil += gapMs;
+        }
+        if (comp.mergeFlashUntil && comp.mergeFlashUntil > prevWallMs) {
+            if (comp.mergeFlashStart) {
+                comp.mergeFlashStart += gapMs;
+            }
+            comp.mergeFlashUntil += gapMs;
+        }
+        if (comp.mergePreGlowUntil && comp.mergePreGlowUntil > prevWallMs) {
+            if (comp.mergePreGlowStart) {
+                comp.mergePreGlowStart += gapMs;
+            }
+            comp.mergePreGlowUntil += gapMs;
+        }
+    }
+}
 
 // ==========================================
 // GRAVITY ランキング向けスコア送信（標準 postMessage 方式・旧 AgentSDK 不使用）
@@ -170,13 +248,13 @@ function startGame(waitForStart = false) {
     gameState.lastSpawnSide = 'right';
     gameState.spawnerGauges.leftGaugeRatio = 0;
     gameState.spawnerGauges.rightGaugeRatio = 0;
-    gameState.lastBumperState = {
-        leftPressed: false,
-        rightPressed: false,
-        leftPushRatio: 0,
-        rightPushRatio: 0
-    };
+    gameState.lastBumperState.leftPressed = false;
+    gameState.lastBumperState.rightPressed = false;
+    gameState.lastBumperState.leftPushRatio = 0;
+    gameState.lastBumperState.rightPushRatio = 0;
+    gameState.lastBumperState.bothPressedRatio = 0;
     lastFrameTime = 0;
+    lastWallTimeMs = 0;
 
     // UIのリセット
     updateScoreUI(gameState.score);
@@ -260,6 +338,16 @@ function gameLoop(timestamp) {
     gameState.frameCount++;
 
     if (!gameState.isGameOver) {
+        // 0. iPhone バックグラウンド／スリープ復帰時の壁時計ギャップ補正（必ず stepPhysics 直前で実行）
+        const nowWallMs = Date.now();
+        if (lastWallTimeMs > 0) {
+            const wallGapMs = nowWallMs - lastWallTimeMs;
+            if (wallGapMs > 200) {
+                shiftActiveTimersForBackgroundGap(wallGapMs, lastWallTimeMs);
+            }
+        }
+        lastWallTimeMs = nowWallMs;
+
         // 1. 60Hz基準固定タイムステップ・4分割サブステップで物理演算およびソフトボディを更新
         // （初回開始待機中も背景の初期4個がぷるぷる浮くアイドル動作のみ維持）
         stepPhysics(deltaMs, (subDelta) => {
@@ -281,14 +369,15 @@ function gameLoop(timestamp) {
 
             // 4. 左右バンパーの押し込み変位量・押し込み率および同時継続押し込み判定（stepPhysics の固定刻み実経過時間と同期）
             const bumperResult = updateBumpers();
-            gameState.lastBumperState = {
-                leftPressed: bumperResult.leftPressed,
-                rightPressed: bumperResult.rightPressed,
-                leftPushRatio: bumperResult.leftPushRatio,
-                rightPushRatio: bumperResult.rightPushRatio
-            };
+            const holdMs = Math.max(1, BUMPER.GAME_OVER_HOLD_MS || 450);
+            const bothPressedRatio = Math.max(0, Math.min(1, (bumperResult.bothPressedDurationMs || 0) / holdMs));
+            gameState.lastBumperState.leftPressed = bumperResult.leftPressed;
+            gameState.lastBumperState.rightPressed = bumperResult.rightPressed;
+            gameState.lastBumperState.leftPushRatio = bumperResult.leftPushRatio;
+            gameState.lastBumperState.rightPushRatio = bumperResult.rightPushRatio;
+            gameState.lastBumperState.bothPressedRatio = bothPressedRatio;
 
-            // 【ゲームオーバー判定】両側のバンパーが同時に連続250ms押し込まれた場合
+            // 【ゲームオーバー判定】両側のバンパーが同時に連続450ms押し込まれた場合
             if (bumperResult.isGameOverTriggered) {
                 gameState.isGameOver = true;
                 gameState.canDrop = false;
@@ -300,6 +389,7 @@ function gameLoop(timestamp) {
                 gameState.lastBumperState.rightPressed = true;
                 gameState.lastBumperState.leftPushRatio = 1;
                 gameState.lastBumperState.rightPushRatio = 1;
+                gameState.lastBumperState.bothPressedRatio = 1;
 
                 playSoundGameOverZap();
 
@@ -323,15 +413,14 @@ function gameLoop(timestamp) {
         }
     }
 
-    // 描画モジュールへ渡すバンパー状態（枠内赤点灯サイドバー用の押し込み率を含む）
-    const renderBumperState = {
-        leftBumper,
-        rightBumper,
-        leftPressed: gameState.lastBumperState.leftPressed,
-        rightPressed: gameState.lastBumperState.rightPressed,
-        leftPushRatio: gameState.lastBumperState.leftPushRatio,
-        rightPushRatio: gameState.lastBumperState.rightPushRatio
-    };
+    // 描画モジュールへ渡すバンパー状態（事前確保バッファをインプレース更新）
+    renderBumperState.leftBumper = leftBumper;
+    renderBumperState.rightBumper = rightBumper;
+    renderBumperState.leftPressed = gameState.lastBumperState.leftPressed;
+    renderBumperState.rightPressed = gameState.lastBumperState.rightPressed;
+    renderBumperState.leftPushRatio = gameState.lastBumperState.leftPushRatio;
+    renderBumperState.rightPushRatio = gameState.lastBumperState.rightPushRatio;
+    renderBumperState.bothPressedRatio = gameState.lastBumperState.bothPressedRatio;
 
     // Canvasへのレンダリング
     renderGame(ctx, world, gameState, renderBumperState);

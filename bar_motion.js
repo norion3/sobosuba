@@ -1,9 +1,8 @@
 /**
  * bar_motion.js
- * @version v8.6 (Plan B: All-Size Hop Ceiling Guard & v8.6 Fallback Sync - Phase 3)
+ * @version v8.10 (Bar-Launch Grace Band-Clearance Release Fix - Phase 4)
  * @changes
- *   - getSafeHopMaxUpSpeed() の val < 64 早期リターンを解除し、サイズ拡大後の値 16・32 強ホップも含めて全サイズ共通の数式で天井非激突と予測軌道同期を保証
- *   - v8.6 確定定数に合わせて基準半径フォールバック値を 24.0 → 25.5、FLOAT_BAR.CHANNEL_HALF_HEIGHT フォールバック値を 25 → 26 へ同期
+ *   - updateBarGraceState() の解除条件を「（ゼリー上端 comp.aabb.minY - rA がバー帯下端 FLOAT_BAR.Y + channelHalfH + 2 を離脱 かつ !overlapsAnyFloating）または上限 220ms 経過」へ更新し、隙間 4〜20px からの斜め下ショットでの途中失効を完全解消
  * 
  * 上段フロートバー上の横長カプセル幾何、通常発射／2.5D上段飛び越えホップ発射API、
  * 斜め下ショットすり抜け保護、セーフ・リキャッチ、および上段無重力レール制御を担うモジュール
@@ -311,7 +310,7 @@ export function getSafeHopMaxUpSpeed(jellyComposite) {
 
 /**
  * フロートバー上のゼリーを無重力状態から解除し、現在の移動速度に加算（Additive Momentum）して下段へ発射する
- * 斜め下ショット（useBarGrace = true）時は全 BAR_FLOATING との AABB 離脱まで一時的に隣カプセル衝突を免除する
+ * 斜め下ショット（useBarGrace = true）時はバー帯離脱＆全 BAR_FLOATING との AABB 離脱まで一時的に隣カプセル衝突を免除する
  * @param {Matter.Composite} jellyComposite - 発射するゼリーのコンポジット
  * @param {Object} addVelocity - 加算する発射速度ベクトル {x, y}（そっと落とし時は {x: 0, y: 0}）
  * @param {boolean} [useBarGrace=false] - 斜め下ショット時の隣カプセル角すり抜け保護を有効にするか
@@ -332,7 +331,7 @@ export function launchFloatingJelly(jellyComposite, addVelocity = { x: 0, y: 0 }
     jellyComposite.landedFirmness = 0.0;
     jellyComposite._lastAppliedFirmness = -1;
 
-    // 斜め下ショット限定すり抜け保護（AABB完全離脱で即解除、安全上限220ms）
+    // 斜め下ショット限定すり抜け保護（バー帯離脱＆AABB完全離脱で即解除、安全上限220ms）
     if (useBarGrace) {
         jellyComposite.barGraceActive = true;
         jellyComposite.barGraceStartTime = now;
@@ -456,8 +455,9 @@ export function launchBarHop(jellyComposite, hopVelocity = { x: 0, y: -5.80 }) {
 }
 
 /**
- * 斜め下ショット限定すり抜け保護（barGraceActive）の AABB 完全離脱検知解除
- * 全 BAR_FLOATING ゼリーとの重なりが完全に消えた瞬間、または上限 220ms 経過で通常衝突マスクへ安全復帰する
+ * 斜め下ショット限定すり抜け保護（barGraceActive）のバー帯下端離脱＆AABB完全離脱検知解除
+ * ゼリー上端がバー帯下端（FLOAT_BAR.Y + channelHalfH + 2）を離脱かつ全 BAR_FLOATING との重なりが完全に消えた瞬間、
+ * または上限 220ms 経過で通常衝突マスクへ安全復帰する
  * @param {Matter.Composite} comp
  * @param {Array<Matter.Composite>} composites
  * @param {number} now
@@ -467,27 +467,33 @@ export function updateBarGraceState(comp, composites, now) {
 
     const maxGraceMs = FLOAT_BAR.LAUNCH_BAR_GRACE_MAX_MS || 220;
     const elapsed = now - (comp.barGraceStartTime || now);
+    const channelHalfH = FLOAT_BAR.CHANNEL_HALF_HEIGHT || 26;
+    const barBottomY = FLOAT_BAR.Y + channelHalfH + 2;
 
+    let hasClearedBarBand = false;
     let overlapsAnyFloating = false;
     if (elapsed < maxGraceMs && comp.aabb) {
         const aA = comp.aabb;
         const rA = comp.particleRadius || 4;
-        for (let i = 0; i < composites.length; i++) {
-            const other = composites[i];
-            if (!other || other === comp || other.label !== 'jelly_composite' || !other.isFloating || !other.aabb) {
-                continue;
-            }
-            const aB = other.aabb;
-            const pad = rA + (other.particleRadius || 4) + 2;
-            if (!(aA.maxX + pad < aB.minX || aA.minX - pad > aB.maxX ||
-                  aA.maxY + pad < aB.minY || aA.minY - pad > aB.maxY)) {
-                overlapsAnyFloating = true;
-                break;
+        hasClearedBarBand = (aA.minY - rA) > barBottomY;
+        if (hasClearedBarBand) {
+            for (let i = 0; i < composites.length; i++) {
+                const other = composites[i];
+                if (!other || other === comp || other.label !== 'jelly_composite' || !other.isFloating || !other.aabb) {
+                    continue;
+                }
+                const aB = other.aabb;
+                const pad = rA + (other.particleRadius || 4) + 2;
+                if (!(aA.maxX + pad < aB.minX || aA.minX - pad > aB.maxX ||
+                      aA.maxY + pad < aB.minY || aA.minY - pad > aB.maxY)) {
+                    overlapsAnyFloating = true;
+                    break;
+                }
             }
         }
     }
 
-    if (!overlapsAnyFloating || elapsed >= maxGraceMs) {
+    if ((hasClearedBarBand && !overlapsAnyFloating) || elapsed >= maxGraceMs) {
         comp.barGraceActive = false;
         comp.barGraceStartTime = 0;
         if (!comp.isFloating && !comp.isBarHopping) {
